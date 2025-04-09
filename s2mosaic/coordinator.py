@@ -3,8 +3,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union, overload
 
 import numpy as np
 
-from frequent_coverage import get_frequent_coverage
-from helpers import (
+from .frequent_coverage import get_frequent_coverage
+from .helpers import (
     add_item_info,
     define_dates,
     download_bands_pool,

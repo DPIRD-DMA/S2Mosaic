@@ -263,113 +263,21 @@ def get_valid_mask(bands: np.ndarray, dilation_count: int = 4) -> np.ndarray:
         no_data = scipy.ndimage.binary_dilation(no_data, iterations=dilation_count)
     return ~no_data
 
-
-def save_bands_and_mask_as_geotiffs(
-    input_bands: List[np.ndarray],
-    cloud_mask: np.ndarray,
-    profiles: List[Dict[str, Any]],
-    output_dir: Union[str, Path],
-    scene_id: str = ""
-) -> List[Path]:
-    """
-    Save the input bands and cloud mask as GeoTIFF files.
-    
-    Args:
-        input_bands (List[np.ndarray]): List of band arrays
-        cloud_mask (np.ndarray): Cloud mask array
-        profiles (List[Dict[str, Any]]): Rasterio profiles for the bands
-        output_dir (Union[str, Path]): Directory to save the GeoTIFFs
-        scene_id (str): Optional scene identifier for filename
-        
-    Returns:
-        List[Path]: Paths to the saved GeoTIFF files
-    """
-    import os
-    from pathlib import Path
-    import rasterio as rio
-    
-    # Create output directory if it doesn't exist
-    output_dir = str(output_dir)  # Convert Path to string if necessary
-    os.makedirs(output_dir, exist_ok=True)
-    
-    saved_paths = []
-    
-    # Band names for the filenames
-    band_names = ["B04_red", "B03_green", "B08_nir"]
-    
-    # Save each band as a GeoTIFF
-    for i, (band, profile, band_name) in enumerate(zip(input_bands, profiles, band_names)):
-        # Create a filename
-        if scene_id:
-            filename = f"{scene_id}_{band_name}_20m.tif"
-        else:
-            filename = f"{band_name}_20m.tif"
-        
-        output_path = os.path.join(output_dir, filename)
-        
-        # Prepare the profile for writing
-        write_profile = profile.copy()
-        write_profile.update(
-            dtype=band.dtype,
-            count=1,
-            compress="lzw"
-        )
-        
-        # Write the band to a GeoTIFF
-        with rio.open(output_path, 'w', **write_profile) as dst:
-            dst.write(band.squeeze(), 1)
-        
-        saved_paths.append(Path(output_path))
-    
-    # Save the cloud mask using the profile from the first band
-    if scene_id:
-        mask_filename = f"{scene_id}_cloud_mask_20m.tif"
-    else:
-        mask_filename = "cloud_mask_20m.tif"
-    
-    mask_path = os.path.join(output_dir, mask_filename)
-    
-    # Prepare the profile for the mask
-    mask_profile = profiles[0].copy()
-    mask_profile.update(
-        dtype='uint8',
-        count=1,
-        compress="lzw",
-        nodata=255  # Using 255 as nodata value
-    )
-    
-    # Convert boolean mask to uint8 (0=cloudy, 1=clear)
-    mask_uint8 = cloud_mask.astype('uint8')
-    
-    # Write the mask to a GeoTIFF
-    with rio.open(mask_path, 'w', **mask_profile) as dst:
-        dst.write(mask_uint8, 1)
-    
-    saved_paths.append(Path(mask_path))
-    
-    return saved_paths
-
-
 def ocm_cloud_mask(
     item: pystac.Item,
     batch_size: int = 6,
     inference_dtype: str = "bf16",
     debug_cache: bool = False,
     max_dl_workers: int = 4,
-    save_geotiffs: bool = True
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Generate cloud masks for a Sentinel-2 scene using the OmniCloudMask model.
-    Optionally visualizes the input data and resulting mask and saves as GeoTIFFs.
-    
     Args:
         item (pystac.Item): STAC item representing a Sentinel-2 scene
         batch_size (int): Batch size for model inference
         inference_dtype (str): Data type for inference ("bf16" or "fp32")
         debug_cache (bool): Whether to cache downloads
         max_dl_workers (int): Maximum number of parallel download threads
-        save_geotiffs (bool): Whether to save bands and mask as GeoTIFFs
-        output_dir (Optional[Union[str, Path]]): Directory to save GeoTIFFs and plots
         
     Returns:
         Tuple[np.ndarray, np.ndarray]: 
@@ -378,10 +286,6 @@ def ocm_cloud_mask(
     """
     # Extract scene ID from item for filenames
     scene_id = item.id if hasattr(item, 'id') else ""
-    
-    # Use the specified output directory or fall back to default
-    output_dir = "C:/Users/Franz/Downloads/Neuer_test"
-    
     
     # Download Red, Green and NIR bands at 20m resolution for cloud masking
     required_bands = ["B04", "B03", "B08"]  # Red, Green, NIR
@@ -413,19 +317,6 @@ def ocm_cloud_mask(
     
     # Get mask of valid (non-zero) pixels
     valid_mask = get_valid_mask(ocm_input)
-    
-    # Save bands and mask as GeoTIFFs if requested
-    if save_geotiffs:
-        saved_paths = save_bands_and_mask_as_geotiffs(
-            input_bands=bands,
-            cloud_mask=cloud_mask,
-            profiles=profiles,
-            output_dir=output_dir,
-            scene_id=scene_id
-        )
-        print(f"Saved GeoTIFFs to: {output_dir}")
-        for path in saved_paths:
-            print(f"  - {path.name}")
     
     # Upsample masks from 20m to 10m resolution for final output
     cloud_mask_10m = cloud_mask.repeat(2, axis=0).repeat(2, axis=1)
