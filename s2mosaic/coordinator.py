@@ -3,8 +3,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union, overload
 
 import numpy as np
 
-from .frequent_coverage import get_frequent_coverage
-from .helpers import (
+from frequent_coverage import get_frequent_coverage
+from helpers import (
     add_item_info,
     define_dates,
     download_bands_pool,
@@ -32,6 +32,7 @@ def mosaic(
     duration_days: int = 0,
     required_bands: List[str] = ["B04", "B03", "B02", "B08"],
     no_data_threshold: Optional[float] = 0.01,
+    max_cloud_percentage: float = 20.0,
     overwrite: bool = True,
     ocm_batch_size: int = 1,
     ocm_inference_dtype: str = "bf16",
@@ -54,6 +55,7 @@ def mosaic(
     duration_days: int = 0,
     required_bands: List[str] = ["B04", "B03", "B02", "B08"],
     no_data_threshold: Optional[float] = 0.01,
+    max_cloud_percentage: float = 20.0,
     overwrite: bool = True,
     ocm_batch_size: int = 1,
     ocm_inference_dtype: str = "bf16",
@@ -75,6 +77,7 @@ def mosaic(
     duration_days: int = 0,
     required_bands: List[str] = ["B04", "B03", "B02", "B08"],
     no_data_threshold: Union[float, None] = 0.01,
+    max_cloud_percentage: float = 20.0,
     overwrite: bool = True,
     ocm_batch_size: int = 1,
     ocm_inference_dtype: str = "bf16",
@@ -102,6 +105,7 @@ def mosaic(
         required_bands (List[str], optional): List of required spectral bands.
             Defaults to ["B04", "B03", "B02", "B08"] (Red, Green, Blue, NIR).
         no_data_threshold (float, optional): Threshold for no data values. Defaults to 0.01.
+        max_cloud_percentage (float, optional): Maximum cloud percentage to include. Defaults to 20.0.
         overwrite (bool, optional): Whether to overwrite existing output files. Defaults to True.
         ocm_batch_size (int, optional): Batch size for OCM inference. Defaults to 1.
         ocm_inference_dtype (str, optional): Data type for OCM inference. Defaults to "bf16".
@@ -119,6 +123,7 @@ def mosaic(
         - The function uses the STAC API to search for Sentinel-2 scenes.
         - If 'visual' is included in required_bands, it will be replaced with 'Red', 'Green', 'Blue' in the output.
         - The time range for scene selection is inclusive of the start date and exclusive of the end date.
+        - Scenes with cloud cover exceeding max_cloud_percentage will be filtered out.
     """
     if sort_function:
         sort_method = "custom"
@@ -171,7 +176,13 @@ def mosaic(
     # for scenes with only partial S2 coverage work out which pixels are covered
     coverage_mask = get_frequent_coverage(scene_bounds=bounds, scenes=items)
 
-    items_with_orbits = add_item_info(items)
+    # Apply cloud percentage filter in add_item_info
+    items_with_orbits = add_item_info(items, max_cloud_percentage=max_cloud_percentage)
+    
+    if len(items_with_orbits) == 0:
+        raise Exception(
+            f"No scenes found with cloud cover less than {max_cloud_percentage}% for {grid_id} between {start_date.strftime('%Y-%m-%d')} and {end_date.strftime('%Y-%m-%d')}"
+        )
 
     if not sort_function:
         sorted_items = sort_items(items=items_with_orbits, sort_method=sort_method)
