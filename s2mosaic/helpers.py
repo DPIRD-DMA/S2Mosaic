@@ -263,7 +263,6 @@ def get_valid_mask(bands: np.ndarray, dilation_count: int = 4) -> np.ndarray:
         no_data = scipy.ndimage.binary_dilation(no_data, iterations=dilation_count)
     return ~no_data
 
-
 def ocm_cloud_mask(
     item: pystac.Item,
     batch_size: int = 6,
@@ -271,33 +270,60 @@ def ocm_cloud_mask(
     debug_cache: bool = False,
     max_dl_workers: int = 4,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    # download RG+NIR bands at 20m resolution for cloud masking
-    required_bands = ["B04", "B03", "B8A"]
+    """
+    Generate cloud masks for a Sentinel-2 scene using the OmniCloudMask model.
+    Args:
+        item (pystac.Item): STAC item representing a Sentinel-2 scene
+        batch_size (int): Batch size for model inference
+        inference_dtype (str): Data type for inference ("bf16" or "fp32")
+        debug_cache (bool): Whether to cache downloads
+        max_dl_workers (int): Maximum number of parallel download threads
+        
+    Returns:
+        Tuple[np.ndarray, np.ndarray]: 
+            - Cloud mask (True = clear, False = cloudy)
+            - Valid data mask (True = valid, False = no data)
+    """
+    # Extract scene ID from item for filenames
+    scene_id = item.id if hasattr(item, 'id') else ""
+    
+    # Download Red, Green and NIR bands at 20m resolution for cloud masking
+    required_bands = ["B04", "B03", "B08"]  # Red, Green, NIR
     get_band_20m = partial(get_full_band, res=20, debug_cache=debug_cache)
 
+    # Get URLs for each band
     hrefs = [item.assets[band].href for band in required_bands]
 
+    # Download bands in parallel
     with ThreadPoolExecutor(max_workers=max_dl_workers) as executor:
         bands_and_profiles = list(executor.map(get_band_20m, hrefs))
 
     # Separate bands and profiles
     bands, profiles = zip(*bands_and_profiles)
+    
+    # Stack bands for model input (omnicloudmask expects RGB+NIR stack)
     ocm_input = np.vstack(bands)
 
-    # no_data_mask = get_no_data_mask()
-    mask = (
+    # Run cloud mask prediction
+    # Output value 0 = clear pixel, 1 = cloud
+    cloud_mask = (
         predict_from_array(
             input_array=ocm_input,
             batch_size=batch_size,
             inference_dtype=inference_dtype,
         )[0]
-        == 0
+        == 0  # Convert to boolean mask where True = clear
     )
-    # interpolate mask back to 10m
-    mask = mask.repeat(2, axis=0).repeat(2, axis=1)
+    
+    # Get mask of valid (non-zero) pixels
     valid_mask = get_valid_mask(ocm_input)
-    valid_mask = valid_mask.repeat(2, axis=0).repeat(2, axis=1)
-    return mask, valid_mask
+    
+    # Upsample masks from 20m to 10m resolution for final output
+    cloud_mask_10m = cloud_mask.repeat(2, axis=0).repeat(2, axis=1)
+    valid_mask_10m = valid_mask.repeat(2, axis=0).repeat(2, axis=1)
+    
+    return cloud_mask_10m, valid_mask_10m
+
 
 
 def format_progress(current, total, no_data_pct):
@@ -324,17 +350,37 @@ def normalise_for_output(
     return mosaic
 
 
-def add_item_info(items: ItemCollection) -> DataFrame:
-    """Split items by orbit and sort by no_data"""
-
+def add_item_info(items: ItemCollection, max_cloud_percentage: float = 20.0) -> DataFrame:
+    """
+    Split items by orbit and sort by no_data
+    
+    Args:
+        items (ItemCollection): Collection of STAC items
+        max_cloud_percentage (float): Maximum cloud percentage to include (default: 20.0)
+        
+    Returns:
+        DataFrame: DataFrame with filtered items and their metadata
+    """
     items_list = []
+    filtered_count = 0
+    total_count = 0
+    
     for item in items:
+        total_count += 1
         nodata = item.properties["s2:nodata_pixel_percentage"]
         data_pct = 100 - nodata
 
+        # Get cloud percentage
         cloud = item.properties["s2:high_proba_clouds_percentage"]
         shadow = item.properties["s2:cloud_shadow_percentage"]
-        good_data_pct = data_pct * (1 - (cloud + shadow) / 100)
+        cloud_total = cloud + shadow
+        
+        # Skip scenes with too many clouds
+        if cloud_total > max_cloud_percentage:
+            filtered_count += 1
+            continue
+            
+        good_data_pct = data_pct * (1 - cloud_total / 100)
         capture_date = item.datetime
 
         items_list.append(
@@ -343,10 +389,12 @@ def add_item_info(items: ItemCollection) -> DataFrame:
                 "orbit": item.properties["sat:relative_orbit"],
                 "good_data_pct": good_data_pct,
                 "datetime": capture_date,
+                "cloud_percentage": cloud_total,
             }
         )
 
     items_df = pd.DataFrame(items_list)
+    logging.info(f"Filtered out {filtered_count} of {total_count} scenes due to cloud cover > {max_cloud_percentage}%")
     return items_df
 
 
@@ -478,6 +526,7 @@ def validate_inputs(
     no_data_threshold: Union[float, None],
     required_bands: List[str],
     grid_id: str,
+    max_cloud_percentage: float = 20.0,
 ) -> None:
     if not grid_id.isalnum() or not grid_id.isupper():
         raise ValueError(
@@ -497,6 +546,10 @@ def validate_inputs(
             raise ValueError(
                 f"No data threshold must be between 0 and 1 or None, got {no_data_threshold}"
             )
+    if not (0.0 <= max_cloud_percentage <= 100.0):
+        raise ValueError(
+            f"Maximum cloud percentage must be between 0 and 100, got {max_cloud_percentage}"
+        )
     valid_bands = [
         "AOT",
         "SCL",
