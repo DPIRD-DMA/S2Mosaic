@@ -1,6 +1,7 @@
+import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, overload
-import logging
+
 import numpy as np
 
 from .frequent_coverage import get_frequent_coverage
@@ -30,13 +31,13 @@ def mosaic(
     duration_years: int = 0,
     duration_months: int = 0,
     duration_days: int = 0,
-    required_bands: List[str] = ["B04", "B03", "B02", "B08"],
+    required_bands: Optional[List[str]] = None,
     no_data_threshold: Optional[float] = 0.01,
     overwrite: bool = True,
     ocm_batch_size: int = 1,
     ocm_inference_dtype: str = "bf16",
     debug_cache: bool = False,
-    additional_query: Dict[str, Any] = {"eo:cloud_cover": {"lt": 100}},
+    additional_query: Optional[Dict[str, Any]] = None,
     percentile_value: Optional[float] = None,
     ignore_duplicate_items: bool = True,
 ) -> Tuple[np.ndarray, Dict[str, Any]]: ...
@@ -55,13 +56,13 @@ def mosaic(
     duration_years: int = 0,
     duration_months: int = 0,
     duration_days: int = 0,
-    required_bands: List[str] = ["B04", "B03", "B02", "B08"],
+    required_bands: Optional[List[str]] = None,
     no_data_threshold: Optional[float] = 0.01,
     overwrite: bool = True,
     ocm_batch_size: int = 1,
     ocm_inference_dtype: str = "bf16",
     debug_cache: bool = False,
-    additional_query: Dict[str, Any] = {"eo:cloud_cover": {"lt": 100}},
+    additional_query: Optional[Dict[str, Any]] = None,
     percentile_value: Optional[float] = None,
     ignore_duplicate_items: bool = True,
 ) -> Path: ...
@@ -79,13 +80,13 @@ def mosaic(
     duration_years: int = 0,
     duration_months: int = 0,
     duration_days: int = 0,
-    required_bands: List[str] = ["B04", "B03", "B02", "B08"],
+    required_bands: Optional[List[str]] = None,
     no_data_threshold: Union[float, None] = 0.01,
     overwrite: bool = True,
     ocm_batch_size: int = 1,
     ocm_inference_dtype: str = "bf16",
     debug_cache: bool = False,
-    additional_query: Dict[str, Any] = {"eo:cloud_cover": {"lt": 100}},
+    additional_query: Optional[Dict[str, Any]] = None,
     percentile_value: Optional[float] = None,
     ignore_duplicate_items: bool = True,
 ) -> Union[Tuple[np.ndarray, Dict[str, Any]], Path]:
@@ -134,11 +135,18 @@ def mosaic(
         - The function uses the STAC API to search for Sentinel-2 scenes.
         - If 'visual' is included in required_bands, it will be replaced with 'Red', 'Green', 'Blue' in the output.
         - The time range for scene selection is inclusive of the start date and exclusive of the end date.
-    """
+    """  # noqa: E501
+    if required_bands is None:
+        required_bands = ["B04", "B03", "B02", "B08"]
+
+    if additional_query is None:
+        additional_query = {"eo:cloud_cover": {"lt": 100}}
+
     if sort_function:
         sort_method = "custom"
 
-    # If mosaic method is passed as "median", it is converted to "percentile" with a value of 50.0
+    # If mosaic method is passed as "median",
+    # it is converted to "percentile" with a value of 50.0
     if mosaic_method == "median":
         if percentile_value is not None:
             raise ValueError(
@@ -147,8 +155,10 @@ def mosaic(
         mosaic_method = "percentile"
         percentile_value = 50.0
     logger.info(
-        f"Creating mosaic for grid {grid_id} from {start_year}-{start_month:02d}-{start_day:02d} "
-        f"to {duration_years} years, {duration_months} months, and {duration_days} days later "
+        f"""Creating mosaic for grid {grid_id} 
+        from {start_year}-{start_month:02d}-{start_day:02d}"""
+        f"""to {duration_years} years, {duration_months} months, 
+        and {duration_days} days later"""
         f"using {mosaic_method} method with bands {required_bands}."
     )
     validate_inputs(
@@ -201,7 +211,8 @@ def mosaic(
     logger.info(f"Found {len(items)} scenes for grid {grid_id}.")
     if len(items) == 0:
         raise Exception(
-            f"No scenes found for {grid_id} between {start_date.strftime('%Y-%m-%d')} and {end_date.strftime('%Y-%m-%d')}"
+            f"""No scenes found for {grid_id} between {start_date.strftime("%Y-%m-%d")}
+            and {end_date.strftime("%Y-%m-%d")}"""
         )
 
     # for scenes with only partial S2 coverage work out which pixels are covered
