@@ -7,7 +7,6 @@ import pystac
 import scipy
 from omnicloudmask import predict_from_array
 
-
 from .data_reader import get_full_band
 
 
@@ -37,7 +36,7 @@ def get_masks(
         bands_and_profiles = list(executor.map(get_band_20m, hrefs))
 
     # Separate bands and profiles
-    bands, _ = zip(*bands_and_profiles)
+    bands, _ = zip(*bands_and_profiles, strict=False)
     ocm_input = np.vstack(bands)
 
     mask = (

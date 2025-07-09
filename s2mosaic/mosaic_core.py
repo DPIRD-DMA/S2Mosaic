@@ -6,15 +6,13 @@ from typing import Any, Dict, List, Tuple, Union
 
 import numpy as np
 import pandas as pd
-
 import scipy
-
 from tqdm.auto import tqdm
 
 from .data_reader import get_band_with_mask
-from .mosaic_utils import calculate_percentile_mosaic
+from .helpers import MOSAIC_FIRST, MOSAIC_MEAN, MOSAIC_PERCENTILE, format_progress
 from .masking import get_masks
-from .helpers import format_progress, MOSAIC_FIRST, MOSAIC_PERCENTILE, MOSAIC_MEAN
+from .mosaic_utils import calculate_percentile_mosaic
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +70,9 @@ def download_bands_pool(
 
         combo_mask = (non_cloud_pixels * valid_pixels).astype(bool)
 
-        # if method is first, only download valid, non cloudy pixels that have not been filled, else download all valid non cloudy pixels
+        # if method is first, only download valid,
+        # non cloudy pixels that have not been filled,
+        # else download all valid non cloudy pixels
         if mosaic_method == MOSAIC_FIRST:
             combo_mask = (good_pixel_tracker == 0) & combo_mask
 
@@ -80,7 +80,7 @@ def download_bands_pool(
 
         hrefs_and_indexes = [
             (item.assets[band].href, band_index)
-            for band, band_index in zip(required_bands, band_indexes)
+            for band, band_index in zip(required_bands, band_indexes, strict=False)
         ]
 
         get_band_with_mask_partial = partial(
@@ -105,6 +105,7 @@ def download_bands_pool(
                     order=0,
                 )
             )
+            last_profile = profile
 
         scene_data = np.array(bands)
 
@@ -166,4 +167,4 @@ def download_bands_pool(
     else:
         mosaic = np.clip(mosaic, 0, 65535).astype(np.int16)
 
-    return mosaic, profile
+    return mosaic, last_profile

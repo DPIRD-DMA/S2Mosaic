@@ -1,16 +1,14 @@
 import logging
 from datetime import date, datetime
+from importlib import resources
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import geopandas as gpd
 import numpy as np
-
 import rasterio as rio
-from shapely.geometry.polygon import Polygon
 from dateutil.relativedelta import relativedelta
-from pystac.item_collection import ItemCollection
-from pystac import Item
+from shapely.geometry.polygon import Polygon
 
 logger = logging.getLogger(__name__)
 
@@ -28,42 +26,38 @@ VALID_MOSAIC_METHODS = {MOSAIC_MEAN, MOSAIC_FIRST, MOSAIC_PERCENTILE}
 
 
 def format_progress(current, total, no_data_pct):
-    return f"Scenes: {current}/{total} | Mosaic currently contains {no_data_pct:.2f}% no data pixels"
+    return f"Scenes: {current}/{total} | Mosaic currently contains {no_data_pct:.2f}% no data pixels"  # noqa: E501
 
 
 def get_extent_from_grid_id(grid_id: str) -> Polygon:
-    S2_grid_file = Path(__file__).resolve().parent / "S2_grid/sentinel_2_index.gpkg"
+    with resources.as_file(
+        resources.files("s2mosaic") / "sentinel_2_index.gpkg"
+    ) as path:
+        S2_grid_file = Path(path)
 
-    assert S2_grid_file.exists(), (
-        f"S2 grid file not found at {S2_grid_file}. "
-        "This suggests the S2Mosaic package was not installed correctly."
-        "Please reinstall the package"
-    )
-
-    # Use SQLite query to filter by Name directly
-    query = f"SELECT * FROM sentinel_2_index WHERE Name = '{grid_id}'"
+    assert S2_grid_file.exists(), f"""S2 grid file not found at {S2_grid_file}. 
+        This suggests the S2Mosaic package was not installed correctly.
+        Please reinstall the package"""
 
     try:
-        # Read only the matching row directly from the gpkg
-        grid_entry = gpd.read_file(S2_grid_file, sql=query)
+        all_grids = gpd.read_file(S2_grid_file)
+        grid_entry = all_grids[all_grids["Name"] == grid_id]
 
         return_count = grid_entry.shape[0]
 
         if return_count == 0:
             raise ValueError(
-                f"Grid {grid_id} not found. It should be in the format '50HMH'. "
-                "For more info on the S2 grid system visit https://sentiwiki.copernicus.eu/web/s2-products"
-                f"View a map of the S2 grid at https://dpird-dma.github.io/Sentinel-2-grid-explorer/"
-                f"Query: {query}"
-                f"File: {S2_grid_file}"
-                f"Gdf: {gpd.read_file(S2_grid_file).head(5)}"
+                f"""Grid {grid_id} not found. It should be in the format '50HMH'. 
+                for more info on the S2 grid system visit https://sentiwiki.copernicus.eu/web/s2-products
+                View a map of the S2 grid at https://dpird-dma.github.io/Sentinel-2-grid-explorer/
+                File: {S2_grid_file}
+                Gdf: {all_grids.head(5)}"""
             )
         assert return_count == 1, (
-            f"Multiple entries found for grid {grid_id}. "
-            "This should not happen, please check the S2 grid file."
-            f"Query: {query}"
+            f"""Multiple entries found for grid {grid_id}. 
+            This should not happen, please check the S2 grid file."""
             f"File: {S2_grid_file}"
-            f"Gdf: {gpd.read_file(S2_grid_file).head(5)}"
+            f"Gdf: {all_grids.head(5)}"
         )
 
         return grid_entry.iloc[0].geometry
@@ -71,64 +65,6 @@ def get_extent_from_grid_id(grid_id: str) -> Polygon:
     except Exception as e:
         logger.error(f"Error reading grid entry: {e}")
         raise
-
-
-def filter_latest_processing_baselines(
-    items: Union[ItemCollection, List[Item]],
-) -> List[Item]:
-    """
-    Filter STAC items to keep only the latest processing baseline for each unique acquisition.
-
-    Uses the s2:processing_baseline property to identify and filter duplicates.
-
-    Args:
-        items: ItemCollection or list of STAC items from search results
-
-    Returns:
-        List of filtered STAC items with only the latest processing baselines
-    """
-    if len(items) == 0:
-        return items
-
-    # Group items by acquisition (same datetime + tile)
-    acquisition_groups: Dict[str, List[Dict[str, Any]]] = {}
-
-    for item in items:
-        # Create unique key for this acquisition
-        datetime_str: str = (
-            item.datetime.strftime("%Y%m%dT%H%M%S") if item.datetime else "unknown"
-        )
-        tile_id: str = item.properties.get("s2:mgrs_tile", "unknown")
-        acquisition_key: str = f"{datetime_str}_{tile_id}"
-
-        # Get processing baseline from properties
-        baseline_str: str = item.properties.get("s2:processing_baseline", "0.00")
-        # Convert to number for comparison (e.g., '05.11' -> 5.11)
-        baseline_num: float = float(baseline_str)
-
-        if acquisition_key not in acquisition_groups:
-            acquisition_groups[acquisition_key] = []
-
-        acquisition_groups[acquisition_key].append(
-            {"item": item, "baseline": baseline_str, "baseline_num": baseline_num}
-        )
-
-    # Keep only the latest baseline for each acquisition
-    filtered_items: List[Item] = []
-    for acquisition_key, group in acquisition_groups.items():
-        if len(group) == 1:
-            # No duplicates
-            filtered_items.append(group[0]["item"])
-        else:
-            # Keep the highest baseline number
-            latest = max(group, key=lambda x: x["baseline_num"])
-            filtered_items.append(latest["item"])
-            print(
-                f"Filtered {acquisition_key}: kept {latest['baseline']}, "
-                f"removed {[x['baseline'] for x in group if x != latest]}"
-            )
-
-    return filtered_items
 
 
 def define_dates(
@@ -156,8 +92,8 @@ def validate_inputs(
 ) -> None:
     if not grid_id.isalnum() or not grid_id.isupper():
         raise ValueError(
-            f"Grid {grid_id} is invalid. It should be in the format '50HMH'. "
-            "For more info on the S2 grid system visit https://sentiwiki.copernicus.eu/web/s2-products"
+            f"""Grid {grid_id} is invalid. It should be in the format '50HMH'. 
+            For more info on the S2 grid system visit https://sentiwiki.copernicus.eu/web/s2-products"""
         )
     if sort_method not in VALID_SORT_METHODS:
         raise ValueError(
@@ -165,12 +101,13 @@ def validate_inputs(
         )
     if mosaic_method not in VALID_MOSAIC_METHODS:
         raise ValueError(
-            f"Invalid mosaic method: {mosaic_method}. Must be one of {VALID_MOSAIC_METHODS}"
+            f"Invalid mosaic method: {mosaic_method}. Must be of {VALID_MOSAIC_METHODS}"
         )
     if no_data_threshold is not None:
         if not (0.0 <= no_data_threshold <= 1.0):
             raise ValueError(
-                f"No data threshold must be between 0 and 1 or None, got {no_data_threshold}"
+                f"""No data threshold must be between 0 and 1 or None, 
+                got {no_data_threshold}"""
             )
     valid_bands = [
         "AOT",
@@ -199,7 +136,8 @@ def validate_inputs(
     if mosaic_method != MOSAIC_PERCENTILE:
         if percentile_value is not None:
             raise ValueError(
-                f"percentile_value is only valid for percentile mosaic method, got {percentile_value}"
+                f"""percentile_value is only valid for percentile mosaic method, 
+                got {percentile_value}"""
             )
 
     if mosaic_method == MOSAIC_PERCENTILE:

@@ -1,13 +1,13 @@
+import logging
 import pickle
 from pathlib import Path
 from typing import Any, Dict, Tuple
-import logging
 
 import numpy as np
 import planetary_computer
 import rasterio as rio
-from rasterio.windows import Window
 import scipy
+from rasterio.windows import Window
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ def read_in_chunks(
                 mask_chunk = mask[row : row + chunk_height, col : col + chunk_width]
 
                 if np.any(mask_chunk):
-                    window = Window(col, row, chunk_width, chunk_height)
+                    window = Window(col, row, chunk_width, chunk_height)  # type: ignore
                     data_chunk = src.read(index, window=window)
 
                     masked_data = data_chunk * mask_chunk
@@ -95,7 +95,9 @@ def get_band_with_mask(
             )
         else:
             logger.error(f"All retry attempts failed for {href}")
-            raise Exception(f"Failed to open {href} after {attempt + 1} attempts")
+            raise Exception(
+                f"Failed to open {href} after {attempt + 1} attempts"
+            ) from None
 
 
 def get_full_band(
@@ -147,4 +149,6 @@ def get_full_band(
             )
         else:
             logger.error(f"All retry attempts failed for {href}")
-            raise Exception(f"Failed to open {href} after {attempt + 1} attempts")
+            raise Exception(
+                f"Failed to open {href} after {attempt + 1} attempts"
+            ) from None

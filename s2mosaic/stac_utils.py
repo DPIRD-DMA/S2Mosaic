@@ -1,17 +1,16 @@
 import logging
 from datetime import date
-from typing import Any, Dict, List, Union
-
+from typing import Any, Dict, List
 
 import pandas as pd
 import pystac_client
 import shapely
-from shapely.geometry.polygon import Polygon
 from pandas import DataFrame
+from pystac import Item
 from pystac.item_collection import ItemCollection
 from pystac_client.stac_api_io import StacApiIO
+from shapely.geometry.polygon import Polygon
 from urllib3 import Retry
-from pystac import Item
 
 from .helpers import SORT_NEWEST, SORT_OLDEST, SORT_VALID_DATA
 
@@ -64,7 +63,8 @@ def search_for_items(
     }
 
     logger.info(
-        f"Searching for items in grid {grid_id} from {start_date} to {end_date} with query: {query}"
+        f"""Searching for items in grid {grid_id} from 
+        {start_date} to {end_date} with query: {query}"""
     )
 
     retry = Retry(
@@ -121,10 +121,11 @@ def sort_items(items: DataFrame, sort_method: str) -> DataFrame:
 
 
 def filter_latest_processing_baselines(
-    items: Union[ItemCollection, List[Item]],
-) -> List[Item]:
+    items: ItemCollection,
+) -> ItemCollection:
     """
-    Filter STAC items to keep only the latest processing baseline for each unique acquisition.
+    Filter STAC items to keep only the latest processing
+    baseline for each unique acquisition.
     """
     if len(items) == 0:
         return items
@@ -167,4 +168,4 @@ def filter_latest_processing_baselines(
                 f"removed {[x['baseline'] for x in group if x != latest]}"
             )
 
-    return filtered_items
+    return ItemCollection(filtered_items)

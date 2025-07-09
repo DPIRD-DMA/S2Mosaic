@@ -2,8 +2,9 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import List, Tuple
-from numbagg import nanquantile
+
 import numpy as np
+from numbagg import nanquantile
 
 logger = logging.getLogger(__name__)
 

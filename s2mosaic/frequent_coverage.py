@@ -7,10 +7,10 @@ import scipy
 from geopandas import GeoDataFrame
 from pystac.item import Item
 from pystac.item_collection import ItemCollection
+from rasterio.enums import MergeAlg
 from rasterio.features import rasterize
 from rasterio.transform import Affine
 from shapely.geometry import Polygon
-from rasterio.enums import MergeAlg
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ def get_frequent_coverage(
     max_count = raster.max()
     logger.info(f"Max coverage count: {max_count}")
 
-    # Any area that is covered by more than 10% of the scenes is considered to be covered
+    # Any area that is covered by more than 10% of the scenes is considered covered
     dynamic_threshold = max_count * coverage_threshold_pct
     logger.info(f"Dynamic threshold: {dynamic_threshold}")
 
