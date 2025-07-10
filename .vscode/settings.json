@@ -1,14 +1,22 @@
 {
     "cSpell.words": [
         "dateutil",
+        "figsize",
+        "forcelist",
         "gpkg",
+        "mgrs",
         "nanquantile",
         "ndarray",
         "ndimage",
         "normalised",
         "numbagg",
         "omnicloudmask",
+        "proba",
         "pystac",
-        "relativedelta"
+        "pytest",
+        "relativedelta",
+        "setuptools",
+        "stac",
+        "xticks"
     ]
 }

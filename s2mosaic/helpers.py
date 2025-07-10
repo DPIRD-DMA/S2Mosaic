@@ -35,9 +35,11 @@ def get_extent_from_grid_id(grid_id: str) -> Polygon:
     ) as path:
         S2_grid_file = Path(path)
 
-    assert S2_grid_file.exists(), f"""S2 grid file not found at {S2_grid_file}. 
-        This suggests the S2Mosaic package was not installed correctly.
-        Please reinstall the package"""
+    assert S2_grid_file.exists(), (
+        f"S2 grid file not found at {S2_grid_file}. "
+        "This suggests the S2Mosaic package was not installed correctly. "
+        "Please reinstall the package."
+    )
 
     try:
         all_grids = gpd.read_file(S2_grid_file)

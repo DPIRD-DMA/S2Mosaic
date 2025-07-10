@@ -155,12 +155,13 @@ def mosaic(
         mosaic_method = "percentile"
         percentile_value = 50.0
     logger.info(
-        f"""Creating mosaic for grid {grid_id} 
-        from {start_year}-{start_month:02d}-{start_day:02d}"""
-        f"""to {duration_years} years, {duration_months} months, 
-        and {duration_days} days later"""
-        f"using {mosaic_method} method with bands {required_bands}."
+        f"Creating mosaic for grid {grid_id} "
+        f"from {start_year}-{start_month:02d}-{start_day:02d} "
+        f"to {duration_years} years, {duration_months} months, "
+        f"{duration_days} days later using {mosaic_method} method "
+        f"with bands {required_bands}."
     )
+
     validate_inputs(
         sort_method=sort_method,
         mosaic_method=mosaic_method,
@@ -211,8 +212,8 @@ def mosaic(
     logger.info(f"Found {len(items)} scenes for grid {grid_id}.")
     if len(items) == 0:
         raise Exception(
-            f"""No scenes found for {grid_id} between {start_date.strftime("%Y-%m-%d")}
-            and {end_date.strftime("%Y-%m-%d")}"""
+            f"No scenes found for {grid_id} between {start_date.strftime('%Y-%m-%d')} "
+            f"and {end_date.strftime('%Y-%m-%d')}"
         )
 
     # for scenes with only partial S2 coverage work out which pixels are covered
