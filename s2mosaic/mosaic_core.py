@@ -10,7 +10,15 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 from .data_reader import get_band_with_mask
-from .helpers import MOSAIC_FIRST, MOSAIC_MEAN, MOSAIC_PERCENTILE, format_progress
+from .helpers import (
+    MOSAIC_FIRST,
+    MOSAIC_MEAN,
+    MOSAIC_PERCENTILE,
+    format_progress,
+    get_rasterio_resampling,
+    pick_ocm_resolution,
+    progress_disabled,
+)
 from .masking import get_masks
 from .mosaic_utils import calculate_percentile_mosaic
 
@@ -28,8 +36,13 @@ def download_bands_pool(
     debug_cache: bool = False,
     max_dl_workers: int = 4,
     percentile_value: float | None = 50.0,
+    s2_scene_size: int = 10980,
+    resampling_method: str = "nearest",
+    resolution: int = 10,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
-    s2_scene_size = 10980
+    rio_resampling = get_rasterio_resampling(resampling_method)
+    ocm_resolution = pick_ocm_resolution(resolution)
+    logger.info(f"OCM resolution: {ocm_resolution}m")
     possible_pixel_count = coverage_mask.sum()
 
     logger.info(f"Possible pixel count: {possible_pixel_count}")
@@ -43,6 +56,7 @@ def download_bands_pool(
         band_count = len(required_bands)
         band_indexes = [1] * len(required_bands)
 
+    mosaic: np.ndarray
     if mosaic_method == MOSAIC_PERCENTILE:
         # For percentile, we need to store all values for each pixel
         all_scene_data = []
@@ -57,6 +71,7 @@ def download_bands_pool(
         desc=format_progress(0, len(sorted_scenes), 100.0),
         leave=False,
         bar_format="{desc}",
+        disable=progress_disabled(),
     )
 
     for index, item in enumerate(sorted_scenes["item"].tolist()):
@@ -66,6 +81,8 @@ def download_bands_pool(
             inference_dtype=ocm_inference_dtype,
             debug_cache=debug_cache,
             max_dl_workers=max_dl_workers,
+            target_size=s2_scene_size,
+            ocm_resolution=ocm_resolution,
         )
 
         combo_mask = (non_cloud_pixels * valid_pixels).astype(bool)
@@ -86,6 +103,8 @@ def download_bands_pool(
         get_band_with_mask_partial = partial(
             get_band_with_mask,
             mask=combo_mask,
+            target_size=s2_scene_size,
+            resampling=rio_resampling,
             debug_cache=debug_cache,
             mosaic_method=mosaic_method,
         )

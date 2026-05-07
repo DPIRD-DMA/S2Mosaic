@@ -16,6 +16,7 @@ dependencies = [
     "opencv-python>=4.8.0",
     "planetary-computer>=1.0.0",
     "pystac-client>=0.8.6",
+    "stackstac>=0.5.1",
 ]
 license = "MIT"
 readme = {file = "README.md", content-type = "text/markdown"}
@@ -33,6 +34,9 @@ s2mosaic = ["sentinel_2_index.gpkg"]
 [dependency-groups]
 dev = [
     "jupyter>=1.1.1",
+    "matplotlib>=3.10.9",
+    "mypy>=1.19",
+    "pre-commit>=4.0",
     "pytest>=8.4.0",
     "ruff>=0.12.2",
 ]
@@ -40,8 +44,15 @@ dev = [
 [tool.setuptools]
 packages = ["s2mosaic"]
 
-[tool.ruff]
+[tool.mypy]
+ignore_missing_imports = true
+
+[tool.ruff.lint]
 select = ["E", "F", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]
+"*.ipynb" = ["E402"]
 
 [tool.pytest.ini_options]
 markers = [

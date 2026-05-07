@@ -142,8 +142,18 @@ class TestMosaicValidInputs:
             ["B04", "B03", "B02", "B08"],
             ["visual"],
             [
-                "B01", "B02", "B03", "B04", "B05", "B06", "B07",
-                "B08", "B8A", "B09", "B11", "B12",
+                "B01",
+                "B02",
+                "B03",
+                "B04",
+                "B05",
+                "B06",
+                "B07",
+                "B08",
+                "B8A",
+                "B09",
+                "B11",
+                "B12",
             ],
             ["AOT", "SCL", "WVP"],
         ],
@@ -392,9 +402,7 @@ class TestMosaicEndToEnd:
         array, profile = result
         assert isinstance(array, np.ndarray)
 
-    @pytest.mark.parametrize(
-        "start_month, cloud_cover_lt", [(1, 50), (6, 20), (6, 10)]
-    )
+    @pytest.mark.parametrize("start_month, cloud_cover_lt", [(1, 50), (6, 20), (6, 10)])
     def test_mosaic_different_cloud_cover_thresholds(self, start_month, cloud_cover_lt):
         """Test mosaic with different cloud cover thresholds"""
         result = mosaic(
@@ -498,6 +506,265 @@ class TestMosaicFileNaming:
         expected_pattern = "50HMH_2022-12-15_to_2023-01-15_newest_first_visual.tif"
 
         assert result.name == expected_pattern
+
+
+@pytest.mark.slow
+class TestMosaicBoundsEndToEnd:
+    """End-to-end coverage of bounds-mode parameter combinations.
+
+    These hit the network (PC + COG reads + OCM). Each test uses a small AOI
+    and short time range so they finish in a few seconds. Fixtures cache the
+    common scene download via debug_cache to keep wall time reasonable.
+    """
+
+    # Small AOI in 50HMH (Perth, WA) — single MGRS tile
+    AOI_SMALL = (115.83, -31.97, 115.91, -31.94)
+    # AOI straddling 50HMH/50HNH at ~117 deg E
+    AOI_CROSS_TILE = (116.95, -32.05, 117.05, -31.95)
+    # Tight date window with a couple of cloud-free passes
+    DATE_KW = dict(start_year=2023, start_month=6, start_day=1, duration_days=14)
+    QUERY = {"eo:cloud_cover": {"lt": 80}}
+
+    @pytest.fixture(autouse=True)
+    def time_test(self):
+        start = time.time()
+        yield
+        elapsed = time.time() - start
+        if elapsed > 60:
+            print(f"\n  test took {elapsed:.1f}s")
+
+    def _assert_basic_geotiff(self, arr, profile, expect_bands, expect_dtype=None):
+        assert arr.ndim == 3, f"expected 3D, got shape {arr.shape}"
+        assert arr.shape[0] == expect_bands
+        if expect_dtype is not None:
+            assert arr.dtype == expect_dtype
+        assert "crs" in profile and profile["crs"] is not None
+        assert "transform" in profile
+        # At least some non-zero data — the AOI should be over land in winter
+        assert arr.max() > 0
+
+    # --- Resolution sweep ---
+    @pytest.mark.parametrize("resolution", [10, 20, 30, 50, 100])
+    def test_resolution_sweep(self, resolution):
+        arr, profile = mosaic(
+            bounds=self.AOI_SMALL,
+            **self.DATE_KW,
+            required_bands=["B04", "B03", "B02"],
+            mosaic_method="percentile",
+            percentile_value=50,
+            resolution=resolution,
+            additional_query=self.QUERY,
+        )
+        self._assert_basic_geotiff(arr, profile, expect_bands=3, expect_dtype=np.uint16)
+        assert profile["transform"].a == resolution
+        # Output dimensions should roughly match bounds × 1/resolution
+        approx_w = (self.AOI_SMALL[2] - self.AOI_SMALL[0]) * 111000 / resolution
+        assert abs(arr.shape[2] - approx_w) / approx_w < 0.2
+
+    # --- Mosaic methods ---
+    @pytest.mark.parametrize("method", ["mean", "first", "percentile", "median"])
+    def test_mosaic_methods(self, method):
+        kw = {}
+        if method == "percentile":
+            kw["percentile_value"] = 25
+        arr, profile = mosaic(
+            bounds=self.AOI_SMALL,
+            **self.DATE_KW,
+            required_bands=["B04"],
+            mosaic_method=method,
+            additional_query=self.QUERY,
+            **kw,
+        )
+        self._assert_basic_geotiff(arr, profile, expect_bands=1, expect_dtype=np.uint16)
+
+    # --- Sort methods ---
+    @pytest.mark.parametrize("sort", ["valid_data", "oldest", "newest"])
+    def test_sort_methods(self, sort):
+        arr, profile = mosaic(
+            bounds=self.AOI_SMALL,
+            **self.DATE_KW,
+            required_bands=["B04"],
+            mosaic_method="first",
+            sort_method=sort,
+            additional_query=self.QUERY,
+        )
+        self._assert_basic_geotiff(arr, profile, expect_bands=1)
+
+    # --- Bands at varied native resolutions ---
+    @pytest.mark.parametrize(
+        "bands",
+        [
+            ["B04"],  # 10m native
+            ["B8A"],  # 20m native (native = OCM res)
+            ["B01"],  # 60m native (must be upsampled)
+            ["B04", "B03", "B02"],  # mixed but all 10m
+            ["B04", "B8A", "B11"],  # 10m, 20m, 20m mix
+            ["B02", "B03", "B04", "B08", "B11", "B12"],  # 6-band
+        ],
+    )
+    def test_band_combinations(self, bands):
+        arr, profile = mosaic(
+            bounds=self.AOI_SMALL,
+            **self.DATE_KW,
+            required_bands=bands,
+            mosaic_method="percentile",
+            percentile_value=50,
+            additional_query=self.QUERY,
+        )
+        self._assert_basic_geotiff(arr, profile, expect_bands=len(bands))
+
+    # --- Resampling methods ---
+    @pytest.mark.parametrize(
+        "method", ["nearest", "bilinear", "cubic", "average", "lanczos"]
+    )
+    def test_resampling_methods(self, method):
+        arr, profile = mosaic(
+            bounds=self.AOI_SMALL,
+            **self.DATE_KW,
+            required_bands=["B04", "B03", "B02"],
+            mosaic_method="percentile",
+            percentile_value=50,
+            resolution=30,  # forces actual resampling
+            resampling_method=method,
+            additional_query=self.QUERY,
+        )
+        self._assert_basic_geotiff(arr, profile, expect_bands=3)
+
+    # --- Cross-MGRS-tile bounds ---
+    def test_cross_tile_bounds(self):
+        arr, profile = mosaic(
+            bounds=self.AOI_CROSS_TILE,
+            **self.DATE_KW,
+            required_bands=["B04", "B03", "B02"],
+            mosaic_method="percentile",
+            percentile_value=50,
+            additional_query=self.QUERY,
+        )
+        self._assert_basic_geotiff(arr, profile, expect_bands=3)
+
+    # --- Coverage threshold extremes ---
+    @pytest.mark.parametrize("threshold", [None, 0.0, 0.1, 0.5, 0.9])
+    def test_coverage_threshold(self, threshold):
+        arr, profile = mosaic(
+            bounds=self.AOI_SMALL,
+            **self.DATE_KW,
+            required_bands=["B04"],
+            mosaic_method="percentile",
+            percentile_value=50,
+            coverage_threshold_pct=threshold,
+            additional_query=self.QUERY,
+        )
+        self._assert_basic_geotiff(arr, profile, expect_bands=1)
+
+    # --- no_data_threshold (early termination) ---
+    @pytest.mark.parametrize("threshold", [None, 0.001, 0.5])
+    def test_no_data_threshold(self, threshold):
+        # Longer duration so we exercise multi-scene early termination
+        date_kw = {**self.DATE_KW, "duration_days": 30}
+        arr, profile = mosaic(
+            bounds=self.AOI_SMALL,
+            **date_kw,
+            required_bands=["B04"],
+            mosaic_method="first",  # early termination is meaningful
+            no_data_threshold=threshold,
+            additional_query=self.QUERY,
+        )
+        self._assert_basic_geotiff(arr, profile, expect_bands=1)
+
+    # --- Custom target_crs ---
+    def test_custom_target_crs(self):
+        # Force WGS84 / Web Mercator output for a UTM-zone area
+        arr, profile = mosaic(
+            bounds=self.AOI_SMALL,
+            **self.DATE_KW,
+            required_bands=["B04"],
+            mosaic_method="percentile",
+            percentile_value=50,
+            target_crs=3857,
+            resolution=10,
+            additional_query=self.QUERY,
+        )
+        self._assert_basic_geotiff(arr, profile, expect_bands=1)
+        assert profile["crs"].to_epsg() == 3857
+
+    # --- bounds_crs override (UTM bounds instead of lon/lat) ---
+    def test_utm_bounds_input(self):
+        # Convert AOI_SMALL to UTM 50S manually: rough bbox in EPSG:32750
+        utm_bounds = (390000.0, 6463500.0, 397500.0, 6466500.0)
+        arr, profile = mosaic(
+            bounds=utm_bounds,
+            bounds_crs=32750,
+            **self.DATE_KW,
+            required_bands=["B04"],
+            mosaic_method="percentile",
+            percentile_value=50,
+            additional_query=self.QUERY,
+        )
+        self._assert_basic_geotiff(arr, profile, expect_bands=1)
+        assert profile["crs"].to_epsg() == 32750
+
+    # --- Save to disk + return path ---
+    def test_save_to_disk(self, tmp_path):
+        result = mosaic(
+            bounds=self.AOI_SMALL,
+            **self.DATE_KW,
+            output_dir=tmp_path,
+            required_bands=["B04"],
+            mosaic_method="percentile",
+            percentile_value=50,
+            additional_query=self.QUERY,
+        )
+        assert isinstance(result, Path) and result.exists()
+        assert result.suffix == ".tif"
+        assert "bounds_" in result.name  # filename uses bounds prefix
+
+    # --- overwrite=False short-circuit ---
+    def test_overwrite_false_short_circuits(self, tmp_path):
+        kw = dict(
+            bounds=self.AOI_SMALL,
+            **self.DATE_KW,
+            output_dir=tmp_path,
+            required_bands=["B04"],
+            mosaic_method="percentile",
+            percentile_value=50,
+            additional_query=self.QUERY,
+        )
+        path1 = mosaic(**kw)
+        first_mtime = path1.stat().st_mtime
+        path2 = mosaic(**kw, overwrite=False)
+        assert path1 == path2
+        assert path2.stat().st_mtime == first_mtime
+
+    # --- No scenes found ---
+    def test_no_scenes_found(self):
+        date_kw = {**self.DATE_KW, "duration_days": 1}
+        with pytest.raises(Exception, match="No scenes found"):
+            mosaic(
+                bounds=self.AOI_SMALL,
+                **date_kw,
+                required_bands=["B04"],
+                additional_query={"eo:cloud_cover": {"lt": 0.001}},
+            )
+
+    # --- debug_cache hit on repeat ---
+    def test_debug_cache_repeats_match(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)  # cache writes to ./cache
+        kw = dict(
+            bounds=self.AOI_SMALL,
+            **self.DATE_KW,
+            required_bands=["B04"],
+            mosaic_method="percentile",
+            percentile_value=50,
+            debug_cache=True,
+            additional_query=self.QUERY,
+        )
+        arr1, _ = mosaic(**kw)
+        arr2, _ = mosaic(**kw)
+        # Warm-cache run must be byte-for-byte identical to the cold run
+        np.testing.assert_array_equal(arr1, arr2)
+        # Cache files should have been written
+        cache_files = list((tmp_path / "cache").glob("stack_*.pkl"))
+        assert len(cache_files) >= 1, "expected at least one stack cache file"
 
 
 if __name__ == "__main__":

@@ -25,6 +25,56 @@ VALID_SORT_METHODS = {SORT_VALID_DATA, SORT_OLDEST, SORT_NEWEST, SORT_CUSTOM}
 VALID_MOSAIC_METHODS = {MOSAIC_MEAN, MOSAIC_FIRST, MOSAIC_PERCENTILE}
 
 
+def progress_disabled() -> bool:
+    """True when tqdm progress bars should be silenced.
+
+    Bars follow the package logger: visible only when `s2mosaic` is enabled at
+    INFO or below (e.g. via `s2mosaic.set_log_level("INFO")` or any host-app
+    logging config that lowers the level). Default Python logging keeps the
+    package at WARNING, so by default the library is silent.
+    """
+    return not logging.getLogger("s2mosaic").isEnabledFor(logging.INFO)
+
+
+VALID_RESAMPLING_METHODS = {
+    "nearest",
+    "bilinear",
+    "cubic",
+    "average",
+    "lanczos",
+}
+
+
+def get_rasterio_resampling(method: str):
+    """Map a string resampling method to a rasterio.enums.Resampling value."""
+    from rasterio.enums import Resampling
+
+    return {
+        "nearest": Resampling.nearest,
+        "bilinear": Resampling.bilinear,
+        "cubic": Resampling.cubic,
+        "average": Resampling.average,
+        "lanczos": Resampling.lanczos,
+    }[method]
+
+
+OCM_MIN_RESOLUTION = 20
+OCM_MAX_RESOLUTION = 50
+
+
+def pick_ocm_resolution(user_resolution: int) -> int:
+    """Pick the OCM input resolution given the user's output resolution.
+
+    OCM is fastest at coarser resolutions (less data to transfer / process).
+    20m is the recommended default; 50m is the coarsest tested. We use the
+    user's resolution where it falls in [20, 50], and clamp otherwise:
+        user <= 20 → 20  (e.g. 10m output keeps OCM at 20m)
+        20 < user < 50 → user
+        user >= 50 → 50
+    """
+    return max(OCM_MIN_RESOLUTION, min(user_resolution, OCM_MAX_RESOLUTION))
+
+
 def format_progress(current, total, no_data_pct):
     return f"Scenes: {current}/{total} | Mosaic currently contains {no_data_pct:.2f}% no data pixels"  # noqa: E501
 
@@ -89,12 +139,13 @@ def validate_inputs(
     mosaic_method: str,
     no_data_threshold: Union[float, None],
     required_bands: List[str],
-    grid_id: str,
+    grid_id: Optional[str],
     percentile_value: Optional[float],
+    resampling_method: str = "nearest",
 ) -> None:
-    if not grid_id.isalnum() or not grid_id.isupper():
+    if grid_id is not None and (not grid_id.isalnum() or not grid_id.isupper()):
         raise ValueError(
-            f"""Grid {grid_id} is invalid. It should be in the format '50HMH'. 
+            f"""Grid {grid_id} is invalid. It should be in the format '50HMH'.
             For more info on the S2 grid system visit https://sentiwiki.copernicus.eu/web/s2-products"""
         )
     if sort_method not in VALID_SORT_METHODS:
@@ -104,6 +155,11 @@ def validate_inputs(
     if mosaic_method not in VALID_MOSAIC_METHODS:
         raise ValueError(
             f"Invalid mosaic method: {mosaic_method}. Must be of {VALID_MOSAIC_METHODS}"
+        )
+    if resampling_method not in VALID_RESAMPLING_METHODS:
+        raise ValueError(
+            f"Invalid resampling method: {resampling_method}. "
+            f"Must be one of {VALID_RESAMPLING_METHODS}"
         )
     if no_data_threshold is not None:
         if not (0.0 <= no_data_threshold <= 1.0):
@@ -155,20 +211,32 @@ def validate_inputs(
 
 def get_output_path(
     output_dir: Union[Path, str],
-    grid_id: str,
     start_date: date,
     end_date: date,
     sort_method: str,
     mosaic_method: str,
     required_bands: List[str],
+    grid_id: Optional[str] = None,
+    bounds: Optional[tuple] = None,
 ) -> Path:
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
     bands_str = "_".join(required_bands)
-    export_path = output_dir / (
-        f"{grid_id}_{start_date.strftime('%Y-%m-%d')}_to_{end_date.strftime('%Y-%m-%d')}_{sort_method}_{mosaic_method}_{bands_str}.tif"
+
+    if grid_id is not None:
+        prefix = grid_id
+    elif bounds is not None:
+        prefix = (
+            f"bounds_{bounds[0]:.4f}_{bounds[1]:.4f}_{bounds[2]:.4f}_{bounds[3]:.4f}"
+        )
+    else:
+        raise ValueError("Either grid_id or bounds is required")
+
+    return output_dir / (
+        f"{prefix}_{start_date.strftime('%Y-%m-%d')}_to_"
+        f"{end_date.strftime('%Y-%m-%d')}_{sort_method}_{mosaic_method}_"
+        f"{bands_str}.tif"
     )
-    return export_path
 
 
 def export_tif(

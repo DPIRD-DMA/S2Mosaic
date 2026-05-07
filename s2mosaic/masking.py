@@ -21,40 +21,63 @@ def get_valid_mask(bands: np.ndarray, dilation_count: int = 4) -> np.ndarray:
     return no_data == 0
 
 
+def compute_masks_from_array(
+    rgb_nir: np.ndarray,
+    batch_size: int = 6,
+    inference_dtype: str = "bf16",
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Run cloud + valid masking on an in-memory (3, H, W) R+G+NIR uint16 array.
+
+    Returns (clear_mask, valid_mask) at the same resolution as the input."""
+    cloud_class = predict_from_array(
+        input_array=rgb_nir,
+        batch_size=batch_size,
+        inference_dtype=inference_dtype,
+    )[0]
+    clear = (cloud_class == 0).astype(np.uint8)
+    clear = clean_array(
+        clear, min_island_size=8, smooth_edge_size=3, connectivity=4
+    ).astype(bool)
+    valid = get_valid_mask(rgb_nir)
+    return clear, valid
+
+
 def get_masks(
     item: pystac.Item,
     batch_size: int = 6,
     inference_dtype: str = "bf16",
     debug_cache: bool = False,
     max_dl_workers: int = 4,
+    target_size: int = 10980,
+    ocm_resolution: int = 20,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    # download RG+NIR bands at 20m resolution for cloud masking
+    # download RG+NIR bands at OCM resolution for cloud masking
     required_bands = ["B04", "B03", "B8A"]
-    get_band_20m = partial(get_full_band, res=20, debug_cache=debug_cache)
+    get_band_at_ocm_res = partial(
+        get_full_band, res=ocm_resolution, debug_cache=debug_cache
+    )
 
     hrefs = [item.assets[band].href for band in required_bands]
 
     with ThreadPoolExecutor(max_workers=max_dl_workers) as executor:
-        bands_and_profiles = list(executor.map(get_band_20m, hrefs))
+        bands_and_profiles = list(executor.map(get_band_at_ocm_res, hrefs))
 
-    # Separate bands and profiles
     bands, _ = zip(*bands_and_profiles, strict=False)
     ocm_input = np.vstack(bands)
 
-    mask = (
-        predict_from_array(
-            input_array=ocm_input,
-            batch_size=batch_size,
-            inference_dtype=inference_dtype,
-        )[0]
-        == 0
+    clear, valid = compute_masks_from_array(
+        ocm_input, batch_size=batch_size, inference_dtype=inference_dtype
     )
-    mask_dtype = mask.dtype
-    mask = clean_array(
-        mask.astype(np.uint8), min_island_size=8, smooth_edge_size=3, connectivity=4
-    ).astype(mask_dtype)
-    # interpolate mask back to 10m
-    mask = mask.repeat(2, axis=0).repeat(2, axis=1)
-    valid_mask = get_valid_mask(ocm_input)
-    valid_mask = valid_mask.repeat(2, axis=0).repeat(2, axis=1)
-    return mask, valid_mask
+    # Resample masks from OCM resolution (20m) to the target output size
+    if clear.shape != (target_size, target_size):
+        clear = cv2.resize(
+            clear.astype(np.uint8),
+            (target_size, target_size),
+            interpolation=cv2.INTER_NEAREST,
+        ).astype(bool)
+        valid = cv2.resize(
+            valid.astype(np.uint8),
+            (target_size, target_size),
+            interpolation=cv2.INTER_NEAREST,
+        ).astype(bool)
+    return clear, valid
