@@ -4,9 +4,9 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Any, Dict, List, Tuple, Union
 
+import cv2
 import numpy as np
 import pandas as pd
-import scipy
 from tqdm.auto import tqdm
 
 from .data_reader import get_band_with_mask
@@ -98,13 +98,13 @@ def download_bands_pool(
         bands = []
 
         for band, profile in bands_and_profiles:
-            bands.append(
-                scipy.ndimage.zoom(
+            if band.shape != (s2_scene_size, s2_scene_size):
+                band = cv2.resize(
                     band,
-                    (s2_scene_size / band.shape[0], s2_scene_size / band.shape[1]),
-                    order=0,
+                    (s2_scene_size, s2_scene_size),
+                    interpolation=cv2.INTER_NEAREST,
                 )
-            )
+            bands.append(band)
             last_profile = profile
 
         scene_data = np.array(bands)

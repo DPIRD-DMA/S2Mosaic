@@ -3,10 +3,10 @@ import pickle
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
+import cv2
 import numpy as np
 import planetary_computer
 import rasterio as rio
-import scipy
 from rasterio.windows import Window
 
 logger = logging.getLogger(__name__)
@@ -22,9 +22,11 @@ def read_in_chunks(
     with rio.open(href) as src:
         height, width = src.height, src.width
 
-        mask = scipy.ndimage.zoom(
-            mask, (height / mask.shape[0], width / mask.shape[1]), order=0
-        )
+        if mask.shape != (height, width):
+            mask_input = mask.astype(np.uint8) if mask.dtype == bool else mask
+            mask = cv2.resize(
+                mask_input, (width, height), interpolation=cv2.INTER_NEAREST
+            )
 
         all_data = np.zeros((height, width), dtype=np.uint16)
         for row in range(0, height, chunk_size):

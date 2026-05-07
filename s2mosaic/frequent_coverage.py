@@ -1,9 +1,9 @@
 import logging
 from typing import List
 
+import cv2
 import geopandas as gpd
 import numpy as np
-import scipy
 from geopandas import GeoDataFrame
 from pystac.item import Item
 from pystac.item_collection import ItemCollection
@@ -80,7 +80,8 @@ def get_frequent_coverage(
     frequent_data_mask = raster >= dynamic_threshold
 
     # Expand the mask to include nearby pixels, this grows the no data areas by 4 pixels
-    frequent_data_mask = ~scipy.ndimage.binary_dilation(
-        ~frequent_data_mask, iterations=4
+    kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+    dilated = cv2.dilate(
+        (~frequent_data_mask).astype(np.uint8), kernel, iterations=4
     )
-    return frequent_data_mask
+    return dilated == 0
