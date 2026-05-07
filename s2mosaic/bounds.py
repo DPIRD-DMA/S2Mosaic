@@ -185,6 +185,7 @@ def _cached_stack_compute(
         resolution=resolution,
         rescale=False,
         resampling=get_rasterio_resampling(resampling),
+        sortby_date=False,  # preserve caller's order (valid_data, etc.)
     )
     arr_float = stack.compute().values
     arr = np.nan_to_num(arr_float, nan=0).astype(dtype)
@@ -379,34 +380,11 @@ def run_bounds_pipeline(
     ocm_resolution = pick_ocm_resolution(resolution)
     logger.info(f"OCM resolution: {ocm_resolution}m")
 
-    # Probe stackstac for the exact user-resolution (h, w) it will produce.
-    # Lazy — no data is fetched, just shape inference based on bounds snapping.
-    probe = stackstac.stack(
-        items_list[:1],
-        assets=[required_bands[0]] if not is_visual else ["B04"],
-        bounds=bounds_target,
-        epsg=target_crs,
-        resolution=resolution,
-        rescale=False,
-    )
-    _, _, h, w = probe.shape
-
-    # Coverage mask up front — drives early termination math and final masking.
-    if coverage_threshold_pct is not None:
-        coverage_mask = get_frequent_coverage_for_bbox(
-            scenes=items,
-            bounds_target=bounds_target,
-            target_crs=target_crs,
-            width=w,
-            height=h,
-            resolution=resolution,
-            coverage_threshold_pct=coverage_threshold_pct,
-        )
-    else:
-        coverage_mask = np.ones((h, w), dtype=bool)
-    possible_pixel_count = int(coverage_mask.sum())
-
     # Phase 1: fetch OCM bands for ALL scenes (small, 3 bands at 20-50m).
+    # We do all skip-decision math at OCM resolution, then resize masks to
+    # user_data's actual shape once we've fetched it. This avoids relying on
+    # an upfront probe (different fetchers — stackstac vs the TCI WarpedVRT
+    # path — can snap bounds to slightly different output shapes).
     n_time = len(items_list)
     logger.info(
         f"Fetching {n_time} scenes' OCM bands at {ocm_resolution}m (EPSG:{target_crs})"
@@ -421,12 +399,28 @@ def run_bounds_pipeline(
         debug_cache,
         resampling="nearest",
     )
+    _, _, ocm_h, ocm_w = ocm_data.shape
+
+    # Coverage mask at OCM resolution — used for skip decisions.
+    if coverage_threshold_pct is not None:
+        coverage_mask_ocm = get_frequent_coverage_for_bbox(
+            scenes=items,
+            bounds_target=bounds_target,
+            target_crs=target_crs,
+            width=ocm_w,
+            height=ocm_h,
+            resolution=ocm_resolution,
+            coverage_threshold_pct=coverage_threshold_pct,
+        )
+    else:
+        coverage_mask_ocm = np.ones((ocm_h, ocm_w), dtype=bool)
+    possible_pixel_count = int(coverage_mask_ocm.sum())
 
     # Phase 2: per-scene cloud masking with skip logic so we can avoid
     # fetching user bands for scenes that won't contribute to the mosaic.
     logger.info(f"Running cloud mask on up to {n_time} scenes")
-    kept_combo_masks: Dict[int, np.ndarray] = {}
-    good_pixel_tracker = np.zeros((h, w), dtype=bool)
+    kept_combo_masks_ocm: Dict[int, np.ndarray] = {}
+    good_pixel_tracker = np.zeros((ocm_h, ocm_w), dtype=bool)
     pbar = tqdm(
         total=n_time,
         desc="Cloud masking",
@@ -437,7 +431,7 @@ def run_bounds_pipeline(
         # FIRST mode: stop scanning once everything in coverage is filled.
         if (
             mosaic_method == MOSAIC_FIRST
-            and (good_pixel_tracker | ~coverage_mask).all()
+            and (good_pixel_tracker | ~coverage_mask_ocm).all()
         ):
             logger.info(
                 f"All in-coverage pixels filled after {i}/{n_time} scenes — "
@@ -450,17 +444,7 @@ def run_bounds_pipeline(
             batch_size=ocm_batch_size,
             inference_dtype=ocm_inference_dtype,
         )
-        if clear.shape != (h, w):
-            clear = cv2.resize(
-                clear.astype(np.uint8),
-                (w, h),
-                interpolation=cv2.INTER_NEAREST,
-            ).astype(bool)
-            valid = cv2.resize(
-                valid.astype(np.uint8),
-                (w, h),
-                interpolation=cv2.INTER_NEAREST,
-            ).astype(bool)
+        # compute_masks_from_array returns at OCM resolution; no resize here.
         combo = clear & valid
 
         if mosaic_method == MOSAIC_FIRST:
@@ -474,7 +458,7 @@ def run_bounds_pipeline(
             pbar.update(1)
             continue
 
-        kept_combo_masks[i] = combo
+        kept_combo_masks_ocm[i] = combo
         good_pixel_tracker |= combo
 
         if (
@@ -482,29 +466,28 @@ def run_bounds_pipeline(
             and mosaic_method != MOSAIC_PERCENTILE
             and possible_pixel_count > 0
         ):
-            completed = int((coverage_mask & good_pixel_tracker).sum())
+            completed = int((coverage_mask_ocm & good_pixel_tracker).sum())
             no_data_sum = possible_pixel_count - completed
             no_data_pct = (1 - completed / possible_pixel_count) * 100
             pbar.set_postfix_str(f"no-data {no_data_pct:.1f}%")
             if no_data_sum < possible_pixel_count * no_data_threshold:
                 pbar.update(1)
                 logger.info(
-                    f"no_data_threshold met after {len(kept_combo_masks)} kept "
+                    f"no_data_threshold met after {len(kept_combo_masks_ocm)} kept "
                     f"scenes ({i + 1}/{n_time} examined)"
                 )
                 break
         pbar.update(1)
     pbar.close()
 
-    if not kept_combo_masks:
+    if not kept_combo_masks_ocm:
         raise Exception(
             "No usable scenes — every scene was fully cloud-masked or invalid"
         )
 
     # Phase 3: fetch user bands ONLY for the scenes we kept.
-    kept_indices = sorted(kept_combo_masks.keys())
+    kept_indices = sorted(kept_combo_masks_ocm.keys())
     kept_items = [items_list[i] for i in kept_indices]
-    combo_masks = [kept_combo_masks[i] for i in kept_indices]
     logger.info(f"Fetching user bands for {len(kept_items)}/{n_time} kept scenes")
     if is_visual:
         user_data = _fetch_tci_stack(
@@ -526,6 +509,21 @@ def run_bounds_pipeline(
             debug_cache,
             resampling=resampling_method,
         )
+
+    # Resize OCM-resolution masks to user_data's actual (h, w). Whatever shape
+    # the fetcher returned is the truth — stackstac and the TCI WarpedVRT path
+    # snap bounds independently, so we don't assume they agree.
+    _, _, h, w = user_data.shape
+
+    def _to_user_shape(mask: np.ndarray) -> np.ndarray:
+        if mask.shape == (h, w):
+            return mask
+        return cv2.resize(
+            mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST
+        ).astype(bool)
+
+    combo_masks = [_to_user_shape(kept_combo_masks_ocm[i]) for i in kept_indices]
+    coverage_mask = _to_user_shape(coverage_mask_ocm)
 
     logger.info(
         f"Aggregating {len(kept_items)} scene(s) into mosaic using "

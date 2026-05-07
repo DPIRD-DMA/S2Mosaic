@@ -630,6 +630,21 @@ class TestMosaicBoundsEndToEnd:
         )
         self._assert_basic_geotiff(arr, profile, expect_bands=3)
 
+    # --- Visual band in bounds mode ---
+    def test_visual_band(self):
+        # Visual asset is a 3-band uint8 TCI, fetched via the WarpedVRT path
+        # (stackstac can't address sub-bands). Shape must match the cloud-mask
+        # resize step — guards against the shape-mismatch bug where the OCM
+        # mask probe and the TCI fetch snap bounds differently.
+        arr, profile = mosaic(
+            bounds=self.AOI_SMALL,
+            **self.DATE_KW,
+            required_bands=["visual"],
+            mosaic_method="first",
+            additional_query=self.QUERY,
+        )
+        self._assert_basic_geotiff(arr, profile, expect_bands=3, expect_dtype=np.uint8)
+
     # --- Cross-MGRS-tile bounds ---
     def test_cross_tile_bounds(self):
         arr, profile = mosaic(
