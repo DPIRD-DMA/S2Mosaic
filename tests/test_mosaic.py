@@ -12,6 +12,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from s2mosaic import mosaic
+from s2mosaic.helpers import validate_inputs
 
 
 class TestMosaicInputValidation:
@@ -98,109 +99,71 @@ class TestMosaicInputValidation:
 
 
 class TestMosaicValidInputs:
-    """Test that valid inputs are accepted without errors"""
+    """Verify validate_inputs() accepts known-good parameter combinations.
+
+    Calls validate_inputs() directly to avoid the network/processing cost of a
+    full mosaic() run — these tests only care about validation behaviour.
+    """
+
+    DEFAULT_KWARGS = {
+        "sort_method": "valid_data",
+        "mosaic_method": "mean",
+        "no_data_threshold": 0.01,
+        "required_bands": ["B04", "B03", "B02", "B08"],
+        "grid_id": "50HMH",
+        "percentile_value": None,
+    }
+
+    def _validate(self, **overrides):
+        validate_inputs(**{**self.DEFAULT_KWARGS, **overrides})
 
     def test_valid_grid_id(self):
-        """Test that valid grid IDs are accepted"""
-        # These should not raise validation errors
-        # Note: They might still fail due to no scenes found, but validation should pass
-        try:
-            mosaic("50HMH", 2023)
-        except Exception as e:
-            # Validation errors should not occur
-            assert "invalid" not in str(e).lower()
-            assert "Invalid" not in str(e)
+        self._validate()
 
-    def test_valid_sort_methods(self):
-        """Test that all valid sort methods are accepted"""
-        valid_methods = ["valid_data", "oldest", "newest"]
-        for method in valid_methods:
-            try:
-                mosaic("50HMH", 2023, sort_method=method)
-            except Exception as e:
-                assert "Invalid sort method" not in str(e)
+    @pytest.mark.parametrize("method", ["valid_data", "oldest", "newest"])
+    def test_valid_sort_methods(self, method):
+        self._validate(sort_method=method)
 
-    def test_valid_mosaic_methods(self):
-        """Test that all valid mosaic methods are accepted"""
-        valid_methods = ["mean", "first"]
-        for method in valid_methods:
-            try:
-                mosaic("50HMH", 2023, mosaic_method=method)
-            except Exception as e:
-                assert "Invalid mosaic method" not in str(e)
+    @pytest.mark.parametrize("method", ["mean", "first"])
+    def test_valid_mosaic_methods(self, method):
+        self._validate(mosaic_method=method)
 
     def test_valid_percentile_method(self):
-        """Test that percentile method with valid percentile is accepted"""
-        try:
-            mosaic("50HMH", 2023, mosaic_method="percentile", percentile_value=50)
-        except Exception as e:
-            assert "Invalid mosaic method" not in str(e)
-            assert "Percentile" not in str(e) or "invalid" not in str(e).lower()
+        self._validate(mosaic_method="percentile", percentile_value=50.0)
 
-    def test_valid_no_data_thresholds(self):
-        """Test that valid no_data_threshold values are accepted"""
-        valid_thresholds = [0.0, 0.01, 0.5, 1.0, None]
-        for threshold in valid_thresholds:
-            try:
-                mosaic("50HMH", 2023, no_data_threshold=threshold)
-            except Exception as e:
-                assert "No data threshold must be between 0 and 1" not in str(e)
+    @pytest.mark.parametrize("threshold", [0.0, 0.01, 0.5, 1.0, None])
+    def test_valid_no_data_thresholds(self, threshold):
+        self._validate(no_data_threshold=threshold)
 
-    def test_valid_bands(self):
-        """Test that valid band combinations are accepted"""
-        valid_band_sets = [
+    @pytest.mark.parametrize(
+        "bands",
+        [
             ["B04", "B03", "B02"],
             ["B04", "B03", "B02", "B08"],
             ["visual"],
             [
-                "B01",
-                "B02",
-                "B03",
-                "B04",
-                "B05",
-                "B06",
-                "B07",
-                "B08",
-                "B8A",
-                "B09",
-                "B11",
-                "B12",
+                "B01", "B02", "B03", "B04", "B05", "B06", "B07",
+                "B08", "B8A", "B09", "B11", "B12",
             ],
             ["AOT", "SCL", "WVP"],
-        ]
-        for bands in valid_band_sets:
-            try:
-                mosaic("50HMH", 2023, required_bands=bands)
-            except Exception as e:
-                assert "Invalid band" not in str(e)
-                assert "Cannot use visual band with other bands" not in str(e)
+        ],
+    )
+    def test_valid_bands(self, bands):
+        self._validate(required_bands=bands)
 
 
+@pytest.mark.slow
 class TestMosaicEndToEnd:
     """End-to-end tests using debug cache for performance"""
 
     @pytest.fixture(autouse=True)
-    def setup_and_cleanup_cache(self):
-        """Setup and cleanup debug cache before and after each test"""
-        cache_dir = Path("cache")
-
-        # Clean cache before test
-        # if cache_dir.exists():
-        #     shutil.rmtree(cache_dir)
-
+    def time_test(self):
+        """Print duration for tests that take more than a minute."""
         start_time = time.time()
         yield
-        end_time = time.time()
-
-        # Print test duration for debugging
-        test_name = self.__class__.__name__
-        duration = end_time - start_time
-        if duration > 60:  # Print if test takes more than 1 minute
-            print(f"\n⚠️  {test_name} took {duration:.1f} seconds")
-
-        # Clean cache after test
-        # if cache_dir.exists():
-        #     shutil.rmtree(cache_dir)
+        duration = time.time() - start_time
+        if duration > 60:
+            print(f"\n  {self.__class__.__name__} took {duration:.1f} seconds")
 
     @pytest.fixture
     def temp_output_dir(self):
@@ -336,78 +299,62 @@ class TestMosaicEndToEnd:
         assert result1 == result2
         assert result2.stat().st_mtime == original_mtime
 
-    def test_mosaic_different_sort_methods(self):
+    @pytest.mark.parametrize("sort_method", ["valid_data", "oldest", "newest"])
+    def test_mosaic_different_sort_methods(self, sort_method):
         """Test mosaic with different sort methods"""
-        sort_methods = ["valid_data", "oldest", "newest"]
+        result = mosaic(
+            "50HMH",
+            2023,
+            start_month=6,
+            start_day=1,
+            duration_days=7,
+            sort_method=sort_method,
+            debug_cache=True,
+            required_bands=["B04"],
+        )
 
-        for sort_method in sort_methods:
-            print(f"\nTesting sort method: {sort_method}")
-            start = time.time()
-            result = mosaic(
-                "50HMH",
-                2023,
-                start_month=6,
-                start_day=1,
-                duration_days=7,
-                sort_method=sort_method,
-                debug_cache=True,
-                required_bands=["B04"],
-            )
-            duration = time.time() - start
-            print(f"Sort method {sort_method} took {duration:.1f}s")
+        assert isinstance(result, tuple)
+        array, profile = result
+        assert isinstance(array, np.ndarray)
+        assert hasattr(profile, "keys")
+        assert array.shape[0] == 1
 
-            assert isinstance(result, tuple)
-            array, profile = result
-            assert isinstance(array, np.ndarray)
-            assert hasattr(profile, "keys")  # Check it's dict-like
-            assert hasattr(profile, "keys")  # Check it's dict-like
-            assert hasattr(profile, "keys")  # Check it's dict-like
-            assert array.shape[0] == 1  # 1 band
-
-    def test_mosaic_different_mosaic_methods(self):
+    @pytest.mark.parametrize("mosaic_method", ["mean", "first"])
+    def test_mosaic_different_mosaic_methods(self, mosaic_method):
         """Test mosaic with different mosaic methods"""
-        mosaic_methods = ["mean", "first"]
+        result = mosaic(
+            "50HMH",
+            2023,
+            start_month=6,
+            start_day=1,
+            duration_days=7,
+            mosaic_method=mosaic_method,
+            debug_cache=True,
+            required_bands=["B04"],
+        )
 
-        for mosaic_method in mosaic_methods:
-            print(f"\nTesting mosaic method: {mosaic_method}")
-            start = time.time()
-            result = mosaic(
-                "50HMH",
-                2023,
-                start_month=6,
-                start_day=1,
-                duration_days=7,
-                mosaic_method=mosaic_method,
-                debug_cache=True,
-                required_bands=["B04"],
-            )
-            duration = time.time() - start
-            print(f"Mosaic method {mosaic_method} took {duration:.1f}s")
+        assert isinstance(result, tuple)
+        array, profile = result
+        assert isinstance(array, np.ndarray)
 
-            assert isinstance(result, tuple)
-            array, profile = result
-            assert isinstance(array, np.ndarray)
-
-    def test_mosaic_percentile_method(self):
+    @pytest.mark.parametrize("percentile", [10, 50, 90])
+    def test_mosaic_percentile_method(self, percentile):
         """Test mosaic with percentile method"""
-        percentiles = [10, 50, 90]
+        result = mosaic(
+            "50HMH",
+            2023,
+            start_month=6,
+            start_day=1,
+            duration_days=7,
+            mosaic_method="percentile",
+            percentile_value=percentile,
+            debug_cache=True,
+            required_bands=["B04"],
+        )
 
-        for percentile in percentiles:
-            result = mosaic(
-                "50HMH",
-                2023,
-                start_month=6,
-                start_day=1,
-                duration_days=7,
-                mosaic_method="percentile",
-                percentile_value=percentile,
-                debug_cache=True,
-                required_bands=["B04"],
-            )
-
-            assert isinstance(result, tuple)
-            array, profile = result
-            assert isinstance(array, np.ndarray)
+        assert isinstance(result, tuple)
+        array, profile = result
+        assert isinstance(array, np.ndarray)
 
     def test_mosaic_visual_band(self):
         """Test mosaic with visual band"""
@@ -429,15 +376,15 @@ class TestMosaicEndToEnd:
         assert array.shape[0] == 3  # RGB channels
         assert array.dtype == np.uint8  # Visual should be uint8
 
-    def test_mosaic_different_time_ranges(self):
+    @pytest.mark.parametrize("duration_days", [7, 14, 20, 21])
+    def test_mosaic_different_time_ranges(self, duration_days):
         """Test mosaic with different time range specifications"""
-        # Test duration_days
         result = mosaic(
             "50HMH",
             2023,
             start_month=6,
             start_day=1,
-            duration_days=7,
+            duration_days=duration_days,
             debug_cache=True,
             required_bands=["B04"],
         )
@@ -445,90 +392,20 @@ class TestMosaicEndToEnd:
         array, profile = result
         assert isinstance(array, np.ndarray)
 
-        # Test duration_months (keep under 1 month)
-        result = mosaic(
-            "50HMH",
-            2023,
-            start_month=6,
-            start_day=1,
-            duration_days=21,  # 3 weeks instead of 1 month
-            debug_cache=True,
-            required_bands=["B04"],
-        )
-        assert isinstance(result, tuple)
-        array, profile = result
-        assert isinstance(array, np.ndarray)
-
-        # Test duration_years (but keep it short)
-        result = mosaic(
-            "50HMH",
-            2023,
-            start_month=6,
-            start_day=1,
-            duration_days=14,  # 2 weeks instead of 1 year
-            debug_cache=True,
-            required_bands=["B04"],
-        )
-        assert isinstance(result, tuple)
-        array, profile = result
-        assert isinstance(array, np.ndarray)
-
-        # Test combined duration_months and duration_days (keep under 1 month)
-        result = mosaic(
-            "50HMH",
-            2023,
-            start_month=6,
-            start_day=1,
-            duration_days=20,  # 20 days instead of 2 months + 15 days
-            debug_cache=True,
-            required_bands=["B04"],
-        )
-        assert isinstance(result, tuple)
-        array, profile = result
-        assert isinstance(array, np.ndarray)
-
-    def test_mosaic_different_cloud_cover_thresholds(self):
+    @pytest.mark.parametrize(
+        "start_month, cloud_cover_lt", [(1, 50), (6, 20), (6, 10)]
+    )
+    def test_mosaic_different_cloud_cover_thresholds(self, start_month, cloud_cover_lt):
         """Test mosaic with different cloud cover thresholds"""
-        # Test cloud cover < 50%
         result = mosaic(
             "50HMH",
             2023,
-            start_month=1,
+            start_month=start_month,
             start_day=1,
             duration_months=1,
             debug_cache=True,
             required_bands=["B04"],
-            additional_query={"eo:cloud_cover": {"lt": 50}},
-        )
-        assert isinstance(result, tuple)
-        array, profile = result
-        assert isinstance(array, np.ndarray)
-
-        # Test cloud cover < 20%
-        result = mosaic(
-            "50HMH",
-            2023,
-            start_month=6,
-            start_day=1,
-            duration_months=1,
-            debug_cache=True,
-            required_bands=["B04"],
-            additional_query={"eo:cloud_cover": {"lt": 20}},
-        )
-        assert isinstance(result, tuple)
-        array, profile = result
-        assert isinstance(array, np.ndarray)
-
-        # Test cloud cover < 10%
-        result = mosaic(
-            "50HMH",
-            2023,
-            start_month=6,
-            start_day=1,
-            duration_months=1,
-            debug_cache=True,
-            required_bands=["B04"],
-            additional_query={"eo:cloud_cover": {"lt": 10}},
+            additional_query={"eo:cloud_cover": {"lt": cloud_cover_lt}},
         )
         assert isinstance(result, tuple)
         array, profile = result
@@ -574,6 +451,7 @@ class TestMosaicEndToEnd:
         assert isinstance(array, np.ndarray)
 
 
+@pytest.mark.slow
 class TestMosaicFileNaming:
     """Test file naming conventions"""
 
@@ -583,14 +461,6 @@ class TestMosaicFileNaming:
         temp_dir = tempfile.mkdtemp()
         yield Path(temp_dir)
         shutil.rmtree(temp_dir)
-
-    @pytest.fixture(autouse=True)
-    def cleanup_cache(self):
-        """Clean cache after each test"""
-        yield
-        cache_dir = Path("cache")
-        if cache_dir.exists():
-            shutil.rmtree(cache_dir)
 
     def test_filename_format(self, temp_output_dir):
         """Test that output filenames follow expected format"""

@@ -42,3 +42,9 @@ packages = ["s2mosaic"]
 
 [tool.ruff]
 select = ["E", "F", "B"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: end-to-end tests that hit the network and run a full mosaic pipeline",
+]
+addopts = "-m 'not slow'"
