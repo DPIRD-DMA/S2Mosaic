@@ -197,6 +197,64 @@ def _cached_stack_compute(
     return arr
 
 
+_OCM_BANDS: Tuple[str, str, str] = ("B04", "B03", "B8A")
+
+
+def _fetch_one_ocm(
+    item: Any,
+    bounds_target: Bbox,
+    target_crs: int,
+    ocm_resolution: int,
+    debug_cache: bool,
+) -> np.ndarray:
+    """Fetch one scene's OCM bands (B04, B03, B8A) as (3, h, w) uint16.
+
+    Uses rasterio + WarpedVRT directly — avoids stackstac's eager-stack
+    overhead so the bounds pipeline can stream OCM scenes through the mask
+    loop and discard each as it goes (and skip fetching late scenes entirely
+    once the no_data threshold or first-mode coverage is met).
+    """
+    minx, miny, maxx, maxy = bounds_target
+    width = int(round((maxx - minx) / ocm_resolution))
+    height = int(round((maxy - miny) / ocm_resolution))
+    transform = Affine(ocm_resolution, 0, minx, 0, -ocm_resolution, maxy)
+    target_crs_obj = rio.crs.CRS.from_epsg(target_crs)
+
+    cache_path: Optional[Path] = None
+    if debug_cache:
+        key = f"ocm|{item.id}|{bounds_target}|{target_crs}|{ocm_resolution}"
+        digest = hashlib.md5(key.encode()).hexdigest()
+        cache_path = Path("cache") / f"ocm_{digest}.pkl"
+        if cache_path.exists():
+            with open(cache_path, "rb") as cache_f:
+                return pickle.load(cache_f)
+
+    rio_resampling = get_rasterio_resampling("nearest")
+
+    def _read_band(band_name: str) -> np.ndarray:
+        href = planetary_computer.sign(item.assets[band_name].href)
+        with rio.open(href) as src:
+            with WarpedVRT(
+                src,
+                crs=target_crs_obj,
+                transform=transform,
+                width=width,
+                height=height,
+                resampling=rio_resampling,
+            ) as vrt:
+                return vrt.read(1)
+
+    with ThreadPoolExecutor(max_workers=len(_OCM_BANDS)) as executor:
+        bands = list(executor.map(_read_band, _OCM_BANDS))
+    arr = np.stack(bands, axis=0).astype(np.uint16)
+
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_path, "wb") as f:
+            pickle.dump(arr, f)
+    return arr
+
+
 def _fetch_tci_stack(
     items_list: list,
     bounds_target: Bbox,
@@ -376,30 +434,16 @@ def run_bounds_pipeline(
         sorted_items = sort_items(items=items_with_orbits, sort_method=sort_method)
     items_list = sorted_items["item"].tolist()
 
-    ocm_assets = ["B04", "B03", "B8A"]
     ocm_resolution = pick_ocm_resolution(resolution)
     logger.info(f"OCM resolution: {ocm_resolution}m")
 
-    # Phase 1: fetch OCM bands for ALL scenes (small, 3 bands at 20-50m).
-    # We do all skip-decision math at OCM resolution, then resize masks to
-    # user_data's actual shape once we've fetched it. This avoids relying on
-    # an upfront probe (different fetchers — stackstac vs the TCI WarpedVRT
-    # path — can snap bounds to slightly different output shapes).
+    # Compute the OCM grid shape from bounds + resolution. Each per-scene
+    # fetch via WarpedVRT will snap to exactly this transform/width/height,
+    # so all OCM scenes share the same (h, w) without us materialising them.
+    ocm_minx, ocm_miny, ocm_maxx, ocm_maxy = bounds_target
+    ocm_w = int(round((ocm_maxx - ocm_minx) / ocm_resolution))
+    ocm_h = int(round((ocm_maxy - ocm_miny) / ocm_resolution))
     n_time = len(items_list)
-    logger.info(
-        f"Fetching {n_time} scenes' OCM bands at {ocm_resolution}m (EPSG:{target_crs})"
-    )
-    ocm_data = _cached_stack_compute(
-        items_list,
-        ocm_assets,
-        bounds_target,
-        target_crs,
-        ocm_resolution,
-        "uint16",
-        debug_cache,
-        resampling="nearest",
-    )
-    _, _, ocm_h, ocm_w = ocm_data.shape
 
     # Coverage mask at OCM resolution — used for skip decisions.
     if coverage_threshold_pct is not None:
@@ -416,9 +460,13 @@ def run_bounds_pipeline(
         coverage_mask_ocm = np.ones((ocm_h, ocm_w), dtype=bool)
     possible_pixel_count = int(coverage_mask_ocm.sum())
 
-    # Phase 2: per-scene cloud masking with skip logic so we can avoid
-    # fetching user bands for scenes that won't contribute to the mosaic.
-    logger.info(f"Running cloud mask on up to {n_time} scenes")
+    # Phase 1+2: stream OCM fetch + cloud masking. One scene's OCM bands are
+    # in memory at a time, and late scenes are skipped entirely once first
+    # mode's coverage is filled or no_data_threshold is met.
+    logger.info(
+        f"Streaming cloud mask over up to {n_time} scenes "
+        f"(per-scene OCM fetch at {ocm_resolution}m, EPSG:{target_crs})"
+    )
     kept_combo_masks_ocm: Dict[int, np.ndarray] = {}
     good_pixel_tracker = np.zeros((ocm_h, ocm_w), dtype=bool)
     pbar = tqdm(
@@ -439,11 +487,19 @@ def run_bounds_pipeline(
             )
             break
 
+        ocm_scene = _fetch_one_ocm(
+            items_list[i],
+            bounds_target,
+            target_crs,
+            ocm_resolution,
+            debug_cache,
+        )
         clear, valid = compute_masks_from_array(
-            ocm_data[i],
+            ocm_scene,
             batch_size=ocm_batch_size,
             inference_dtype=ocm_inference_dtype,
         )
+        del ocm_scene
         # compute_masks_from_array returns at OCM resolution; no resize here.
         combo = clear & valid
 
