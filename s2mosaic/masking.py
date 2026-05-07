@@ -2,9 +2,10 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Tuple
 
+import cv2
 import numpy as np
 import pystac
-import scipy
+from multiclean import clean_array
 from omnicloudmask import predict_from_array
 
 from .data_reader import get_full_band
@@ -15,8 +16,9 @@ def get_valid_mask(bands: np.ndarray, dilation_count: int = 4) -> np.ndarray:
     no_data = (bands.sum(axis=0) == 0).astype(np.uint8)
     # erode mask to remove edge pixels
     if dilation_count > 0:
-        no_data = scipy.ndimage.binary_dilation(no_data, iterations=dilation_count)
-    return ~no_data
+        kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+        no_data = cv2.dilate(no_data, kernel, iterations=dilation_count)
+    return no_data == 0
 
 
 def get_masks(
@@ -47,6 +49,10 @@ def get_masks(
         )[0]
         == 0
     )
+    mask_dtype = mask.dtype
+    mask = clean_array(
+        mask.astype(np.uint8), min_island_size=8, smooth_edge_size=3, connectivity=4
+    ).astype(mask_dtype)
     # interpolate mask back to 10m
     mask = mask.repeat(2, axis=0).repeat(2, axis=1)
     valid_mask = get_valid_mask(ocm_input)

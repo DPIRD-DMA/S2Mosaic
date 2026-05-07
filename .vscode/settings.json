@@ -5,6 +5,7 @@
         "forcelist",
         "gpkg",
         "mgrs",
+        "multiclean",
         "nanquantile",
         "ndarray",
         "ndimage",
