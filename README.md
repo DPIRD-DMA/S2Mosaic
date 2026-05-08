@@ -172,6 +172,8 @@ If your application already configures the `logging` module, the package logger 
 
 Contributions to S2Mosaic are welcome! Please feel free to submit pull requests, create issues, or suggest improvements.
 
+For maintainers: the release flow (cut a tag, GitHub Actions builds + publishes to PyPI) is documented in [RELEASING.md](https://github.com/DPIRD-DMA/S2Mosaic/blob/main/RELEASING.md).
+
 ### Debug caching
 
 When iterating on the code or running the slow test suite, set the `S2MOSAIC_DEBUG_CACHE` environment variable to skip repeated STAC and COG fetches:

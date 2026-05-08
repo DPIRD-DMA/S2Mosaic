@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools >= 61.0"]
+requires = ["setuptools >= 61.0", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -37,8 +37,8 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Image Processing",
 ]
 
-[tool.setuptools.dynamic]
-version = {attr = "s2mosaic.__version__.__version__"}
+[tool.setuptools_scm]
+version_file = "s2mosaic/_version.py"
 
 [project.urls]
 Homepage = "https://github.com/DPIRD-DMA/S2Mosaic"
