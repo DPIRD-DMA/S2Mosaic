@@ -19,14 +19,33 @@ dependencies = [
     "stackstac>=0.5.1",
 ]
 license = "MIT"
+license-files = ["LICENSE"]
 readme = {file = "README.md", content-type = "text/markdown"}
 keywords = ["sentinel-2", "satellite", "mosaic", "remote-sensing"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
 
 [tool.setuptools.dynamic]
 version = {attr = "s2mosaic.__version__.__version__"}
 
 [project.urls]
 Homepage = "https://github.com/DPIRD-DMA/S2Mosaic"
+Repository = "https://github.com/DPIRD-DMA/S2Mosaic"
+Issues = "https://github.com/DPIRD-DMA/S2Mosaic/issues"
+Changelog = "https://github.com/DPIRD-DMA/S2Mosaic/blob/main/CHANGELOG.md"
+Blog = "https://dpird-dma.github.io/blog/S2Mosaic-Creating-Cloud-Free-Sentinel-2-Mosaics/"
 
 [tool.setuptools.package-data]
 s2mosaic = ["sentinel_2_index.gpkg", "py.typed"]
