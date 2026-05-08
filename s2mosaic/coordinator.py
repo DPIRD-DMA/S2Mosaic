@@ -7,10 +7,12 @@ import numpy as np
 from .bounds import Bbox, run_bounds_pipeline
 from .frequent_coverage import get_frequent_coverage
 from .helpers import (
+    MGRS_TILE_SIZE_M,
     define_dates,
-    export_tif,
+    finalize_output,
     get_extent_from_grid_id,
     get_output_path,
+    normalize_mosaic_inputs,
     validate_inputs,
 )
 from .mosaic_core import download_bands_pool
@@ -37,7 +39,6 @@ def mosaic(
     overwrite: bool = ...,
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
-    debug_cache: bool = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
     percentile_value: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
@@ -47,6 +48,7 @@ def mosaic(
     resolution: int = ...,
     coverage_threshold_pct: Optional[float] = ...,
     resampling_method: str = ...,
+    cloud_mask: str = ...,
 ) -> Tuple[np.ndarray, Dict[str, Any]]: ...
 
 
@@ -69,7 +71,6 @@ def mosaic(
     overwrite: bool = ...,
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
-    debug_cache: bool = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
     percentile_value: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
@@ -79,6 +80,7 @@ def mosaic(
     resolution: int = ...,
     coverage_threshold_pct: Optional[float] = ...,
     resampling_method: str = ...,
+    cloud_mask: str = ...,
 ) -> Path: ...
 
 
@@ -99,7 +101,6 @@ def mosaic(
     overwrite: bool = True,
     ocm_batch_size: int = 1,
     ocm_inference_dtype: str = "bf16",
-    debug_cache: bool = False,
     additional_query: Optional[Dict[str, Any]] = None,
     percentile_value: Optional[float] = None,
     ignore_duplicate_items: bool = True,
@@ -109,6 +110,7 @@ def mosaic(
     resolution: int = 10,
     coverage_threshold_pct: Optional[float] = 0.1,
     resampling_method: str = "nearest",
+    cloud_mask: str = "OCM",
 ) -> Union[Tuple[np.ndarray, Dict[str, Any]], Path]:
     """
     Create a Sentinel-2 mosaic.
@@ -140,12 +142,15 @@ def mosaic(
         overwrite (bool, optional): Whether to overwrite existing output files. Defaults to True.
         ocm_batch_size (int, optional): Batch size for OCM inference. Defaults to 1.
         ocm_inference_dtype (str, optional): Data type for OCM inference. Defaults to "bf16".
-        debug_cache (bool, optional): Whether to cache downloads for faster debugging. Defaults to False.
         additional_query (Dict[str, Any], optional): Additional query parameters for STAC API.
             Defaults to {"eo:cloud_cover": {"lt": 100}}.
         percentile_value (Optional[float], optional): If provided, calculates the specified percentile mosaic.
             must be used with `mosaic_method='percentile'`. Defaults to None, can be a value between 0 and 100.
         ignore_duplicate_items (bool, optional): Whether to remove duplicate scenes based on their IDs. Defaults to True.
+        cloud_mask (str, optional): Cloud-mask provider. ``"OCM"`` (default) runs the
+            OmniCloudMask deep-learning model on R+G+NIR; ``"SCL"`` reads the L2A
+            Scene Classification Layer published with the scene. SCL is much cheaper
+            (one COG read, no inference) but lower accuracy.
 
     Returns:
         Union[Tuple[np.ndarray, Dict[str, Any]], Path]: If output_dir is None, returns a tuple
@@ -186,32 +191,28 @@ def mosaic(
             overwrite=overwrite,
             ocm_batch_size=ocm_batch_size,
             ocm_inference_dtype=ocm_inference_dtype,
-            debug_cache=debug_cache,
             additional_query=additional_query,
             percentile_value=percentile_value,
             ignore_duplicate_items=ignore_duplicate_items,
             coverage_threshold_pct=coverage_threshold_pct,
             resampling_method=resampling_method,
+            cloud_mask=cloud_mask,
         )
 
-    if required_bands is None:
-        required_bands = ["B04", "B03", "B02", "B08"]
-
-    if additional_query is None:
-        additional_query = {"eo:cloud_cover": {"lt": 100}}
-
-    if sort_function:
-        sort_method = "custom"
-
-    # If mosaic method is passed as "median",
-    # it is converted to "percentile" with a value of 50.0
-    if mosaic_method == "median":
-        if percentile_value is not None:
-            raise ValueError(
-                "percentile_value should not be set when using mosaic_method='median'."
-            )
-        mosaic_method = "percentile"
-        percentile_value = 50.0
+    (
+        required_bands,
+        additional_query,
+        sort_method,
+        mosaic_method,
+        percentile_value,
+    ) = normalize_mosaic_inputs(
+        required_bands=required_bands,
+        additional_query=additional_query,
+        sort_method=sort_method,
+        sort_function=sort_function,
+        mosaic_method=mosaic_method,
+        percentile_value=percentile_value,
+    )
     logger.info(
         f"Creating mosaic for grid {grid_id} "
         f"from {start_year}-{start_month:02d}-{start_day:02d} "
@@ -228,6 +229,7 @@ def mosaic(
         grid_id=grid_id,
         percentile_value=percentile_value,
         resampling_method=resampling_method,
+        cloud_mask=cloud_mask,
     )
     logger.info("All inputs validated successfully.")
 
@@ -276,8 +278,7 @@ def mosaic(
             f"and {end_date.strftime('%Y-%m-%d')}"
         )
 
-    # MGRS tile is 109800m on each side; output pixel side count derives from resolution
-    target_size = int(round(109800 / resolution))
+    target_size = int(round(MGRS_TILE_SIZE_M / resolution))
 
     # for scenes with only partial S2 coverage work out which pixels are covered
     if coverage_threshold_pct is None:
@@ -306,32 +307,17 @@ def mosaic(
         mosaic_method=mosaic_method,
         ocm_batch_size=ocm_batch_size,
         ocm_inference_dtype=ocm_inference_dtype,
-        debug_cache=debug_cache,
         coverage_mask=coverage_mask,
         percentile_value=percentile_value,
         s2_scene_size=target_size,
         resampling_method=resampling_method,
         resolution=resolution,
+        cloud_mask=cloud_mask,
     )
-    if coverage_threshold_pct is not None:
-        mosaic = np.where(coverage_mask[None, :, :], mosaic, 0)
-
-    if "visual" in required_bands:
-        required_bands = ["Red", "Green", "Blue"]
-        nodata_value = None
-    else:
-        nodata_value = 0
-
-    if output_dir:
-        logger.info(f"Writing GeoTIFF to {export_path}")
-        export_tif(
-            array=mosaic,
-            profile=profile,
-            export_path=export_path,
-            required_bands=required_bands,
-            nodata_value=nodata_value,
-        )
-        return export_path
-
-    logger.info(f"Returning array shape={mosaic.shape} dtype={mosaic.dtype}")
-    return mosaic, profile
+    return finalize_output(
+        array=mosaic,
+        profile=profile,
+        required_bands=required_bands,
+        coverage_mask=coverage_mask if coverage_threshold_pct is not None else None,
+        export_path=export_path if output_dir else None,
+    )

@@ -10,13 +10,17 @@ sys.path.insert(0, str(project_root))
 
 from s2mosaic import mosaic
 from s2mosaic import bounds as bounds_module
-from s2mosaic.bounds import _aggregate, pick_utm_epsg, reproject_bbox
+from s2mosaic.bounds import aggregate_stack, pick_utm_epsg, reproject_bbox
 from s2mosaic.frequent_coverage import (
     get_coverage,
     get_frequent_coverage_for_bbox,
     get_raster_coverage,
 )
-from s2mosaic.masking import get_valid_mask
+from s2mosaic.masking import (
+    SCL_CLOUDY_CLASSES,
+    compute_masks_from_scl,
+    get_valid_mask,
+)
 from s2mosaic.mosaic_utils import calculate_percentile_mosaic
 
 
@@ -73,6 +77,54 @@ class TestGetValidMask:
     def test_returns_bool_dtype(self):
         bands = np.zeros((3, 10, 10), dtype=np.uint16)
         assert get_valid_mask(bands).dtype == bool
+
+
+class TestComputeMasksFromScl:
+    """SCL-based clear+valid mask logic."""
+
+    def test_known_class_layout(self):
+        # One pixel of every class 0..11 in a single row.
+        scl = np.arange(12, dtype=np.uint8).reshape(1, 12)
+        clear, valid = compute_masks_from_scl(scl, dilation_count=0)
+        # Cloudy classes (1, 3, 8, 9, 10) → clear=False; everything else clear=True
+        for cls in range(12):
+            expected_clear = cls not in SCL_CLOUDY_CLASSES
+            assert bool(clear[0, cls]) == expected_clear, (
+                f"class {cls} clear={clear[0, cls]}"
+            )
+        # No-data (class 0) is the only invalid pixel without dilation
+        assert not valid[0, 0]
+        for cls in range(1, 12):
+            assert valid[0, cls]
+
+    def test_cloudy_classes_match_constant(self):
+        # Defensive: lock down the constant so changes are explicit
+        assert SCL_CLOUDY_CLASSES == (1, 3, 8, 9, 10)
+
+    def test_dilation_grows_invalid_around_no_data(self):
+        # Single no-data pixel → 4-iter MORPH_CROSS dilate → diamond of invalids
+        scl = np.full((50, 50), 5, dtype=np.uint8)  # all bare-soil
+        scl[25, 25] = 0
+        _, valid = compute_masks_from_scl(scl, dilation_count=4)
+        assert not valid[25, 25]
+        assert not valid[21, 25]  # Manhattan dist 4
+        assert not valid[25, 21]
+        assert valid[20, 25]  # dist 5 still valid
+        assert valid[25, 20]
+
+    def test_3d_input_squeezes_first_axis(self):
+        # get_full_band returns (1, H, W); compute_masks_from_scl should handle that
+        scl = np.array([[[0, 1, 4, 8]]], dtype=np.uint8)  # shape (1, 1, 4)
+        clear, valid = compute_masks_from_scl(scl, dilation_count=0)
+        assert clear.shape == (1, 4)
+        np.testing.assert_array_equal(clear[0], [True, False, True, False])
+        np.testing.assert_array_equal(valid[0], [False, True, True, True])
+
+    def test_returns_bool_dtype(self):
+        scl = np.zeros((10, 10), dtype=np.uint8)
+        clear, valid = compute_masks_from_scl(scl)
+        assert clear.dtype == bool
+        assert valid.dtype == bool
 
 
 class TestZoomAlignmentConvention:
@@ -262,26 +314,26 @@ class TestAggregate:
     def test_mean_with_all_masks_true(self):
         stack = self._stack([10, 20, 30])
         masks = [self._mask(True)] * 3
-        out = _aggregate(stack, masks, "mean", percentile_value=None)
+        out = aggregate_stack(stack, masks, "mean", percentile_value=None)
         np.testing.assert_allclose(out, 20.0)
 
     def test_mean_zero_where_no_valid_pixels(self):
         stack = self._stack([10, 20])
         masks = [self._mask(False)] * 2
-        out = _aggregate(stack, masks, "mean", percentile_value=None)
+        out = aggregate_stack(stack, masks, "mean", percentile_value=None)
         np.testing.assert_array_equal(out, 0.0)
 
     def test_first_picks_earliest_valid(self):
         stack = self._stack([10, 20, 30])
         # Only 2nd scene is valid → output should be 20
         masks = [self._mask(False), self._mask(True), self._mask(True)]
-        out = _aggregate(stack, masks, "first", percentile_value=None)
+        out = aggregate_stack(stack, masks, "first", percentile_value=None)
         np.testing.assert_allclose(out, 20.0)
 
     def test_percentile_50_matches_median(self):
         stack = self._stack([10, 50, 90])
         masks = [self._mask(True)] * 3
-        out = _aggregate(stack, masks, "percentile", percentile_value=50.0)
+        out = aggregate_stack(stack, masks, "percentile", percentile_value=50.0)
         np.testing.assert_allclose(out, 50.0)
 
 
@@ -414,6 +466,7 @@ class TestCachedStackCompute:
     def test_cache_miss_then_hit(self, tmp_path, monkeypatch):
         # Run inside a tmp dir so the "cache/" path doesn't litter the repo
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("S2MOSAIC_DEBUG_CACHE", "1")
 
         # Fake item with an .id (only attribute the cache key reads)
         class _FakeItem:
@@ -444,45 +497,43 @@ class TestCachedStackCompute:
         monkeypatch.setattr(bounds_module.stackstac, "stack", fake_stack)
 
         # First call: cache miss → invokes stack
-        out1 = bounds_module._cached_stack_compute(
+        out1 = bounds_module.cached_stack_compute(
             items,
             ["B04"],
             bounds_target,
             32750,
             10,
             "uint16",
-            debug_cache=True,
         )
         assert call_count["n"] == 1
         np.testing.assert_array_equal(out1, fake_arr)
 
         # Second call with same args: cache hit → does not invoke stack
-        out2 = bounds_module._cached_stack_compute(
+        out2 = bounds_module.cached_stack_compute(
             items,
             ["B04"],
             bounds_target,
             32750,
             10,
             "uint16",
-            debug_cache=True,
         )
         assert call_count["n"] == 1
         np.testing.assert_array_equal(out2, fake_arr)
 
         # Different args (resolution=20) → cache miss again
-        bounds_module._cached_stack_compute(
+        bounds_module.cached_stack_compute(
             items,
             ["B04"],
             bounds_target,
             32750,
             20,
             "uint16",
-            debug_cache=True,
         )
         assert call_count["n"] == 2
 
-    def test_no_cache_when_disabled(self, tmp_path, monkeypatch):
+    def test_no_cache_when_env_var_unset(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("S2MOSAIC_DEBUG_CACHE", raising=False)
 
         class _FakeItem:
             def __init__(self, id_):
@@ -510,17 +561,187 @@ class TestCachedStackCompute:
         monkeypatch.setattr(bounds_module.stackstac, "stack", fake_stack)
 
         for _ in range(3):
-            bounds_module._cached_stack_compute(
+            bounds_module.cached_stack_compute(
                 items,
                 ["B04"],
                 bounds_target,
                 32750,
                 10,
                 "uint16",
-                debug_cache=False,
             )
         assert call_count["n"] == 3
         assert not (tmp_path / "cache").exists()
+
+
+class TestDebugCacheEnvVar:
+    """Env-var gating for the debug-cache machinery (pickle_cache + disk_cache)."""
+
+    def test_unset_env_var_means_disabled(self, monkeypatch):
+        from s2mosaic.helpers import debug_cache_enabled
+
+        monkeypatch.delenv("S2MOSAIC_DEBUG_CACHE", raising=False)
+        assert debug_cache_enabled() is False
+
+    @pytest.mark.parametrize("value", ["1", "true", "True", "TRUE", "yes", "YES"])
+    def test_truthy_values_enable(self, monkeypatch, value):
+        from s2mosaic.helpers import debug_cache_enabled
+
+        monkeypatch.setenv("S2MOSAIC_DEBUG_CACHE", value)
+        assert debug_cache_enabled() is True
+
+    @pytest.mark.parametrize("value", ["0", "false", "no", "", "bogus"])
+    def test_non_truthy_values_disable(self, monkeypatch, value):
+        from s2mosaic.helpers import debug_cache_enabled
+
+        monkeypatch.setenv("S2MOSAIC_DEBUG_CACHE", value)
+        assert debug_cache_enabled() is False
+
+    def test_pickle_cache_skips_disk_when_disabled(self, tmp_path, monkeypatch):
+        """When env var is unset, pickle_cache must not write to disk."""
+        from s2mosaic.helpers import pickle_cache
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("S2MOSAIC_DEBUG_CACHE", raising=False)
+
+        calls = {"n": 0}
+
+        def compute():
+            calls["n"] += 1
+            return 42
+
+        # Two calls with the same key — both should compute, nothing on disk
+        assert pickle_cache("p", "k", compute) == 42
+        assert pickle_cache("p", "k", compute) == 42
+        assert calls["n"] == 2
+        assert not (tmp_path / "cache").exists()
+
+    def test_pickle_cache_writes_and_hits_when_enabled(self, tmp_path, monkeypatch):
+        from s2mosaic.helpers import pickle_cache
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("S2MOSAIC_DEBUG_CACHE", "1")
+
+        calls = {"n": 0}
+
+        def compute():
+            calls["n"] += 1
+            return {"answer": 42}
+
+        out1 = pickle_cache("p", "k", compute)
+        out2 = pickle_cache("p", "k", compute)
+        assert out1 == out2 == {"answer": 42}
+        assert calls["n"] == 1  # second call was a hit
+        # Cache file written under the configured prefix
+        cache_files = list((tmp_path / "cache").glob("p_*.pkl"))
+        assert len(cache_files) == 1
+
+
+class TestDiskCacheDecorator:
+    """Behaviour of the @disk_cache decorator wrapping a function."""
+
+    def test_disabled_env_skips_keyfn_and_caching(self, tmp_path, monkeypatch):
+        from s2mosaic.helpers import disk_cache
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("S2MOSAIC_DEBUG_CACHE", raising=False)
+
+        key_calls = {"n": 0}
+        fn_calls = {"n": 0}
+
+        def key_fn(x):
+            key_calls["n"] += 1
+            return f"k{x}"
+
+        @disk_cache("dec_test", key_fn=key_fn)
+        def fn(x):
+            fn_calls["n"] += 1
+            return x * 2
+
+        # Two calls with same arg: both compute, key_fn never invoked
+        assert fn(3) == 6
+        assert fn(3) == 6
+        assert fn_calls["n"] == 2
+        assert key_calls["n"] == 0
+        assert not (tmp_path / "cache").exists()
+
+    def test_enabled_env_caches_by_key(self, tmp_path, monkeypatch):
+        from s2mosaic.helpers import disk_cache
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("S2MOSAIC_DEBUG_CACHE", "1")
+
+        fn_calls = {"n": 0}
+
+        @disk_cache("dec_test", key_fn=lambda x: f"k{x}")
+        def fn(x):
+            fn_calls["n"] += 1
+            return x * 2
+
+        # Same key → second call is a hit
+        assert fn(3) == 6
+        assert fn(3) == 6
+        assert fn_calls["n"] == 1
+        # Different key → second compute
+        assert fn(4) == 8
+        assert fn_calls["n"] == 2
+        # And third call with x=4 hits again
+        assert fn(4) == 8
+        assert fn_calls["n"] == 2
+
+    def test_key_fn_receives_same_args_as_fn(self, tmp_path, monkeypatch):
+        """key_fn must be passed exactly the wrapped function's args/kwargs."""
+        from s2mosaic.helpers import disk_cache
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("S2MOSAIC_DEBUG_CACHE", "1")
+
+        seen_args = []
+
+        def key_fn(*args, **kwargs):
+            seen_args.append((args, kwargs))
+            return "fixed"  # constant key — second call is a hit
+
+        @disk_cache("dec_test", key_fn=key_fn)
+        def fn(a, b, c=10):
+            return a + b + c
+
+        fn(1, 2, c=3)
+        # On a hit, key_fn is still called once to compute the lookup key
+        assert seen_args[0] == ((1, 2), {"c": 3})
+
+    def test_decorator_preserves_function_metadata(self):
+        from s2mosaic.helpers import disk_cache
+
+        @disk_cache("p", key_fn=lambda x: str(x))
+        def my_fn(x):
+            """My docstring."""
+            return x
+
+        assert my_fn.__name__ == "my_fn"
+        assert my_fn.__doc__ == "My docstring."
+
+    def test_different_prefixes_do_not_collide(self, tmp_path, monkeypatch):
+        """Two fns with same key but different prefixes write distinct files."""
+        from s2mosaic.helpers import disk_cache
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("S2MOSAIC_DEBUG_CACHE", "1")
+
+        @disk_cache("alpha", key_fn=lambda: "shared")
+        def fn_a():
+            return "A"
+
+        @disk_cache("beta", key_fn=lambda: "shared")
+        def fn_b():
+            return "B"
+
+        assert fn_a() == "A"
+        assert fn_b() == "B"
+        # Two distinct files in the cache dir
+        files = sorted(p.name for p in (tmp_path / "cache").glob("*.pkl"))
+        assert len(files) == 2
+        assert any(f.startswith("alpha_") for f in files)
+        assert any(f.startswith("beta_") for f in files)
 
 
 class TestMosaicSharedParamsValidation:
@@ -556,6 +777,14 @@ class TestMosaicSharedParamsValidation:
             mosaic(
                 start_year=2023, bounds=self.BOUNDS, resampling_method="not_a_method"
             )
+
+    def test_grid_mode_rejects_invalid_cloud_mask(self):
+        with pytest.raises(ValueError, match="Invalid cloud_mask"):
+            mosaic("50HMH", 2023, cloud_mask="bogus")
+
+    def test_bounds_mode_rejects_invalid_cloud_mask(self):
+        with pytest.raises(ValueError, match="Invalid cloud_mask"):
+            mosaic(start_year=2023, bounds=self.BOUNDS, cloud_mask="bogus")
 
 
 class TestPickOcmResolution:

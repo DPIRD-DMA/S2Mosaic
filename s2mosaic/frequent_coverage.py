@@ -12,6 +12,8 @@ from rasterio.features import rasterize
 from rasterio.transform import Affine
 from shapely.geometry import Polygon
 
+from .helpers import MGRS_TILE_SIZE_M
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,9 +44,7 @@ def get_raster_coverage(
     extent = scene_gdf.total_bounds
     x_min, _, _, y_max = extent
 
-    # MGRS tile is exactly 109800m on each side
-    tile_size_m = 109800
-    side_px = int(round(tile_size_m / resolution))
+    side_px = int(round(MGRS_TILE_SIZE_M / resolution))
 
     geoms_with_values = [(geom, 1) for geom in coverage_gdf_local.geometry]
     raster = rasterize(

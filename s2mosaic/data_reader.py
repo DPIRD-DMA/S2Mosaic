@@ -1,6 +1,4 @@
 import logging
-import pickle
-from pathlib import Path
 from typing import Any, Dict, Tuple
 
 import cv2
@@ -9,6 +7,8 @@ import planetary_computer
 import rasterio as rio
 from rasterio.enums import Resampling
 from rasterio.windows import Window
+
+from .helpers import disk_cache
 
 logger = logging.getLogger(__name__)
 
@@ -70,30 +70,35 @@ def read_in_chunks(
         return all_data
 
 
+def _band_with_mask_key(
+    href_and_index: tuple[str, int],
+    mask: np.ndarray,
+    target_size: int,
+    resampling: Resampling = Resampling.nearest,
+    attempt: int = 0,
+    mosaic_method: str = "",
+) -> str:
+    href, index = href_and_index
+    href_parts = href.split("/")
+    return (
+        f"{href_parts[-4]}|{href_parts[-1]}|{index}|{mosaic_method}"
+        f"|{target_size}|{resampling.name}|masked"
+    )
+
+
+@disk_cache("band", key_fn=_band_with_mask_key)
 def get_band_with_mask(
     href_and_index: tuple[str, int],
     mask: np.ndarray,
     target_size: int,
     resampling: Resampling = Resampling.nearest,
     attempt: int = 0,
-    debug_cache: bool = False,
     mosaic_method: str = "",
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Download a S2 band at `target_size` resolution, in chunks intersecting `mask`."""
     href = href_and_index[0]
     index = href_and_index[1]
-    if debug_cache:
-        href_parts = href.split("/")
-        cache_name = (
-            f"{href_parts[-4]}_{href_parts[-1]}_{index}_{mosaic_method}"
-            f"_{target_size}_{resampling.name}_masked.pkl"
-        )
-        cache_path = Path("cache") / cache_name
-        cache_path.parent.mkdir(exist_ok=True)
-        if cache_path.exists():
-            with open(cache_path, "rb") as f:
-                result = pickle.load(f)
-            return result
+
     try:
         singed_href = planetary_computer.sign(href)
         with rio.open(singed_href) as src:
@@ -110,26 +115,18 @@ def get_band_with_mask(
             profile["transform"] = src.transform * rio.Affine.scale(scale_x, scale_y)
             profile["width"] = target_size
             profile["height"] = target_size
-            result = array, profile
-            if debug_cache:
-                with open(cache_path, "wb") as f:
-                    pickle.dump(result, f)
-
-            return result
+            return array, profile
 
     except Exception as e:
         logger.error(f"Failed to open {href}: {e}")
         if attempt < 3:
             logger.info(f"Retrying attempt {attempt + 1}/3")
-            if debug_cache:
-                logger.info("Debug cache is enabled, skipping cache for retry")
             return get_band_with_mask(
                 href_and_index=href_and_index,
                 mask=mask,
                 target_size=target_size,
                 resampling=resampling,
                 attempt=attempt + 1,
-                debug_cache=False,
                 mosaic_method=mosaic_method,
             )
         else:
@@ -139,25 +136,19 @@ def get_band_with_mask(
             ) from None
 
 
+def _full_band_key(href: str, attempt: int = 0, res: int = 10) -> str:
+    href_parts = href.split("/")
+    return f"{href_parts[-4]}|{href_parts[-1]}|{res / 10}|{res}"
+
+
+@disk_cache("full_band", key_fn=_full_band_key)
 def get_full_band(
-    href: str, attempt: int = 0, res: int = 10, debug_cache: bool = False
+    href: str, attempt: int = 0, res: int = 10
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
+    spatial_ratio = res / 10
+
     try:
         singed_href = planetary_computer.sign(href)
-        spatial_ratio = res / 10
-
-        if debug_cache:
-            href_parts = href.split("/")
-            cache_path = (
-                Path("cache")
-                / f"{href_parts[-4]}_{href_parts[-1]}_{spatial_ratio}_{res}.pkl"
-            )
-            cache_path.parent.mkdir(exist_ok=True)
-            if cache_path.exists():
-                with open(cache_path, "rb") as f:
-                    result = pickle.load(f)
-                return result
-
         is_tci = "TCI_10m" in href
         with rio.open(singed_href) as src:
             target_side = int(10980 / spatial_ratio)
@@ -178,21 +169,13 @@ def get_full_band(
                     window=full_window,
                     out_shape=(target_side, target_side),
                 ).astype(np.uint16)[None, :, :]
-            result = array, src.profile.copy()
-            if debug_cache:
-                with open(cache_path, "wb") as f:
-                    pickle.dump(result, f)
-            return result
+            return array, src.profile.copy()
 
     except Exception as e:
         logger.error(f"Failed to open {href}: {e}")
         if attempt < 3:
             logger.info(f"Retrying attempt {attempt + 1}/3")
-            if debug_cache:
-                logger.info("Debug cache is enabled, skipping cache for retry")
-            return get_full_band(
-                href=href, attempt=attempt + 1, res=res, debug_cache=False
-            )
+            return get_full_band(href=href, attempt=attempt + 1, res=res)
         else:
             logger.error(f"All retry attempts failed for {href}")
             raise Exception(

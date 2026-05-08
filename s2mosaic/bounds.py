@@ -4,9 +4,7 @@ Uses stackstac to fetch and reproject scenes onto a common UTM grid in one
 step, then runs the same cloud-mask + aggregation logic as the grid_id path.
 """
 
-import hashlib
 import logging
-import pickle
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
@@ -21,27 +19,31 @@ import stackstac
 from pyproj import Transformer
 from pystac.item_collection import ItemCollection
 from pystac_client.stac_api_io import StacApiIO
+from rasterio.crs import CRS
 from rasterio.transform import Affine
 from rasterio.vrt import WarpedVRT
-from tqdm.auto import tqdm
 from urllib3 import Retry
 
 from .frequent_coverage import get_frequent_coverage_for_bbox
 from .helpers import (
+    CLOUD_MASK_OCM,
+    CLOUD_MASK_SCL,
     MOSAIC_FIRST,
     MOSAIC_MEAN,
     MOSAIC_PERCENTILE,
     define_dates,
-    export_tif,
+    disk_cache,
+    finalize_output,
     get_output_path,
     get_rasterio_resampling,
+    normalize_mosaic_inputs,
     pick_ocm_resolution,
-    progress_disabled,
     validate_inputs,
 )
-from .masking import compute_masks_from_array
+from .masking import compute_masks_from_array, compute_masks_from_scl
 from .mosaic_utils import calculate_percentile_mosaic
 from .stac_utils import (
+    ITEM_COL,
     add_item_info,
     filter_latest_processing_baselines,
     sort_items,
@@ -105,13 +107,20 @@ def search_for_items_by_bbox(
     return items
 
 
-def _aggregate(
+def aggregate_stack(
     user_data: np.ndarray,
     combo_masks: List[np.ndarray],
     mosaic_method: str,
     percentile_value: Optional[float],
 ) -> np.ndarray:
-    """Aggregate (time, bands, h, w) stack into (bands, h, w) using combo_masks."""
+    """Aggregate a fetch-then-aggregate scene stack into one mosaic.
+
+    Used by bounds mode, which materialises ``(time, bands, h, w)`` up front
+    and aggregates after — possible because cloud-mask streaming has already
+    skipped any scene that wouldn't contribute. Grid mode does its own
+    in-loop accumulation in ``mosaic_core.download_bands_pool`` because it
+    early-terminates band downloads once ``no_data_threshold`` is met.
+    """
     n_time, _, h, _ = user_data.shape
 
     if mosaic_method == MOSAIC_PERCENTILE:
@@ -148,14 +157,30 @@ def _aggregate(
     raise ValueError(f"Unsupported mosaic_method: {mosaic_method}")
 
 
-def _cached_stack_compute(
+def _stack_compute_key(
     items_list: list,
     assets: List[str],
     bounds_target: Bbox,
     target_crs: int,
     resolution: int,
     dtype: str,
-    debug_cache: bool,
+    resampling: str = "nearest",
+) -> str:
+    item_ids = ",".join(sorted(item.id for item in items_list))
+    return (
+        f"{bounds_target}|{target_crs}|{resolution}|"
+        f"{','.join(assets)}|{dtype}|{resampling}|{item_ids}"
+    )
+
+
+@disk_cache("stack", key_fn=_stack_compute_key)
+def cached_stack_compute(
+    items_list: list,
+    assets: List[str],
+    bounds_target: Bbox,
+    target_crs: int,
+    resolution: int,
+    dtype: str,
     resampling: str = "nearest",
 ) -> np.ndarray:
     """Materialise a stackstac stack as `dtype`, with optional pickle cache.
@@ -164,19 +189,6 @@ def _cached_stack_compute(
     (no integer fits this for uint16/uint8), so we fetch as float32 with NaN
     fill, then nan_to_num + cast to the requested integer dtype here.
     """
-    cache_path: Optional[Path] = None
-    if debug_cache:
-        item_ids = ",".join(sorted(item.id for item in items_list))
-        key = (
-            f"{bounds_target}|{target_crs}|{resolution}|"
-            f"{','.join(assets)}|{dtype}|{resampling}|{item_ids}"
-        )
-        digest = hashlib.md5(key.encode()).hexdigest()
-        cache_path = Path("cache") / f"stack_{digest}.pkl"
-        if cache_path.exists():
-            with open(cache_path, "rb") as f:
-                return pickle.load(f)
-
     stack = stackstac.stack(
         items_list,
         assets=assets,
@@ -188,24 +200,94 @@ def _cached_stack_compute(
         sortby_date=False,  # preserve caller's order (valid_data, etc.)
     )
     arr_float = stack.compute().values
-    arr = np.nan_to_num(arr_float, nan=0).astype(dtype)
-
-    if cache_path is not None:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(cache_path, "wb") as f:
-            pickle.dump(arr, f)
-    return arr
+    return np.nan_to_num(arr_float, nan=0).astype(dtype)
 
 
 _OCM_BANDS: Tuple[str, str, str] = ("B04", "B03", "B8A")
 
 
+def _target_grid(
+    bounds_target: Bbox, resolution: int, target_crs: int
+) -> Tuple[Affine, int, int, CRS]:
+    """Pixel grid + CRS for ``bounds_target`` at ``resolution`` in ``target_crs``."""
+    minx, miny, maxx, maxy = bounds_target
+    width = int(round((maxx - minx) / resolution))
+    height = int(round((maxy - miny) / resolution))
+    transform = Affine(resolution, 0, minx, 0, -resolution, maxy)
+    target_crs_obj = CRS.from_epsg(target_crs)
+    return transform, width, height, target_crs_obj
+
+
+def _read_warpvrt(
+    href: str,
+    indices: Union[int, List[int]],
+    transform: Affine,
+    width: int,
+    height: int,
+    target_crs_obj: CRS,
+    rio_resampling: Any,
+) -> np.ndarray:
+    """Open ``href`` and read ``indices`` through a WarpedVRT snapped to the grid."""
+    with rio.open(href) as src:
+        with WarpedVRT(
+            src,
+            crs=target_crs_obj,
+            transform=transform,
+            width=width,
+            height=height,
+            resampling=rio_resampling,
+        ) as vrt:
+            return vrt.read(indices)
+
+
+def _fetch_one_scl_key(
+    item: Any,
+    bounds_target: Bbox,
+    target_crs: int,
+    mask_resolution: int,
+) -> str:
+    return f"{item.id}|{bounds_target}|{target_crs}|{mask_resolution}"
+
+
+@disk_cache("scl", key_fn=_fetch_one_scl_key)
+def _fetch_one_scl(
+    item: Any,
+    bounds_target: Bbox,
+    target_crs: int,
+    mask_resolution: int,
+) -> np.ndarray:
+    """Fetch one scene's SCL band as (h, w) uint8 at ``mask_resolution``.
+
+    Analog of :func:`_fetch_one_ocm` for the SCL cloud-mask provider — a
+    single COG read, no DL inference. SCL is native 20m; the WarpedVRT will
+    upsample if ``mask_resolution`` < 20.
+    """
+    transform, width, height, target_crs_obj = _target_grid(
+        bounds_target, mask_resolution, target_crs
+    )
+    rio_resampling = get_rasterio_resampling("nearest")
+    href = planetary_computer.sign(item.assets["SCL"].href)
+    arr = _read_warpvrt(
+        href, 1, transform, width, height, target_crs_obj, rio_resampling
+    )
+    return arr.astype(np.uint8)
+
+
+def _fetch_one_ocm_key(
+    item: Any,
+    bounds_target: Bbox,
+    target_crs: int,
+    ocm_resolution: int,
+) -> str:
+    return f"{item.id}|{bounds_target}|{target_crs}|{ocm_resolution}"
+
+
+@disk_cache("ocm", key_fn=_fetch_one_ocm_key)
 def _fetch_one_ocm(
     item: Any,
     bounds_target: Bbox,
     target_crs: int,
     ocm_resolution: int,
-    debug_cache: bool,
 ) -> np.ndarray:
     """Fetch one scene's OCM bands (B04, B03, B8A) as (3, h, w) uint16.
 
@@ -214,54 +296,41 @@ def _fetch_one_ocm(
     loop and discard each as it goes (and skip fetching late scenes entirely
     once the no_data threshold or first-mode coverage is met).
     """
-    minx, miny, maxx, maxy = bounds_target
-    width = int(round((maxx - minx) / ocm_resolution))
-    height = int(round((maxy - miny) / ocm_resolution))
-    transform = Affine(ocm_resolution, 0, minx, 0, -ocm_resolution, maxy)
-    target_crs_obj = rio.crs.CRS.from_epsg(target_crs)
-
-    cache_path: Optional[Path] = None
-    if debug_cache:
-        key = f"ocm|{item.id}|{bounds_target}|{target_crs}|{ocm_resolution}"
-        digest = hashlib.md5(key.encode()).hexdigest()
-        cache_path = Path("cache") / f"ocm_{digest}.pkl"
-        if cache_path.exists():
-            with open(cache_path, "rb") as cache_f:
-                return pickle.load(cache_f)
-
+    transform, width, height, target_crs_obj = _target_grid(
+        bounds_target, ocm_resolution, target_crs
+    )
     rio_resampling = get_rasterio_resampling("nearest")
 
     def _read_band(band_name: str) -> np.ndarray:
         href = planetary_computer.sign(item.assets[band_name].href)
-        with rio.open(href) as src:
-            with WarpedVRT(
-                src,
-                crs=target_crs_obj,
-                transform=transform,
-                width=width,
-                height=height,
-                resampling=rio_resampling,
-            ) as vrt:
-                return vrt.read(1)
+        return _read_warpvrt(
+            href, 1, transform, width, height, target_crs_obj, rio_resampling
+        )
 
     with ThreadPoolExecutor(max_workers=len(_OCM_BANDS)) as executor:
         bands = list(executor.map(_read_band, _OCM_BANDS))
-    arr = np.stack(bands, axis=0).astype(np.uint16)
-
-    if cache_path is not None:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(cache_path, "wb") as f:
-            pickle.dump(arr, f)
-    return arr
+    return np.stack(bands, axis=0).astype(np.uint16)
 
 
+def _fetch_tci_stack_key(
+    items_list: list,
+    bounds_target: Bbox,
+    target_crs: int,
+    resolution: int,
+    resampling: str,
+    max_workers: int = 4,
+) -> str:
+    item_ids = ",".join(sorted(item.id for item in items_list))
+    return f"{bounds_target}|{target_crs}|{resolution}|{resampling}|{item_ids}"
+
+
+@disk_cache("tci", key_fn=_fetch_tci_stack_key)
 def _fetch_tci_stack(
     items_list: list,
     bounds_target: Bbox,
     target_crs: int,
     resolution: int,
     resampling: str,
-    debug_cache: bool,
     max_workers: int = 4,
 ) -> np.ndarray:
     """Fetch TCI (3-band uint8 RGB) for each item, reprojected to target grid.
@@ -271,45 +340,20 @@ def _fetch_tci_stack(
     stack the results — mirroring the multi-band-index pattern used in
     grid_id mode (data_reader.get_full_band).
     """
-    minx, miny, maxx, maxy = bounds_target
-    width = int(round((maxx - minx) / resolution))
-    height = int(round((maxy - miny) / resolution))
-    transform = Affine(resolution, 0, minx, 0, -resolution, maxy)
-    target_crs_obj = rio.crs.CRS.from_epsg(target_crs)
+    transform, width, height, target_crs_obj = _target_grid(
+        bounds_target, resolution, target_crs
+    )
     rio_resampling = get_rasterio_resampling(resampling)
-
-    cache_path: Optional[Path] = None
-    if debug_cache:
-        item_ids = ",".join(sorted(item.id for item in items_list))
-        key = f"tci|{bounds_target}|{target_crs}|{resolution}|{resampling}|{item_ids}"
-        digest = hashlib.md5(key.encode()).hexdigest()
-        cache_path = Path("cache") / f"tci_{digest}.pkl"
-        if cache_path.exists():
-            with open(cache_path, "rb") as cache_f:
-                return pickle.load(cache_f)
 
     def _fetch_one(item: Any) -> np.ndarray:
         href = planetary_computer.sign(item.assets["visual"].href)
-        with rio.open(href) as src:
-            with WarpedVRT(
-                src,
-                crs=target_crs_obj,
-                transform=transform,
-                width=width,
-                height=height,
-                resampling=rio_resampling,
-            ) as vrt:
-                return vrt.read([1, 2, 3])
+        return _read_warpvrt(
+            href, [1, 2, 3], transform, width, height, target_crs_obj, rio_resampling
+        )
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         arrays = list(executor.map(_fetch_one, items_list))
-    arr = np.stack(arrays, axis=0).astype(np.uint8)
-
-    if cache_path is not None:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(cache_path, "wb") as f:
-            pickle.dump(arr, f)
-    return arr
+    return np.stack(arrays, axis=0).astype(np.uint8)
 
 
 def run_bounds_pipeline(
@@ -332,20 +376,28 @@ def run_bounds_pipeline(
     overwrite: bool = True,
     ocm_batch_size: int = 1,
     ocm_inference_dtype: str = "bf16",
-    debug_cache: bool = False,
     additional_query: Optional[Dict[str, Any]] = None,
     percentile_value: Optional[float] = None,
     ignore_duplicate_items: bool = True,
     coverage_threshold_pct: Optional[float] = 0.1,
     resampling_method: str = "nearest",
+    cloud_mask: str = CLOUD_MASK_OCM,
 ) -> Union[Tuple[np.ndarray, Dict[str, Any]], Path]:
     """Bounds-mode pipeline. Called from mosaic() when bounds is set."""
-    if required_bands is None:
-        required_bands = ["B04", "B03", "B02", "B08"]
-    if additional_query is None:
-        additional_query = {"eo:cloud_cover": {"lt": 100}}
-    if sort_function:
-        sort_method = "custom"
+    (
+        required_bands,
+        additional_query,
+        sort_method,
+        mosaic_method,
+        percentile_value,
+    ) = normalize_mosaic_inputs(
+        required_bands=required_bands,
+        additional_query=additional_query,
+        sort_method=sort_method,
+        sort_function=sort_function,
+        mosaic_method=mosaic_method,
+        percentile_value=percentile_value,
+    )
 
     logger.info(
         f"Creating mosaic for bounds {bounds} (EPSG:{bounds_crs}) "
@@ -354,23 +406,7 @@ def run_bounds_pipeline(
         f"using {mosaic_method} method with bands {required_bands}"
     )
 
-    if mosaic_method == "median":
-        if percentile_value is not None:
-            raise ValueError(
-                "percentile_value should not be set when using mosaic_method='median'."
-            )
-        mosaic_method = MOSAIC_PERCENTILE
-        percentile_value = 50.0
-
     is_visual = "visual" in required_bands
-
-    if len(bounds) != 4:
-        raise ValueError("bounds must be (minx, miny, maxx, maxy)")
-    minx, miny, maxx, maxy = bounds
-    if minx >= maxx or miny >= maxy:
-        raise ValueError(f"Invalid bounds: {bounds}")
-    if resolution <= 0:
-        raise ValueError(f"resolution must be positive, got {resolution}")
 
     validate_inputs(
         sort_method=sort_method,
@@ -380,6 +416,9 @@ def run_bounds_pipeline(
         grid_id=None,
         percentile_value=percentile_value,
         resampling_method=resampling_method,
+        bounds=bounds,
+        resolution=resolution,
+        cloud_mask=cloud_mask,
     )
 
     bounds_4326 = reproject_bbox(bounds, bounds_crs, 4326)
@@ -432,49 +471,51 @@ def run_bounds_pipeline(
         sorted_items = sort_function(items=items_with_orbits)
     else:
         sorted_items = sort_items(items=items_with_orbits, sort_method=sort_method)
-    items_list = sorted_items["item"].tolist()
+    items_list = sorted_items[ITEM_COL].tolist()
 
-    ocm_resolution = pick_ocm_resolution(resolution)
-    logger.info(f"OCM resolution: {ocm_resolution}m")
+    # Mask resolution depends on provider: OCM is fastest at coarser resolutions
+    # so we clamp to [20, 50]; SCL is a single COG read, so we fetch at the
+    # user's output resolution to avoid a resize step. Either way the streaming
+    # loop produces masks at this resolution and the coverage mask is computed
+    # at the same shape.
+    if cloud_mask == CLOUD_MASK_SCL:
+        mask_resolution = resolution
+    else:
+        mask_resolution = pick_ocm_resolution(resolution)
+    logger.info(f"Cloud mask provider {cloud_mask} at {mask_resolution}m")
 
-    # Compute the OCM grid shape from bounds + resolution. Each per-scene
-    # fetch via WarpedVRT will snap to exactly this transform/width/height,
-    # so all OCM scenes share the same (h, w) without us materialising them.
-    ocm_minx, ocm_miny, ocm_maxx, ocm_maxy = bounds_target
-    ocm_w = int(round((ocm_maxx - ocm_minx) / ocm_resolution))
-    ocm_h = int(round((ocm_maxy - ocm_miny) / ocm_resolution))
+    # Each per-scene fetch via WarpedVRT snaps to exactly this transform /
+    # width / height, so all scenes share the same (h, w) without us
+    # materialising them.
+    mask_minx, mask_miny, mask_maxx, mask_maxy = bounds_target
+    mask_w = int(round((mask_maxx - mask_minx) / mask_resolution))
+    mask_h = int(round((mask_maxy - mask_miny) / mask_resolution))
     n_time = len(items_list)
 
-    # Coverage mask at OCM resolution — used for skip decisions.
+    # Coverage mask at mask resolution — used for skip decisions.
     if coverage_threshold_pct is not None:
         coverage_mask_ocm = get_frequent_coverage_for_bbox(
             scenes=items,
             bounds_target=bounds_target,
             target_crs=target_crs,
-            width=ocm_w,
-            height=ocm_h,
-            resolution=ocm_resolution,
+            width=mask_w,
+            height=mask_h,
+            resolution=mask_resolution,
             coverage_threshold_pct=coverage_threshold_pct,
         )
     else:
-        coverage_mask_ocm = np.ones((ocm_h, ocm_w), dtype=bool)
+        coverage_mask_ocm = np.ones((mask_h, mask_w), dtype=bool)
     possible_pixel_count = int(coverage_mask_ocm.sum())
 
-    # Phase 1+2: stream OCM fetch + cloud masking. One scene's OCM bands are
-    # in memory at a time, and late scenes are skipped entirely once first
-    # mode's coverage is filled or no_data_threshold is met.
+    # Phase 1+2: stream cloud-mask fetch + classification. One scene's mask
+    # input is in memory at a time, and late scenes are skipped entirely once
+    # first mode's coverage is filled or no_data_threshold is met.
     logger.info(
         f"Streaming cloud mask over up to {n_time} scenes "
-        f"(per-scene OCM fetch at {ocm_resolution}m, EPSG:{target_crs})"
+        f"(per-scene fetch at {mask_resolution}m, EPSG:{target_crs})"
     )
     kept_combo_masks_ocm: Dict[int, np.ndarray] = {}
-    good_pixel_tracker = np.zeros((ocm_h, ocm_w), dtype=bool)
-    pbar = tqdm(
-        total=n_time,
-        desc="Cloud masking",
-        leave=False,
-        disable=progress_disabled(),
-    )
+    good_pixel_tracker = np.zeros((mask_h, mask_w), dtype=bool)
     for i in range(n_time):
         # FIRST mode: stop scanning once everything in coverage is filled.
         if (
@@ -483,35 +524,38 @@ def run_bounds_pipeline(
         ):
             logger.info(
                 f"All in-coverage pixels filled after {i}/{n_time} scenes — "
-                "skipping remaining OCM"
+                "skipping remaining cloud-mask fetches"
             )
             break
 
-        ocm_scene = _fetch_one_ocm(
-            items_list[i],
-            bounds_target,
-            target_crs,
-            ocm_resolution,
-            debug_cache,
-        )
-        clear, valid = compute_masks_from_array(
-            ocm_scene,
-            batch_size=ocm_batch_size,
-            inference_dtype=ocm_inference_dtype,
-        )
-        del ocm_scene
-        # compute_masks_from_array returns at OCM resolution; no resize here.
+        if cloud_mask == CLOUD_MASK_SCL:
+            scl_scene = _fetch_one_scl(
+                items_list[i], bounds_target, target_crs, mask_resolution
+            )
+            clear, valid = compute_masks_from_scl(scl_scene)
+            del scl_scene
+        else:
+            ocm_scene = _fetch_one_ocm(
+                items_list[i],
+                bounds_target,
+                target_crs,
+                mask_resolution,
+            )
+            clear, valid = compute_masks_from_array(
+                ocm_scene,
+                batch_size=ocm_batch_size,
+                inference_dtype=ocm_inference_dtype,
+            )
+            del ocm_scene
         combo = clear & valid
 
         if mosaic_method == MOSAIC_FIRST:
             new_pixels = combo & ~good_pixel_tracker
             if not new_pixels.any():
-                pbar.update(1)
                 continue
             combo = new_pixels
         elif not combo.any():
             # All-cloud scene — no contribution to mean/percentile either.
-            pbar.update(1)
             continue
 
         kept_combo_masks_ocm[i] = combo
@@ -525,16 +569,13 @@ def run_bounds_pipeline(
             completed = int((coverage_mask_ocm & good_pixel_tracker).sum())
             no_data_sum = possible_pixel_count - completed
             no_data_pct = (1 - completed / possible_pixel_count) * 100
-            pbar.set_postfix_str(f"no-data {no_data_pct:.1f}%")
+            logger.info(f"Scene {i + 1}/{n_time} kept; no-data {no_data_pct:.1f}%")
             if no_data_sum < possible_pixel_count * no_data_threshold:
-                pbar.update(1)
                 logger.info(
                     f"no_data_threshold met after {len(kept_combo_masks_ocm)} kept "
                     f"scenes ({i + 1}/{n_time} examined)"
                 )
                 break
-        pbar.update(1)
-    pbar.close()
 
     if not kept_combo_masks_ocm:
         raise Exception(
@@ -552,17 +593,15 @@ def run_bounds_pipeline(
             target_crs,
             resolution,
             resampling=resampling_method,
-            debug_cache=debug_cache,
         )
     else:
-        user_data = _cached_stack_compute(
+        user_data = cached_stack_compute(
             kept_items,
             list(required_bands),
             bounds_target,
             target_crs,
             resolution,
             "uint16",
-            debug_cache,
             resampling=resampling_method,
         )
 
@@ -585,19 +624,12 @@ def run_bounds_pipeline(
         f"Aggregating {len(kept_items)} scene(s) into mosaic using "
         f"{mosaic_method} method"
     )
-    mosaic = _aggregate(user_data, combo_masks, mosaic_method, percentile_value)
-
-    if coverage_threshold_pct is not None:
-        mosaic = np.where(coverage_mask[None, :, :], mosaic, 0)
+    mosaic = aggregate_stack(user_data, combo_masks, mosaic_method, percentile_value)
 
     if is_visual:
         output_array = np.clip(np.nan_to_num(mosaic, nan=0), 0, 255).astype(np.uint8)
-        band_descriptions = ["Red", "Green", "Blue"]
-        nodata_value: Optional[int] = None
     else:
         output_array = np.clip(np.nan_to_num(mosaic, nan=0), 0, 65535).astype(np.uint16)
-        band_descriptions = list(required_bands)
-        nodata_value = 0
 
     transform = Affine(
         resolution, 0, bounds_target[0], 0, -resolution, bounds_target[3]
@@ -608,21 +640,14 @@ def run_bounds_pipeline(
         "width": w,
         "height": h,
         "count": output_array.shape[0],
-        "crs": rio.crs.CRS.from_epsg(target_crs),
+        "crs": CRS.from_epsg(target_crs),
         "transform": transform,
     }
 
-    if export_path is not None:
-        logger.info(f"Writing GeoTIFF to {export_path}")
-        export_tif(
-            array=output_array,
-            profile=profile,
-            export_path=export_path,
-            required_bands=band_descriptions,
-            nodata_value=nodata_value,
-        )
-        return export_path
-    logger.info(
-        f"Returning array shape={output_array.shape} dtype={output_array.dtype}"
+    return finalize_output(
+        array=output_array,
+        profile=profile,
+        required_bands=required_bands,
+        coverage_mask=coverage_mask if coverage_threshold_pct is not None else None,
+        export_path=export_path,
     )
-    return output_array, profile

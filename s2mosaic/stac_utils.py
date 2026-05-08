@@ -16,6 +16,12 @@ from .helpers import SORT_NEWEST, SORT_OLDEST, SORT_VALID_DATA
 
 logger = logging.getLogger(__name__)
 
+# Column names for the DataFrame produced by add_item_info().
+ITEM_COL = "item"
+ORBIT_COL = "orbit"
+GOOD_DATA_PCT_COL = "good_data_pct"
+DATETIME_COL = "datetime"
+
 
 def add_item_info(items: ItemCollection) -> DataFrame:
     """Split items by orbit and sort by no_data"""
@@ -32,10 +38,10 @@ def add_item_info(items: ItemCollection) -> DataFrame:
 
         items_list.append(
             {
-                "item": item,
-                "orbit": item.properties["sat:relative_orbit"],
-                "good_data_pct": good_data_pct,
-                "datetime": capture_date,
+                ITEM_COL: item,
+                ORBIT_COL: item.properties["sat:relative_orbit"],
+                GOOD_DATA_PCT_COL: good_data_pct,
+                DATETIME_COL: capture_date,
             }
         )
 
@@ -88,12 +94,18 @@ def search_for_items(
 
 
 def sort_items(items: DataFrame, sort_method: str) -> DataFrame:
-    # Sort the dataframe by selected method then by orbit
+    # The valid_data branch round-robins by relative orbit so the early-stopped
+    # mosaic blends scenes from different overpasses within a single MGRS tile.
+    # In bounds mode an AOI may pull scenes from several MGRS tiles, where
+    # ``sat:relative_orbit`` no longer identifies a single ground-track pass —
+    # the round-robin still produces a valid sort but is no longer "balance
+    # acquisitions across passes". Acceptable today; revisit if bounds-mode
+    # output quality becomes a concern.
     if sort_method == SORT_VALID_DATA:
-        items_sorted = items.sort_values("good_data_pct", ascending=False)
-        orbits = items_sorted["orbit"].unique()
+        items_sorted = items.sort_values(GOOD_DATA_PCT_COL, ascending=False)
+        orbits = items_sorted[ORBIT_COL].unique()
         orbit_groups = {
-            orbit: items_sorted[items_sorted["orbit"] == orbit] for orbit in orbits
+            orbit: items_sorted[items_sorted[ORBIT_COL] == orbit] for orbit in orbits
         }
 
         result = []
@@ -107,11 +119,11 @@ def sort_items(items: DataFrame, sort_method: str) -> DataFrame:
         items_sorted = pd.DataFrame(result).reset_index(drop=True)
 
     elif sort_method == SORT_OLDEST:
-        items_sorted = items.sort_values("datetime", ascending=True).reset_index(
+        items_sorted = items.sort_values(DATETIME_COL, ascending=True).reset_index(
             drop=True
         )
     elif sort_method == SORT_NEWEST:
-        items_sorted = items.sort_values("datetime", ascending=False).reset_index(
+        items_sorted = items.sort_values(DATETIME_COL, ascending=False).reset_index(
             drop=True
         )
     else:

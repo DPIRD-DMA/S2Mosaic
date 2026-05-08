@@ -29,7 +29,7 @@ version = {attr = "s2mosaic.__version__.__version__"}
 Homepage = "https://github.com/DPIRD-DMA/S2Mosaic"
 
 [tool.setuptools.package-data]
-s2mosaic = ["sentinel_2_index.gpkg"]
+s2mosaic = ["sentinel_2_index.gpkg", "py.typed"]
 
 [dependency-groups]
 dev = [

@@ -7,20 +7,20 @@ from typing import Any, Dict, List, Tuple, Union
 import cv2
 import numpy as np
 import pandas as pd
-from tqdm.auto import tqdm
 
 from .data_reader import get_band_with_mask
 from .helpers import (
+    CLOUD_MASK_OCM,
+    CLOUD_MASK_SCL,
     MOSAIC_FIRST,
     MOSAIC_MEAN,
     MOSAIC_PERCENTILE,
-    format_progress,
     get_rasterio_resampling,
     pick_ocm_resolution,
-    progress_disabled,
 )
-from .masking import get_masks
+from .masking import get_masks, get_scl_masks
 from .mosaic_utils import calculate_percentile_mosaic
+from .stac_utils import ITEM_COL
 
 logger = logging.getLogger(__name__)
 
@@ -33,57 +33,53 @@ def download_bands_pool(
     mosaic_method: str = "mean",
     ocm_batch_size: int = 6,
     ocm_inference_dtype: str = "bf16",
-    debug_cache: bool = False,
     max_dl_workers: int = 4,
     percentile_value: float | None = 50.0,
     s2_scene_size: int = 10980,
     resampling_method: str = "nearest",
     resolution: int = 10,
+    cloud_mask: str = CLOUD_MASK_OCM,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     rio_resampling = get_rasterio_resampling(resampling_method)
     ocm_resolution = pick_ocm_resolution(resolution)
     logger.info(f"OCM resolution: {ocm_resolution}m")
     possible_pixel_count = coverage_mask.sum()
-
     logger.info(f"Possible pixel count: {possible_pixel_count}")
 
-    if "visual" in required_bands:
+    is_visual = "visual" in required_bands
+    if is_visual:
         band_count = 3
-        band_indexes = [1, 2, 3]
-        required_bands = required_bands * 3
-
+        # Visual is one TCI asset; read bands 1/2/3 from it.
+        hrefs_template = [("visual", 1), ("visual", 2), ("visual", 3)]
     else:
         band_count = len(required_bands)
-        band_indexes = [1] * len(required_bands)
+        hrefs_template = [(band, 1) for band in required_bands]
 
     mosaic: np.ndarray
+    all_scene_data: List[np.ndarray] = []
     if mosaic_method == MOSAIC_PERCENTILE:
-        # For percentile, we need to store all values for each pixel
-        all_scene_data = []
+        mosaic = np.empty(0, dtype=np.float32)  # filled in after the loop
     else:
-        # For mean and first, use the existing approach
         mosaic = np.zeros((band_count, s2_scene_size, s2_scene_size), dtype=np.float32)
 
     good_pixel_tracker = np.zeros((s2_scene_size, s2_scene_size), dtype=np.uint16)
+    last_profile: Dict[str, Any] = {}
 
-    pbar = tqdm(
-        total=len(sorted_scenes),
-        desc=format_progress(0, len(sorted_scenes), 100.0),
-        leave=False,
-        bar_format="{desc}",
-        disable=progress_disabled(),
-    )
-
-    for index, item in enumerate(sorted_scenes["item"].tolist()):
-        non_cloud_pixels, valid_pixels = get_masks(
-            item=item,
-            batch_size=ocm_batch_size,
-            inference_dtype=ocm_inference_dtype,
-            debug_cache=debug_cache,
-            max_dl_workers=max_dl_workers,
-            target_size=s2_scene_size,
-            ocm_resolution=ocm_resolution,
-        )
+    for index, item in enumerate(sorted_scenes[ITEM_COL].tolist()):
+        if cloud_mask == CLOUD_MASK_SCL:
+            non_cloud_pixels, valid_pixels = get_scl_masks(
+                item=item,
+                user_resolution=resolution,
+            )
+        else:
+            non_cloud_pixels, valid_pixels = get_masks(
+                item=item,
+                batch_size=ocm_batch_size,
+                inference_dtype=ocm_inference_dtype,
+                max_dl_workers=max_dl_workers,
+                target_size=s2_scene_size,
+                ocm_resolution=ocm_resolution,
+            )
 
         combo_mask = (non_cloud_pixels * valid_pixels).astype(bool)
 
@@ -96,8 +92,8 @@ def download_bands_pool(
         good_pixel_tracker += combo_mask
 
         hrefs_and_indexes = [
-            (item.assets[band].href, band_index)
-            for band, band_index in zip(required_bands, band_indexes, strict=False)
+            (item.assets[asset].href, band_index)
+            for asset, band_index in hrefs_template
         ]
 
         get_band_with_mask_partial = partial(
@@ -105,7 +101,6 @@ def download_bands_pool(
             mask=combo_mask,
             target_size=s2_scene_size,
             resampling=rio_resampling,
-            debug_cache=debug_cache,
             mosaic_method=mosaic_method,
         )
 
@@ -115,7 +110,6 @@ def download_bands_pool(
             )
 
         bands = []
-
         for band, profile in bands_and_profiles:
             if band.shape != (s2_scene_size, s2_scene_size):
                 band = cv2.resize(
@@ -136,44 +130,30 @@ def download_bands_pool(
 
         completed_of_possible = coverage_mask * (good_pixel_tracker != 0)
         no_data_sum = coverage_mask.sum() - completed_of_possible.sum()
-        logger.info(f"No data sum: {no_data_sum}")
-
         no_data_pct = (1 - (completed_of_possible.sum() / possible_pixel_count)) * 100
-        logger.info(f"No data pct: {no_data_pct}")
-
-        pbar.set_description(
-            format_progress(index + 1, len(sorted_scenes), no_data_pct)
+        logger.info(
+            f"Scene {index + 1}/{len(sorted_scenes)} processed; "
+            f"no-data {no_data_pct:.2f}% ({no_data_sum} px)"
         )
 
-        if mosaic_method == MOSAIC_FIRST:
-            if no_data_sum == 0:
-                break
-
-        # if no_data_threshold is set, stop if threshold is reached
-        if no_data_threshold is not None:
-            if no_data_sum < (possible_pixel_count * no_data_threshold):
-                break
-        pbar.update(1)
-
-    remaining_scenes = pbar.total - pbar.n
-    pbar.update(remaining_scenes)
-    pbar.refresh()
-    pbar.close()
+        if mosaic_method == MOSAIC_FIRST and no_data_sum == 0:
+            break
+        if no_data_threshold is not None and no_data_sum < (
+            possible_pixel_count * no_data_threshold
+        ):
+            break
 
     if mosaic_method == MOSAIC_PERCENTILE:
         if percentile_value is None:
             raise ValueError("Percentile must be provided for percentile mosaic method")
-
         max_workers = multiprocessing.cpu_count() // 2
-
         mosaic = calculate_percentile_mosaic(
             all_scene_data=all_scene_data,
             s2_scene_size=s2_scene_size,
             max_workers=max_workers,
             percentile_value=float(percentile_value),
         )
-
-    if mosaic_method == MOSAIC_MEAN:
+    elif mosaic_method == MOSAIC_MEAN:
         mosaic = np.divide(
             mosaic,
             good_pixel_tracker,
@@ -181,9 +161,9 @@ def download_bands_pool(
             where=good_pixel_tracker != 0,
         )
 
-    if "visual" in required_bands:
+    if is_visual:
         mosaic = np.clip(mosaic, 0, 255).astype(np.uint8)
     else:
-        mosaic = np.clip(mosaic, 0, 65535).astype(np.int16)
+        mosaic = np.clip(mosaic, 0, 65535).astype(np.uint16)
 
     return mosaic, last_profile

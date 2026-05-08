@@ -167,3 +167,4 @@ Example use copy.ipynb
 visual_test_outputs/*.tif
 uv.lock
 examples/output/*
+cache/*

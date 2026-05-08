@@ -167,6 +167,11 @@ class TestMosaicEndToEnd:
     """End-to-end tests using debug cache for performance"""
 
     @pytest.fixture(autouse=True)
+    def enable_debug_cache(self, monkeypatch):
+        """Cache STAC/COG fetches across this class to keep wall time low."""
+        monkeypatch.setenv("S2MOSAIC_DEBUG_CACHE", "1")
+
+    @pytest.fixture(autouse=True)
     def time_test(self):
         """Print duration for tests that take more than a minute."""
         start_time = time.time()
@@ -193,7 +198,6 @@ class TestMosaicEndToEnd:
                 start_month=6,
                 start_day=1,
                 duration_days=7,
-                debug_cache=True,
                 required_bands=["B04", "B03", "B02"],
             )
             print(f"✅ Mosaic function completed, result type: {type(result)}")
@@ -266,7 +270,6 @@ class TestMosaicEndToEnd:
             start_day=1,
             duration_days=7,
             output_dir=temp_output_dir,
-            debug_cache=True,
             required_bands=["B04", "B03", "B02"],
         )
 
@@ -285,7 +288,6 @@ class TestMosaicEndToEnd:
             start_day=1,
             duration_days=7,
             output_dir=temp_output_dir,
-            debug_cache=True,
             required_bands=["B04", "B03", "B02"],
         )
 
@@ -300,7 +302,6 @@ class TestMosaicEndToEnd:
             start_day=1,
             duration_days=7,
             output_dir=temp_output_dir,
-            debug_cache=True,
             required_bands=["B04", "B03", "B02"],
             overwrite=False,
         )
@@ -319,7 +320,6 @@ class TestMosaicEndToEnd:
             start_day=1,
             duration_days=7,
             sort_method=sort_method,
-            debug_cache=True,
             required_bands=["B04"],
         )
 
@@ -339,7 +339,6 @@ class TestMosaicEndToEnd:
             start_day=1,
             duration_days=7,
             mosaic_method=mosaic_method,
-            debug_cache=True,
             required_bands=["B04"],
         )
 
@@ -358,7 +357,6 @@ class TestMosaicEndToEnd:
             duration_days=7,
             mosaic_method="percentile",
             percentile_value=percentile,
-            debug_cache=True,
             required_bands=["B04"],
         )
 
@@ -374,7 +372,6 @@ class TestMosaicEndToEnd:
             start_month=6,
             start_day=1,
             duration_days=7,
-            debug_cache=True,
             required_bands=["visual"],
         )
 
@@ -395,7 +392,6 @@ class TestMosaicEndToEnd:
             start_month=6,
             start_day=1,
             duration_days=duration_days,
-            debug_cache=True,
             required_bands=["B04"],
         )
         assert isinstance(result, tuple)
@@ -411,7 +407,6 @@ class TestMosaicEndToEnd:
             start_month=start_month,
             start_day=1,
             duration_months=1,
-            debug_cache=True,
             required_bands=["B04"],
             additional_query={"eo:cloud_cover": {"lt": cloud_cover_lt}},
         )
@@ -429,7 +424,6 @@ class TestMosaicEndToEnd:
                 start_month=6,
                 start_day=1,
                 duration_days=1,  # Single day
-                debug_cache=True,
                 required_bands=["B04"],
                 additional_query={
                     "eo:cloud_cover": {"lt": 0.1}
@@ -450,13 +444,31 @@ class TestMosaicEndToEnd:
             start_day=1,
             duration_days=7,
             sort_function=custom_sort,
-            debug_cache=True,
             required_bands=["B04"],
         )
 
         assert isinstance(result, tuple)
         array, profile = result
         assert isinstance(array, np.ndarray)
+
+    @pytest.mark.parametrize("cloud_mask", ["OCM", "SCL"])
+    def test_mosaic_cloud_mask_providers(self, cloud_mask):
+        """Both OCM and SCL providers should produce a sane mosaic in grid mode."""
+        result = mosaic(
+            "50HMH",
+            2023,
+            start_month=6,
+            start_day=1,
+            duration_days=7,
+            required_bands=["B04", "B03", "B02"],
+            cloud_mask=cloud_mask,
+        )
+        assert isinstance(result, tuple)
+        array, profile = result
+        assert array.ndim == 3 and array.shape[0] == 3
+        assert array.dtype in (np.uint8, np.uint16, np.int16)
+        # Some non-zero data — June over land
+        assert array.max() > 0
 
 
 @pytest.mark.slow
@@ -479,7 +491,6 @@ class TestMosaicFileNaming:
             start_day=1,
             duration_days=7,
             output_dir=temp_output_dir,
-            debug_cache=True,
             sort_method="oldest",
             mosaic_method="mean",
             required_bands=["B04", "B03", "B02"],
@@ -497,7 +508,6 @@ class TestMosaicFileNaming:
             start_day=15,
             duration_months=1,
             output_dir=temp_output_dir,
-            debug_cache=True,
             sort_method="newest",
             mosaic_method="first",
             required_bands=["visual"],
@@ -514,7 +524,7 @@ class TestMosaicBoundsEndToEnd:
 
     These hit the network (PC + COG reads + OCM). Each test uses a small AOI
     and short time range so they finish in a few seconds. Fixtures cache the
-    common scene download via debug_cache to keep wall time reasonable.
+    common scene download via S2MOSAIC_DEBUG_CACHE=1 to keep wall time reasonable.
     """
 
     # Small AOI in 50HMH (Perth, WA) — single MGRS tile
@@ -524,6 +534,10 @@ class TestMosaicBoundsEndToEnd:
     # Tight date window with a couple of cloud-free passes
     DATE_KW = dict(start_year=2023, start_month=6, start_day=1, duration_days=14)
     QUERY = {"eo:cloud_cover": {"lt": 80}}
+
+    @pytest.fixture(autouse=True)
+    def enable_debug_cache(self, monkeypatch):
+        monkeypatch.setenv("S2MOSAIC_DEBUG_CACHE", "1")
 
     @pytest.fixture(autouse=True)
     def time_test(self):
@@ -761,16 +775,86 @@ class TestMosaicBoundsEndToEnd:
                 additional_query={"eo:cloud_cover": {"lt": 0.001}},
             )
 
-    # --- debug_cache hit on repeat ---
-    def test_debug_cache_repeats_match(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)  # cache writes to ./cache
+    # --- Cloud-mask providers (OCM vs SCL) ---
+    @pytest.mark.parametrize("cloud_mask", ["OCM", "SCL"])
+    def test_cloud_mask_providers(self, cloud_mask):
+        """Both providers should run end-to-end and produce data."""
+        arr, profile = mosaic(
+            bounds=self.AOI_SMALL,
+            **self.DATE_KW,
+            required_bands=["B04", "B03", "B02"],
+            mosaic_method="percentile",
+            percentile_value=50,
+            additional_query=self.QUERY,
+            cloud_mask=cloud_mask,
+        )
+        self._assert_basic_geotiff(arr, profile, expect_bands=3, expect_dtype=np.uint16)
+
+    def test_scl_with_first_method(self):
+        """SCL provider should work with first-mode early termination."""
+        arr, profile = mosaic(
+            bounds=self.AOI_SMALL,
+            **self.DATE_KW,
+            required_bands=["B04"],
+            mosaic_method="first",
+            additional_query=self.QUERY,
+            cloud_mask="SCL",
+        )
+        self._assert_basic_geotiff(arr, profile, expect_bands=1)
+
+    def test_scl_visual_band(self):
+        """SCL provider with the multi-band TCI fetch path."""
+        arr, profile = mosaic(
+            bounds=self.AOI_SMALL,
+            **self.DATE_KW,
+            required_bands=["visual"],
+            mosaic_method="first",
+            additional_query=self.QUERY,
+            cloud_mask="SCL",
+        )
+        self._assert_basic_geotiff(arr, profile, expect_bands=3, expect_dtype=np.uint8)
+
+    def test_scl_cross_tile(self):
+        """SCL provider on an AOI that crosses MGRS tile boundaries."""
+        arr, profile = mosaic(
+            bounds=self.AOI_CROSS_TILE,
+            **self.DATE_KW,
+            required_bands=["B04"],
+            mosaic_method="percentile",
+            percentile_value=50,
+            additional_query=self.QUERY,
+            cloud_mask="SCL",
+        )
+        self._assert_basic_geotiff(arr, profile, expect_bands=1)
+
+    def test_scl_cache_writes_scl_pkl(self, tmp_path, monkeypatch):
+        """SCL provider should write scl_*.pkl cache files, not ocm_*.pkl."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("S2MOSAIC_DEBUG_CACHE", "1")
         kw = dict(
             bounds=self.AOI_SMALL,
             **self.DATE_KW,
             required_bands=["B04"],
             mosaic_method="percentile",
             percentile_value=50,
-            debug_cache=True,
+            additional_query=self.QUERY,
+            cloud_mask="SCL",
+        )
+        mosaic(**kw)
+        scl_caches = list((tmp_path / "cache").glob("scl_*.pkl"))
+        ocm_caches = list((tmp_path / "cache").glob("ocm_*.pkl"))
+        assert len(scl_caches) >= 1, "expected at least one scl cache file"
+        assert len(ocm_caches) == 0, "SCL provider should not write ocm cache files"
+
+    # --- disk cache hit on repeat ---
+    def test_debug_cache_repeats_match(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)  # cache writes to ./cache (env var set by autouse)
+        kw = dict(
+            bounds=self.AOI_SMALL,
+            **self.DATE_KW,
+            required_bands=["B04"],
+            mosaic_method="percentile",
+            percentile_value=50,
             additional_query=self.QUERY,
         )
         arr1, _ = mosaic(**kw)

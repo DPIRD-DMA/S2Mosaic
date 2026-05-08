@@ -1,8 +1,13 @@
+import functools
+import hashlib
 import logging
+import os
+import pickle
 from datetime import date, datetime
+from functools import lru_cache
 from importlib import resources
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
 
 import geopandas as gpd
 import numpy as np
@@ -11,6 +16,64 @@ from dateutil.relativedelta import relativedelta
 from shapely.geometry.polygon import Polygon
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+# Debug cache: opt-in via env var. When unset, pickle_cache and the @disk_cache
+# decorator are no-ops — callers don't need to thread a flag through their
+# signatures. CWD-relative because the typical entry point (notebooks, scripts)
+# treats the project working directory as scratch space.
+DEBUG_CACHE_DIR = Path("cache")
+DEBUG_CACHE_ENV_VAR = "S2MOSAIC_DEBUG_CACHE"
+
+
+def debug_cache_enabled() -> bool:
+    """True if S2MOSAIC_DEBUG_CACHE is set to a truthy value."""
+    return os.environ.get(DEBUG_CACHE_ENV_VAR, "").lower() in ("1", "true", "yes")
+
+
+def pickle_cache(prefix: str, key: str, compute: Callable[[], T]) -> T:
+    """Memoize ``compute()`` to ``DEBUG_CACHE_DIR/{prefix}_{md5(key)}.pkl``.
+
+    No-op (just calls ``compute()``) unless ``S2MOSAIC_DEBUG_CACHE`` is set.
+    """
+    if not debug_cache_enabled():
+        return compute()
+    digest = hashlib.md5(key.encode()).hexdigest()
+    path = DEBUG_CACHE_DIR / f"{prefix}_{digest}.pkl"
+    if path.exists():
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    result = compute()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        pickle.dump(result, f)
+    return result
+
+
+def disk_cache(
+    prefix: str, key_fn: Callable[..., str]
+) -> Callable[[Callable[..., T]], Callable[..., T]]:
+    """Decorator: wraps a function with the optional debug-cache layer.
+
+    ``key_fn`` receives the same args/kwargs as the wrapped function and
+    returns a cache-key string. The cache is gated on ``S2MOSAIC_DEBUG_CACHE``
+    via :func:`pickle_cache`, so decorated functions transparently skip the
+    cache machinery when the env var is unset.
+    """
+
+    def decorator(fn: Callable[..., T]) -> Callable[..., T]:
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> T:
+            if not debug_cache_enabled():
+                return fn(*args, **kwargs)
+            return pickle_cache(
+                prefix, key_fn(*args, **kwargs), lambda: fn(*args, **kwargs)
+            )
+
+        return wrapper
+
+    return decorator
 
 
 SORT_VALID_DATA = "valid_data"
@@ -21,19 +84,12 @@ MOSAIC_MEAN = "mean"
 MOSAIC_FIRST = "first"
 MOSAIC_PERCENTILE = "percentile"
 
+CLOUD_MASK_OCM = "OCM"
+CLOUD_MASK_SCL = "SCL"
+
 VALID_SORT_METHODS = {SORT_VALID_DATA, SORT_OLDEST, SORT_NEWEST, SORT_CUSTOM}
 VALID_MOSAIC_METHODS = {MOSAIC_MEAN, MOSAIC_FIRST, MOSAIC_PERCENTILE}
-
-
-def progress_disabled() -> bool:
-    """True when tqdm progress bars should be silenced.
-
-    Bars follow the package logger: visible only when `s2mosaic` is enabled at
-    INFO or below (e.g. via `s2mosaic.set_log_level("INFO")` or any host-app
-    logging config that lowers the level). Default Python logging keeps the
-    package at WARNING, so by default the library is silent.
-    """
-    return not logging.getLogger("s2mosaic").isEnabledFor(logging.INFO)
+VALID_CLOUD_MASKS = {CLOUD_MASK_OCM, CLOUD_MASK_SCL}
 
 
 VALID_RESAMPLING_METHODS = {
@@ -61,6 +117,9 @@ def get_rasterio_resampling(method: str):
 OCM_MIN_RESOLUTION = 20
 OCM_MAX_RESOLUTION = 50
 
+# MGRS tile is exactly 109800m on each side.
+MGRS_TILE_SIZE_M = 109800
+
 
 def pick_ocm_resolution(user_resolution: int) -> int:
     """Pick the OCM input resolution given the user's output resolution.
@@ -75,41 +134,36 @@ def pick_ocm_resolution(user_resolution: int) -> int:
     return max(OCM_MIN_RESOLUTION, min(user_resolution, OCM_MAX_RESOLUTION))
 
 
-def format_progress(current, total, no_data_pct):
-    return f"Scenes: {current}/{total} | Mosaic currently contains {no_data_pct:.2f}% no data pixels"  # noqa: E501
-
-
-def get_extent_from_grid_id(grid_id: str) -> Polygon:
+@lru_cache(maxsize=1)
+def _load_s2_grid() -> gpd.GeoDataFrame:
     with resources.as_file(
         resources.files("s2mosaic") / "sentinel_2_index.gpkg"
     ) as path:
         S2_grid_file = Path(path)
-
     assert S2_grid_file.exists(), (
         f"S2 grid file not found at {S2_grid_file}. "
         "This suggests the S2Mosaic package was not installed correctly. "
         "Please reinstall the package."
     )
+    return gpd.read_file(S2_grid_file)
 
+
+def get_extent_from_grid_id(grid_id: str) -> Polygon:
     try:
-        all_grids = gpd.read_file(S2_grid_file)
+        all_grids = _load_s2_grid()
         grid_entry = all_grids[all_grids["Name"] == grid_id]
 
         return_count = grid_entry.shape[0]
 
         if return_count == 0:
             raise ValueError(
-                f"""Grid {grid_id} not found. It should be in the format '50HMH'. 
-                for more info on the S2 grid system visit https://sentiwiki.copernicus.eu/web/s2-products
-                View a map of the S2 grid at https://dpird-dma.github.io/Sentinel-2-grid-explorer/
-                File: {S2_grid_file}
-                Gdf: {all_grids.head(5)}"""
+                f"Grid {grid_id} not found. It should be in the format '50HMH'. "
+                "See https://sentiwiki.copernicus.eu/web/s2-products and "
+                "https://dpird-dma.github.io/Sentinel-2-grid-explorer/"
             )
         assert return_count == 1, (
-            f"""Multiple entries found for grid {grid_id}. 
-            This should not happen, please check the S2 grid file."""
-            f"File: {S2_grid_file}"
-            f"Gdf: {all_grids.head(5)}"
+            f"Multiple entries found for grid {grid_id}. "
+            "This should not happen, please check the S2 grid file."
         )
 
         return grid_entry.iloc[0].geometry
@@ -134,6 +188,47 @@ def define_dates(
     return start_date, end_date
 
 
+DEFAULT_REQUIRED_BANDS: List[str] = ["B04", "B03", "B02", "B08"]
+DEFAULT_ADDITIONAL_QUERY: Dict[str, Any] = {"eo:cloud_cover": {"lt": 100}}
+
+
+def normalize_mosaic_inputs(
+    required_bands: Optional[List[str]],
+    additional_query: Optional[Dict[str, Any]],
+    sort_method: str,
+    sort_function: Optional[Any],
+    mosaic_method: str,
+    percentile_value: Optional[float],
+) -> Tuple[List[str], Dict[str, Any], str, str, Optional[float]]:
+    """Apply defaults and rewrites shared by the grid and bounds pipelines.
+
+    Returns the normalized (required_bands, additional_query, sort_method,
+    mosaic_method, percentile_value) — callers should overwrite their locals
+    with the returned values. ``"median"`` is rewritten to
+    ``("percentile", 50.0)``; ``sort_function`` overrides ``sort_method``.
+    """
+    if required_bands is None:
+        required_bands = list(DEFAULT_REQUIRED_BANDS)
+    if additional_query is None:
+        additional_query = dict(DEFAULT_ADDITIONAL_QUERY)
+    if sort_function is not None:
+        sort_method = SORT_CUSTOM
+    if mosaic_method == "median":
+        if percentile_value is not None:
+            raise ValueError(
+                "percentile_value should not be set when using mosaic_method='median'."
+            )
+        mosaic_method = MOSAIC_PERCENTILE
+        percentile_value = 50.0
+    return (
+        required_bands,
+        additional_query,
+        sort_method,
+        mosaic_method,
+        percentile_value,
+    )
+
+
 def validate_inputs(
     sort_method: str,
     mosaic_method: str,
@@ -142,11 +237,26 @@ def validate_inputs(
     grid_id: Optional[str],
     percentile_value: Optional[float],
     resampling_method: str = "nearest",
+    bounds: Optional[Tuple[float, float, float, float]] = None,
+    resolution: Optional[int] = None,
+    cloud_mask: str = CLOUD_MASK_OCM,
 ) -> None:
     if grid_id is not None and (not grid_id.isalnum() or not grid_id.isupper()):
         raise ValueError(
             f"""Grid {grid_id} is invalid. It should be in the format '50HMH'.
             For more info on the S2 grid system visit https://sentiwiki.copernicus.eu/web/s2-products"""
+        )
+    if bounds is not None:
+        if len(bounds) != 4:
+            raise ValueError("bounds must be (minx, miny, maxx, maxy)")
+        minx, miny, maxx, maxy = bounds
+        if minx >= maxx or miny >= maxy:
+            raise ValueError(f"Invalid bounds: {bounds}")
+    if resolution is not None and resolution <= 0:
+        raise ValueError(f"resolution must be positive, got {resolution}")
+    if cloud_mask not in VALID_CLOUD_MASKS:
+        raise ValueError(
+            f"Invalid cloud_mask: {cloud_mask}. Must be one of {VALID_CLOUD_MASKS}"
         )
     if sort_method not in VALID_SORT_METHODS:
         raise ValueError(
@@ -252,3 +362,41 @@ def export_tif(
     with rio.open(export_path, "w", **profile) as dst:
         dst.write(array)
         dst.descriptions = required_bands
+
+
+def finalize_output(
+    array: np.ndarray,
+    profile: Dict[str, Any],
+    required_bands: List[str],
+    coverage_mask: Optional[np.ndarray],
+    export_path: Optional[Path],
+) -> Union[Tuple[np.ndarray, Dict[str, Any]], Path]:
+    """Apply coverage mask, set band names + nodata, export or return.
+
+    Used at the end of both the grid_id and bounds pipelines so the
+    coverage-mask zeroing, ``visual`` → RGB band-name remap, and
+    export-vs-return decision live in one place.
+    """
+    if coverage_mask is not None:
+        array = np.where(coverage_mask[None, :, :], array, 0)
+
+    if "visual" in required_bands:
+        band_descriptions = ["Red", "Green", "Blue"]
+        nodata_value: Optional[int] = None
+    else:
+        band_descriptions = list(required_bands)
+        nodata_value = 0
+
+    if export_path is not None:
+        logger.info(f"Writing GeoTIFF to {export_path}")
+        export_tif(
+            array=array,
+            profile=profile,
+            export_path=export_path,
+            required_bands=band_descriptions,
+            nodata_value=nodata_value,
+        )
+        return export_path
+
+    logger.info(f"Returning array shape={array.shape} dtype={array.dtype}")
+    return array, profile
