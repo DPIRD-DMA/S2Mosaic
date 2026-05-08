@@ -52,7 +52,7 @@ uv add s2mosaic
 ```
 ## Quick start — MGRS grid tile
 
-Mosaic an entire Sentinel-2 MGRS tile by ID, returning a NumPy array and rasterio profile:
+Mosaic an entire Sentinel-2 MGRS tile by ID, returning a NumPy array and rasterio profile. Find the tile ID for your area of interest with the [Sentinel-2 grid explorer](https://dpird-dma.github.io/Sentinel-2-grid-explorer/).
 
 ```python
 from s2mosaic import mosaic
