@@ -1,3 +1,4 @@
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Tuple
@@ -65,11 +66,18 @@ def compute_masks_from_array(
     """Run cloud + valid masking on an in-memory (3, H, W) R+G+NIR uint16 array.
 
     Returns (clear_mask, valid_mask) at the same resolution as the input."""
-    cloud_class = predict_from_array(
-        input_array=rgb_nir,
-        batch_size=batch_size,
-        inference_dtype=inference_dtype,
-    )[0]
+    # Silence OCM's chatty patch-size adjustment notices — they fire on every
+    # small-AOI scene and obscure the s2mosaic pipeline logs without telling
+    # the user anything actionable.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", category=UserWarning, module=r"omnicloudmask\..*"
+        )
+        cloud_class = predict_from_array(
+            input_array=rgb_nir,
+            batch_size=batch_size,
+            inference_dtype=inference_dtype,
+        )[0]
     clear = (cloud_class == 0).astype(np.uint8)
     clear = clean_array(
         clear, min_island_size=8, smooth_edge_size=3, connectivity=4

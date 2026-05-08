@@ -32,9 +32,11 @@ S2Mosaic uses OmniCloudMask (OCM) for state-of-the-art cloud and cloud shadow ma
 
 [![Colab_Button]][Link]
 
-[Link]: https://colab.research.google.com/drive/1-vdAAnpzp_VCotTV07cbSC9iQFiD7DcH?usp=sharing 'Try S2Mosaic In Colab'
+[Link]: https://colab.research.google.com/github/DPIRD-DMA/S2Mosaic/blob/main/examples/Quick%20start.ipynb 'Try S2Mosaic In Colab'
 
 [Colab_Button]: https://img.shields.io/badge/Try%20in%20Colab-grey?style=for-the-badge&logo=google-colab
+
+The Colab badge opens [`examples/Quick start.ipynb`](examples/Quick%20start.ipynb) — a minimal end-to-end demo.
 
 
 
