@@ -22,7 +22,7 @@ S2Mosaic is a Python package for creating cloud-free mosaics from Sentinel-2 sat
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+See [CHANGELOG.md](https://github.com/DPIRD-DMA/S2Mosaic/blob/main/CHANGELOG.md) for the full release history.
 
 ## Note
 
@@ -36,7 +36,7 @@ S2Mosaic uses OmniCloudMask (OCM) for state-of-the-art cloud and cloud shadow ma
 
 [Colab_Button]: https://img.shields.io/badge/Try%20in%20Colab-grey?style=for-the-badge&logo=google-colab
 
-The Colab badge opens [`examples/Quick start.ipynb`](examples/Quick%20start.ipynb) — a minimal end-to-end demo.
+The Colab badge opens [`examples/Quick start.ipynb`](https://github.com/DPIRD-DMA/S2Mosaic/blob/main/examples/Quick%20start.ipynb) — a minimal end-to-end demo.
 
 
 
@@ -98,7 +98,7 @@ print(f"CRS:   {profile['crs']}")
 print(f"Pixel: {profile['transform'].a}m")
 ```
 
-`bounds_crs` (default `4326`) controls the input CRS; `target_crs` controls the output CRS (auto-picked from the AOI centroid if omitted). Use `resolution` (in metres) and `resampling_method` (`nearest`, `bilinear`, ...) to control the output grid. See [Example use - bounds.ipynb](examples/Example%20use%20-%20bounds.ipynb) for cross-tile and lower-resolution examples.
+`bounds_crs` (default `4326`) controls the input CRS; `target_crs` controls the output CRS (auto-picked from the AOI centroid if omitted). Use `resolution` (in metres) and `resampling_method` (`nearest`, `bilinear`, ...) to control the output grid. See [Example use - bounds.ipynb](https://github.com/DPIRD-DMA/S2Mosaic/blob/main/examples/Example%20use%20-%20bounds.ipynb) for cross-tile and lower-resolution examples.
 
 ## Advanced Usage
 
