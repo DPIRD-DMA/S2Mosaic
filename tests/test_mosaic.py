@@ -21,51 +21,51 @@ class TestMosaicInputValidation:
     def test_invalid_grid_id_lowercase(self):
         """Test that lowercase grid IDs are rejected"""
         with pytest.raises(ValueError, match="Grid .* is invalid"):
-            mosaic("50hmh", 2023)
+            mosaic("50hmh", start_year=2023)
 
     def test_invalid_grid_id_special_chars(self):
         """Test that grid IDs with special characters are rejected"""
         with pytest.raises(ValueError, match="Grid .* is invalid"):
-            mosaic("50H-MH", 2023)
+            mosaic("50H-MH", start_year=2023)
 
     def test_invalid_grid_id_numbers_only(self):
         """Test that numeric-only grid IDs are rejected"""
         with pytest.raises(ValueError, match="Grid .* is invalid"):
-            mosaic("12345", 2023)
+            mosaic("12345", start_year=2023)
 
     def test_invalid_sort_method(self):
         """Test that invalid sort methods are rejected"""
         with pytest.raises(ValueError, match="Invalid sort method"):
-            mosaic("50HMH", 2023, sort_method="invalid_method")
+            mosaic("50HMH", start_year=2023, sort_method="invalid_method")
 
     def test_invalid_mosaic_method(self):
         """Test that invalid mosaic methods are rejected"""
         with pytest.raises(ValueError, match="Invalid mosaic method"):
-            mosaic("50HMH", 2023, mosaic_method="invalid_method")
+            mosaic("50HMH", start_year=2023, mosaic_method="invalid_method")
 
     def test_invalid_no_data_threshold_negative(self):
         """Test that negative no_data_threshold is rejected"""
         with pytest.raises(
             ValueError, match="No data threshold must be between 0 and 1"
         ):
-            mosaic("50HMH", 2023, no_data_threshold=-0.1)
+            mosaic("50HMH", start_year=2023, no_data_threshold=-0.1)
 
     def test_invalid_no_data_threshold_greater_than_one(self):
         """Test that no_data_threshold > 1 is rejected"""
         with pytest.raises(
             ValueError, match="No data threshold must be between 0 and 1"
         ):
-            mosaic("50HMH", 2023, no_data_threshold=1.5)
+            mosaic("50HMH", start_year=2023, no_data_threshold=1.5)
 
     def test_invalid_band(self):
         """Test that invalid band names are rejected"""
         with pytest.raises(ValueError, match="Invalid band"):
-            mosaic("50HMH", 2023, required_bands=["B04", "INVALID_BAND"])
+            mosaic("50HMH", start_year=2023, required_bands=["B04", "INVALID_BAND"])
 
     def test_visual_band_with_other_bands(self):
         """Test that visual band cannot be used with other bands"""
         with pytest.raises(ValueError, match="Cannot use visual band with other bands"):
-            mosaic("50HMH", 2023, required_bands=["visual", "B04"])
+            mosaic("50HMH", start_year=2023, required_bands=["visual", "B04"])
 
     def test_percentile_without_percentile_method(self):
         """Test that percentile parameter requires percentile method"""
@@ -73,7 +73,7 @@ class TestMosaicInputValidation:
             ValueError,
             match="percentile_value is only valid for percentile mosaic method",
         ):
-            mosaic("50HMH", 2023, mosaic_method="mean", percentile_value=50)
+            mosaic("50HMH", start_year=2023, mosaic_method="mean", percentile_value=50)
 
     def test_percentile_method_without_percentile(self):
         """Test that percentile method requires percentile parameter"""
@@ -81,21 +81,31 @@ class TestMosaicInputValidation:
             ValueError,
             match="percentile_value must be provided for percentile mosaic method",
         ):
-            mosaic("50HMH", 2023, mosaic_method="percentile")
+            mosaic("50HMH", start_year=2023, mosaic_method="percentile")
 
     def test_invalid_percentile_negative(self):
         """Test that negative percentile values are rejected"""
         with pytest.raises(
             ValueError, match="percentile_value must be between 0 and 100"
         ):
-            mosaic("50HMH", 2023, mosaic_method="percentile", percentile_value=-10)
+            mosaic(
+                "50HMH",
+                start_year=2023,
+                mosaic_method="percentile",
+                percentile_value=-10,
+            )
 
     def test_invalid_percentile_greater_than_100(self):
         """Test that percentile values > 100 are rejected"""
         with pytest.raises(
             ValueError, match="percentile_value must be between 0 and 100"
         ):
-            mosaic("50HMH", 2023, mosaic_method="percentile", percentile_value=150)
+            mosaic(
+                "50HMH",
+                start_year=2023,
+                mosaic_method="percentile",
+                percentile_value=150,
+            )
 
 
 class TestMosaicValidInputs:
@@ -194,7 +204,7 @@ class TestMosaicEndToEnd:
         try:
             result = mosaic(
                 "50HMH",
-                2023,
+                start_year=2023,
                 start_month=6,
                 start_day=1,
                 duration_days=7,
@@ -265,7 +275,7 @@ class TestMosaicEndToEnd:
         """Test mosaic saves file when output_dir is specified"""
         result = mosaic(
             "50HMH",
-            2023,
+            start_year=2023,
             start_month=6,
             start_day=1,
             duration_days=7,
@@ -283,7 +293,7 @@ class TestMosaicEndToEnd:
         # Create first mosaic
         result1 = mosaic(
             "50HMH",
-            2023,
+            start_year=2023,
             start_month=6,
             start_day=1,
             duration_days=7,
@@ -297,7 +307,7 @@ class TestMosaicEndToEnd:
         # Try to create same mosaic with overwrite=False
         result2 = mosaic(
             "50HMH",
-            2023,
+            start_year=2023,
             start_month=6,
             start_day=1,
             duration_days=7,
@@ -315,7 +325,7 @@ class TestMosaicEndToEnd:
         """Test mosaic with different sort methods"""
         result = mosaic(
             "50HMH",
-            2023,
+            start_year=2023,
             start_month=6,
             start_day=1,
             duration_days=7,
@@ -334,7 +344,7 @@ class TestMosaicEndToEnd:
         """Test mosaic with different mosaic methods"""
         result = mosaic(
             "50HMH",
-            2023,
+            start_year=2023,
             start_month=6,
             start_day=1,
             duration_days=7,
@@ -351,7 +361,7 @@ class TestMosaicEndToEnd:
         """Test mosaic with percentile method"""
         result = mosaic(
             "50HMH",
-            2023,
+            start_year=2023,
             start_month=6,
             start_day=1,
             duration_days=7,
@@ -368,7 +378,7 @@ class TestMosaicEndToEnd:
         """Test mosaic with visual band"""
         result = mosaic(
             "50HMH",
-            2023,
+            start_year=2023,
             start_month=6,
             start_day=1,
             duration_days=7,
@@ -388,7 +398,7 @@ class TestMosaicEndToEnd:
         """Test mosaic with different time range specifications"""
         result = mosaic(
             "50HMH",
-            2023,
+            start_year=2023,
             start_month=6,
             start_day=1,
             duration_days=duration_days,
@@ -403,7 +413,7 @@ class TestMosaicEndToEnd:
         """Test mosaic with different cloud cover thresholds"""
         result = mosaic(
             "50HMH",
-            2023,
+            start_year=2023,
             start_month=start_month,
             start_day=1,
             duration_months=1,
@@ -420,7 +430,7 @@ class TestMosaicEndToEnd:
         with pytest.raises(Exception, match="No scenes found"):
             mosaic(
                 "50HMH",
-                2023,
+                start_year=2023,
                 start_month=6,
                 start_day=1,
                 duration_days=1,  # Single day
@@ -439,7 +449,7 @@ class TestMosaicEndToEnd:
 
         result = mosaic(
             "50HMH",
-            2023,
+            start_year=2023,
             start_month=6,
             start_day=1,
             duration_days=7,
@@ -456,7 +466,7 @@ class TestMosaicEndToEnd:
         """Both OCM and SCL providers should produce a sane mosaic in grid mode."""
         result = mosaic(
             "50HMH",
-            2023,
+            start_year=2023,
             start_month=6,
             start_day=1,
             duration_days=7,
@@ -486,7 +496,7 @@ class TestMosaicFileNaming:
         """Test that output filenames follow expected format"""
         result = mosaic(
             "50HMH",
-            2023,
+            start_year=2023,
             start_month=6,
             start_day=1,
             duration_days=7,
@@ -503,7 +513,7 @@ class TestMosaicFileNaming:
         """Test filename changes with different parameters"""
         result = mosaic(
             "50HMH",
-            2022,
+            start_year=2022,
             start_month=12,
             start_day=15,
             duration_months=1,
@@ -647,9 +657,9 @@ class TestMosaicBoundsEndToEnd:
     # --- Visual band in bounds mode ---
     def test_visual_band(self):
         # Visual asset is a 3-band uint8 TCI, fetched via the WarpedVRT path
-        # (stackstac can't address sub-bands). Shape must match the cloud-mask
-        # resize step — guards against the shape-mismatch bug where the OCM
-        # mask probe and the TCI fetch snap bounds differently.
+        # with all three bands read in one call. Shape must match the
+        # cloud-mask resize step — guards against the shape-mismatch bug
+        # where the OCM mask probe and the TCI fetch snap bounds differently.
         arr, profile = mosaic(
             bounds=self.AOI_SMALL,
             **self.DATE_KW,

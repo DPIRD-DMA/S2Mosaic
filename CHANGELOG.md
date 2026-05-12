@@ -6,7 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 - `cloud_mask` parameter on `mosaic()` selects the cloud-mask provider: `"OCM"` (default, OmniCloudMask deep-learning model) or `"SCL"` (the L2A Scene Classification Layer that ships with each scene). SCL is much cheaper — useful on CPU-only machines and for bulk processing — at the cost of accuracy.
-- Bounds mode: pass `bounds=(minx, miny, maxx, maxy)` (with optional `bounds_crs` / `target_crs`) to mosaic an arbitrary rectangle, including AOIs that intersect Sentinel-2 tiles in different UTM zone projections — scenes from intersecting tiles are reprojected onto a common UTM grid via stackstac.
+- Bounds mode: pass `bounds=(minx, miny, maxx, maxy)` (with optional `bounds_crs` / `target_crs`) to mosaic an arbitrary rectangle, including AOIs that intersect Sentinel-2 tiles in different UTM zone projections — each scene is streamed through a rasterio `WarpedVRT` onto a common UTM grid.
 - Bounds validation: rejects longitudes outside ±180 or latitudes outside ±90 when `bounds_crs=4326` (catches most lat/lon axis swaps), and rejects bboxes whose width or height falls outside the 10m–200km range.
 - Pre-commit hooks (`ruff-check`, `ruff-format`, `mypy`) and a pre-push `pytest` hook.
 - GitHub Actions CI running lint, type-check, and tests on push and PR.
@@ -15,11 +15,14 @@ All notable changes to this project will be documented in this file.
 - Transient per-scene fetch failures (network blips, expired SAS tokens, 5xx from MPC) are now retried with exponential backoff (3 attempts, 1/2/4s). If retries are exhausted, the scene is logged at WARNING and skipped instead of aborting the whole mosaic; a summary line reports `N/M scenes failed`. Cloud-mask inference errors are *not* swallowed — they still hard-stop so they can be diagnosed.
 
 ### Changed
+- **Breaking:** `start_year` is now a required keyword-only argument on `mosaic()`. Callers passing it positionally (`mosaic("50HMH", 2023)`) must switch to keyword form (`mosaic("50HMH", start_year=2023)`). The type is now `int` (was `Optional[int]` with a runtime check). All README/notebook examples already use the keyword form.
+- `SceneFetchError` is now exported from the top-level `s2mosaic` package so callers can `except s2mosaic.SceneFetchError` to distinguish fetch failures from other exceptions.
 - Replaced `scipy.ndimage` with OpenCV (`cv2.dilate` / `cv2.resize`) for no-data mask dilation and band resampling — drops the SciPy dependency.
 - Mask post-processing now uses `multiclean`.
 - "No scenes found" and "no usable scenes" conditions now raise `ValueError` and `RuntimeError` respectively instead of bare `Exception`, so callers can catch them specifically.
-- Bounds mode now streams per-scene fetches and accumulates the mosaic in place (mirroring grid mode's `download_bands_pool`). Peak memory is dropped from O(N scenes) to O(one scene + accumulator) for `mosaic_method="mean"` and `"first"`; benchmarked on a 22 × 22km Perth AOI × 28 scenes × 4 bands, peak RSS fell from 15 GB → 2.1 GB (~7×). `"percentile"` / `"median"` still buffer N scenes (exact percentiles need all values per pixel) but avoid stackstac's transient float32 doubling.
-- Bounds-mode output grid is now derived from `_target_grid(bounds, resolution, target_crs)` for the user bands (matching the cloud-mask, coverage-mask, and TCI paths) instead of stackstac's `snap_bounds=True` global-aligned grid. The output may differ by ~1 pixel in width/height from 1.x for the same bounds, and pixel centres can shift by a sub-pixel fraction — the math is unchanged (verified bit-exact against `aggregate_stack`), only the bbox-to-grid rounding moved.
+- Bounds mode now streams per-scene fetches and accumulates the mosaic in place (mirroring grid mode's `download_bands_pool`). Peak memory is dropped from O(N scenes) to O(one scene + accumulator) for `mosaic_method="mean"` and `"first"`; benchmarked on a 22 × 22km Perth AOI × 28 scenes × 4 bands, peak RSS fell from 15 GB → 2.1 GB (~7×). `"percentile"` / `"median"` still buffer N scenes because exact percentiles need all values per pixel.
+- Bounds mode no longer depends on `stackstac`. Each scene is read directly through a rasterio `WarpedVRT` snapped to the output grid, which removes the eager-stack step and lets the pipeline skip scenes that won't contribute (full coverage already filled, or all-cloud). The output grid is derived from `_target_grid(bounds, resolution, target_crs)`; pixel size and CRS are unchanged from 1.x, but the bbox-to-grid rounding may shift the output by ~1 pixel in width/height or by a sub-pixel fraction in pixel-centre location.
+- `stackstac` removed from dependencies.
 - `uv.lock` is no longer tracked in the repo.
 
 ## [1.1.0] - 2026-01-22

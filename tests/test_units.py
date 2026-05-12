@@ -9,7 +9,6 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from s2mosaic import mosaic
-from s2mosaic import bounds as bounds_module
 from s2mosaic.bounds import aggregate_stack, pick_utm_epsg, reproject_bbox
 from s2mosaic.helpers import validate_inputs
 from s2mosaic.frequent_coverage import (
@@ -535,119 +534,6 @@ class TestGetRasterCoverage:
         assert raster.shape == (expected_side, expected_side)
 
 
-class TestCachedStackCompute:
-    """Disk caching for stackstac materialisation in bounds mode."""
-
-    def test_cache_miss_then_hit(self, tmp_path, monkeypatch):
-        # Run inside a tmp dir so the "cache/" path doesn't litter the repo
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("S2MOSAIC_DEBUG_CACHE", "1")
-
-        # Fake item with an .id (only attribute the cache key reads)
-        class _FakeItem:
-            def __init__(self, id_):
-                self.id = id_
-
-        items = [_FakeItem("S2A_T50HMH_2023A"), _FakeItem("S2A_T50HMH_2023B")]
-        bounds_target = (390000.0, 6463000.0, 400000.0, 6473000.0)
-
-        # Replace stackstac.stack with a stub that returns a fake xarray-ish object
-        # whose .compute().values is a known array
-        fake_arr = np.full((2, 4, 100, 100), 7, dtype=np.uint16)
-
-        class _FakeStack:
-            def compute(self):
-                return self
-
-            @property
-            def values(self):
-                return fake_arr
-
-        call_count = {"n": 0}
-
-        def fake_stack(*args, **kwargs):
-            call_count["n"] += 1
-            return _FakeStack()
-
-        monkeypatch.setattr(bounds_module.stackstac, "stack", fake_stack)
-
-        # First call: cache miss → invokes stack
-        out1 = bounds_module.cached_stack_compute(
-            items,
-            ["B04"],
-            bounds_target,
-            32750,
-            10,
-            "uint16",
-        )
-        assert call_count["n"] == 1
-        np.testing.assert_array_equal(out1, fake_arr)
-
-        # Second call with same args: cache hit → does not invoke stack
-        out2 = bounds_module.cached_stack_compute(
-            items,
-            ["B04"],
-            bounds_target,
-            32750,
-            10,
-            "uint16",
-        )
-        assert call_count["n"] == 1
-        np.testing.assert_array_equal(out2, fake_arr)
-
-        # Different args (resolution=20) → cache miss again
-        bounds_module.cached_stack_compute(
-            items,
-            ["B04"],
-            bounds_target,
-            32750,
-            20,
-            "uint16",
-        )
-        assert call_count["n"] == 2
-
-    def test_no_cache_when_env_var_unset(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.delenv("S2MOSAIC_DEBUG_CACHE", raising=False)
-
-        class _FakeItem:
-            def __init__(self, id_):
-                self.id = id_
-
-        items = [_FakeItem("X")]
-        bounds_target = (0.0, 0.0, 1000.0, 1000.0)
-
-        fake_arr = np.zeros((1, 1, 10, 10), dtype=np.uint16)
-
-        class _FakeStack:
-            def compute(self):
-                return self
-
-            @property
-            def values(self):
-                return fake_arr
-
-        call_count = {"n": 0}
-
-        def fake_stack(*args, **kwargs):
-            call_count["n"] += 1
-            return _FakeStack()
-
-        monkeypatch.setattr(bounds_module.stackstac, "stack", fake_stack)
-
-        for _ in range(3):
-            bounds_module.cached_stack_compute(
-                items,
-                ["B04"],
-                bounds_target,
-                32750,
-                10,
-                "uint16",
-            )
-        assert call_count["n"] == 3
-        assert not (tmp_path / "cache").exists()
-
-
 class TestDebugCacheEnvVar:
     """Env-var gating for the debug-cache machinery (pickle_cache + disk_cache)."""
 
@@ -826,7 +712,7 @@ class TestMosaicSharedParamsValidation:
 
     def test_grid_mode_rejects_invalid_band(self):
         with pytest.raises(ValueError, match="Invalid band"):
-            mosaic("50HMH", 2023, required_bands=["FOO"])
+            mosaic("50HMH", start_year=2023, required_bands=["FOO"])
 
     def test_bounds_mode_rejects_invalid_band(self):
         with pytest.raises(ValueError, match="Invalid band"):
@@ -845,7 +731,7 @@ class TestMosaicSharedParamsValidation:
 
     def test_grid_mode_rejects_invalid_resampling(self):
         with pytest.raises(ValueError, match="Invalid resampling method"):
-            mosaic("50HMH", 2023, resampling_method="not_a_method")
+            mosaic("50HMH", start_year=2023, resampling_method="not_a_method")
 
     def test_bounds_mode_rejects_invalid_resampling(self):
         with pytest.raises(ValueError, match="Invalid resampling method"):
@@ -855,7 +741,7 @@ class TestMosaicSharedParamsValidation:
 
     def test_grid_mode_rejects_invalid_cloud_mask(self):
         with pytest.raises(ValueError, match="Invalid cloud_mask"):
-            mosaic("50HMH", 2023, cloud_mask="bogus")
+            mosaic("50HMH", start_year=2023, cloud_mask="bogus")
 
     def test_bounds_mode_rejects_invalid_cloud_mask(self):
         with pytest.raises(ValueError, match="Invalid cloud_mask"):

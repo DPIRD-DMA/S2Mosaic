@@ -24,7 +24,8 @@ logger = logging.getLogger(__name__)
 @overload
 def mosaic(
     grid_id: Optional[str] = ...,
-    start_year: Optional[int] = ...,
+    *,
+    start_year: int,
     start_month: int = ...,
     start_day: int = ...,
     output_dir: None = None,
@@ -55,10 +56,10 @@ def mosaic(
 @overload
 def mosaic(
     grid_id: Optional[str] = ...,
-    start_year: Optional[int] = ...,
+    *,
+    start_year: int,
     start_month: int = ...,
     start_day: int = ...,
-    *,
     output_dir: Union[Path, str],
     sort_method: str = ...,
     sort_function: Optional[Callable] = ...,
@@ -86,7 +87,8 @@ def mosaic(
 
 def mosaic(
     grid_id: Optional[str] = None,
-    start_year: Optional[int] = None,
+    *,
+    start_year: int,
     start_month: int = 1,
     start_day: int = 1,
     output_dir: Optional[Union[Path, str]] = None,
@@ -118,8 +120,9 @@ def mosaic(
     Two modes — pass exactly one of:
         * ``grid_id`` (e.g. "50HMH"): mosaic an entire MGRS tile.
         * ``bounds`` (minx, miny, maxx, maxy): mosaic an arbitrary bounding
-          box. Scenes from any intersecting MGRS tiles are pulled and
-          reprojected onto a common UTM grid via stackstac.
+          box. Scenes from any intersecting MGRS tiles are streamed through
+          per-scene rasterio WarpedVRT reads and aggregated on a common UTM
+          grid in ``target_crs``.
 
     ``bounds_crs`` and ``target_crs`` only apply when ``bounds`` is set.
 
@@ -170,8 +173,6 @@ def mosaic(
     """  # noqa: E501
     if (grid_id is None) == (bounds is None):
         raise ValueError("Exactly one of grid_id or bounds must be provided")
-    if start_year is None:
-        raise ValueError("start_year is required")
 
     if bounds is not None:
         return run_bounds_pipeline(

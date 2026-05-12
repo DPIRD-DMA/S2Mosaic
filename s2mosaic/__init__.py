@@ -9,6 +9,7 @@ except ImportError:
     __version__ = "0.0.0+unknown"
 
 from .coordinator import mosaic
+from .helpers import SceneFetchError
 
 
 def set_log_level(level: Union[int, str] = _logging.INFO) -> None:
@@ -39,5 +40,6 @@ def set_log_level(level: Union[int, str] = _logging.INFO) -> None:
 __all__ = [
     "mosaic",
     "set_log_level",
+    "SceneFetchError",
     "__version__",
 ]

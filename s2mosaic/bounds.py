@@ -18,7 +18,6 @@ import numpy as np
 import planetary_computer
 import pystac_client
 import rasterio as rio
-import stackstac
 from pyproj import Transformer
 from pystac.item_collection import ItemCollection
 from pystac_client.stac_api_io import StacApiIO
@@ -160,52 +159,6 @@ def aggregate_stack(
     raise ValueError(f"Unsupported mosaic_method: {mosaic_method}")
 
 
-def _stack_compute_key(
-    items_list: list,
-    assets: List[str],
-    bounds_target: Bbox,
-    target_crs: int,
-    resolution: int,
-    dtype: str,
-    resampling: str = "nearest",
-) -> str:
-    item_ids = ",".join(sorted(item.id for item in items_list))
-    return (
-        f"{bounds_target}|{target_crs}|{resolution}|"
-        f"{','.join(assets)}|{dtype}|{resampling}|{item_ids}"
-    )
-
-
-@disk_cache("stack", key_fn=_stack_compute_key)
-def cached_stack_compute(
-    items_list: list,
-    assets: List[str],
-    bounds_target: Bbox,
-    target_crs: int,
-    resolution: int,
-    dtype: str,
-    resampling: str = "nearest",
-) -> np.ndarray:
-    """Materialise a stackstac stack as `dtype`, with optional pickle cache.
-
-    Stackstac requires the fill_value to be outside the data dtype's range
-    (no integer fits this for uint16/uint8), so we fetch as float32 with NaN
-    fill, then nan_to_num + cast to the requested integer dtype here.
-    """
-    stack = stackstac.stack(
-        items_list,
-        assets=assets,
-        bounds=bounds_target,
-        epsg=target_crs,
-        resolution=resolution,
-        rescale=False,
-        resampling=get_rasterio_resampling(resampling),
-        sortby_date=False,  # preserve caller's order (valid_data, etc.)
-    )
-    arr_float = stack.compute().values
-    return np.nan_to_num(arr_float, nan=0).astype(dtype)
-
-
 _OCM_BANDS: Tuple[str, str, str] = ("B04", "B03", "B8A")
 
 
@@ -296,10 +249,9 @@ def _fetch_one_ocm(
 ) -> np.ndarray:
     """Fetch one scene's OCM bands (B04, B03, B8A) as (3, h, w) uint16.
 
-    Uses rasterio + WarpedVRT directly — avoids stackstac's eager-stack
-    overhead so the bounds pipeline can stream OCM scenes through the mask
-    loop and discard each as it goes (and skip fetching late scenes entirely
-    once the no_data threshold or first-mode coverage is met).
+    Reads via rasterio + WarpedVRT so the mask loop can stream one scene at a
+    time and skip fetching late scenes entirely once the no_data threshold or
+    first-mode coverage is met.
     """
     transform, width, height, target_crs_obj = _target_grid(
         bounds_target, ocm_resolution, target_crs
@@ -384,8 +336,7 @@ def _fetch_one_tci(
     resolution: int,
     resampling: str,
 ) -> np.ndarray:
-    """Fetch one scene's TCI as ``(3, h, w)`` uint8. Per-scene variant of
-    ``_fetch_tci_stack`` for the streaming loop."""
+    """Fetch one scene's TCI as ``(3, h, w)`` uint8 on the target grid."""
     transform, width, height, target_crs_obj = _target_grid(
         bounds_target, resolution, target_crs
     )
@@ -395,50 +346,6 @@ def _fetch_one_tci(
         href, [1, 2, 3], transform, width, height, target_crs_obj, rio_resampling
     )
     return arr.astype(np.uint8)
-
-
-def _fetch_tci_stack_key(
-    items_list: list,
-    bounds_target: Bbox,
-    target_crs: int,
-    resolution: int,
-    resampling: str,
-    max_workers: int = 4,
-) -> str:
-    item_ids = ",".join(sorted(item.id for item in items_list))
-    return f"{bounds_target}|{target_crs}|{resolution}|{resampling}|{item_ids}"
-
-
-@disk_cache("tci", key_fn=_fetch_tci_stack_key)
-def _fetch_tci_stack(
-    items_list: list,
-    bounds_target: Bbox,
-    target_crs: int,
-    resolution: int,
-    resampling: str,
-    max_workers: int = 4,
-) -> np.ndarray:
-    """Fetch TCI (3-band uint8 RGB) for each item, reprojected to target grid.
-
-    TCI is a single multi-band asset; stackstac's asset->band mapping assumes
-    1 band per asset, so we read each scene's TCI directly via WarpedVRT and
-    stack the results — mirroring the multi-band-index pattern used in
-    grid_id mode (data_reader.get_full_band).
-    """
-    transform, width, height, target_crs_obj = _target_grid(
-        bounds_target, resolution, target_crs
-    )
-    rio_resampling = get_rasterio_resampling(resampling)
-
-    def _fetch_one(item: Any) -> np.ndarray:
-        href = planetary_computer.sign(item.assets["visual"].href)
-        return _read_warpvrt(
-            href, [1, 2, 3], transform, width, height, target_crs_obj, rio_resampling
-        )
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        arrays = list(executor.map(_fetch_one, items_list))
-    return np.stack(arrays, axis=0).astype(np.uint8)
 
 
 def run_bounds_pipeline(
@@ -477,8 +384,8 @@ def run_bounds_pipeline(
 
     Differs from the grid-mode pipeline in that the AOI is an arbitrary bbox
     (possibly spanning multiple MGRS tiles, possibly intersecting tiles in
-    different UTM-zone projections), so all reads go through stackstac /
-    WarpedVRT to land on one common grid in ``target_crs``.
+    different UTM-zone projections), so each per-scene read goes through a
+    rasterio WarpedVRT to land on one common grid in ``target_crs``.
 
     Args:
         bounds: ``(minx, miny, maxx, maxy)`` in ``bounds_crs`` units. Validated
@@ -490,8 +397,8 @@ def run_bounds_pipeline(
         bounds_crs: EPSG code of ``bounds``. Defaults to 4326 (lon/lat).
         target_crs: EPSG code of the output grid. If ``None``, auto-picked as
             the UTM zone containing the bbox centroid.
-        resolution: Output pixel size in metres. Stackstac will read from the
-            nearest COG overview for non-native resolutions.
+        resolution: Output pixel size in metres. Reads come from the nearest
+            COG overview for non-native resolutions.
         sort_method, sort_function, mosaic_method, percentile_value: As for
             :func:`s2mosaic.mosaic`.
         required_bands: Spectral bands to fetch (e.g. ``["B04", "B03", "B02"]``)
@@ -505,8 +412,8 @@ def run_bounds_pipeline(
         additional_query: Extra STAC query filters
             (e.g. ``{"eo:cloud_cover": {"lt": 50}}``).
         ignore_duplicate_items: Keep only the latest processing baseline per scene.
-        resampling_method: How stackstac resamples source COGs to ``target_crs``
-            / ``resolution``.
+        resampling_method: How source COGs are resampled to ``target_crs``
+            / ``resolution`` during the WarpedVRT read.
         cloud_mask: ``"OCM"`` (deep-learning, default) or ``"SCL"`` (L2A scene
             classification layer — cheaper, less accurate).
         output_dir: Directory to write the GeoTIFF. If ``None``, returns the
@@ -746,8 +653,7 @@ def run_bounds_pipeline(
     # mosaic in place. Mirrors grid mode's ``download_bands_pool`` loop so peak
     # memory is O(one scene + accumulator) rather than O(N scenes) for MEAN
     # and FIRST. PERCENTILE still buffers N scenes because exact percentiles
-    # need all values per pixel — but we avoid stackstac's transient float32
-    # doubling.
+    # need all values per pixel.
     kept_indices = sorted(kept_combo_masks_ocm.keys())
     kept_items = [items_list[i] for i in kept_indices]
     logger.info(f"Streaming user bands for {len(kept_items)}/{n_time} kept scenes")

@@ -16,7 +16,6 @@ dependencies = [
     "opencv-python>=4.8.0",
     "planetary-computer>=1.0.0",
     "pystac-client>=0.8.6",
-    "stackstac>=0.5.1",
 ]
 license = "MIT"
 license-files = ["LICENSE"]

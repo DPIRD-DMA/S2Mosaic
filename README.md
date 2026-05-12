@@ -76,7 +76,7 @@ To save a GeoTIFF instead of returning the array, pass `output_dir=Path("output"
 
 ## Quick start — arbitrary bounding box
 
-Pass `bounds=(minx, miny, maxx, maxy)` instead of `grid_id` to mosaic any rectangular AOI, including ones that cross MGRS tile boundaries. Scenes from the intersecting tiles are pulled and reprojected onto a common UTM grid via stackstac.
+Pass `bounds=(minx, miny, maxx, maxy)` instead of `grid_id` to mosaic any rectangular AOI, including ones that cross MGRS tile boundaries. Each intersecting scene is streamed through a rasterio `WarpedVRT` and aggregated onto a common UTM grid.
 
 ```python
 from s2mosaic import mosaic
@@ -140,7 +140,7 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 
 - `output_dir` (`None`): if set, writes a GeoTIFF to this directory and returns the file path. If omitted, returns `(array, profile)`.
 - `overwrite` (`True`): when `output_dir` is set and the target path exists, controls whether to overwrite it.
-- `resolution` (`10`): output pixel size in metres. At lower resolutions rasterio / stackstac read from COG overviews — much less data over the wire.
+- `resolution` (`10`): output pixel size in metres. At lower resolutions rasterio reads from COG overviews — much less data over the wire.
 - `resampling_method` (`"nearest"`): how the source is resampled to the output grid. Also accepts `"bilinear"`, `"cubic"`, `"average"`, `"lanczos"`.
 
 **Bounds-mode-specific options**
@@ -202,5 +202,4 @@ S2Mosaic is built on top of:
 - **[Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/)** — STAC catalog and signed access to the Sentinel-2 L2A archive.
 - **[OmniCloudMask](https://github.com/DPIRD-DMA/OmniCloudMask)** — the deep-learning cloud and cloud-shadow mask used by the default `cloud_mask="OCM"` provider.
 - **L2A Scene Classification Layer (SCL)** — the published per-scene classification used by the optional `cloud_mask="SCL"` provider.
-- **[stackstac](https://stackstac.readthedocs.io/)** — STAC-to-xarray fetch and reprojection used by the bounds-mode pipeline.
-- **[rasterio](https://rasterio.readthedocs.io/)**, **[GeoPandas](https://geopandas.org/)**, **[pystac-client](https://pystac-client.readthedocs.io/)**, **[OpenCV](https://opencv.org/)**, **[numbagg](https://github.com/numbagg/numbagg)**, and **[multiclean](https://github.com/DPIRD-DMA/multiclean)** — supporting libraries for I/O, geometry, search, image ops, percentile aggregation, and mask post-processing.
+- **[rasterio](https://rasterio.readthedocs.io/)**, **[GeoPandas](https://geopandas.org/)**, **[pystac-client](https://pystac-client.readthedocs.io/)**, **[OpenCV](https://opencv.org/)**, **[numbagg](https://github.com/numbagg/numbagg)**, and **[multiclean](https://github.com/DPIRD-DMA/multiclean)** — supporting libraries for I/O (including per-scene `WarpedVRT` reprojection), geometry, search, image ops, percentile aggregation, and mask post-processing.
