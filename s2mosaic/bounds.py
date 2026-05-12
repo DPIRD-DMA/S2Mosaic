@@ -417,6 +417,7 @@ def run_bounds_pipeline(
         percentile_value=percentile_value,
         resampling_method=resampling_method,
         bounds=bounds,
+        bounds_crs=bounds_crs,
         resolution=resolution,
         cloud_mask=cloud_mask,
     )

@@ -229,6 +229,10 @@ def normalize_mosaic_inputs(
     )
 
 
+BOUNDS_MIN_DIM_M = 10
+BOUNDS_MAX_DIM_M = 200_000
+
+
 def validate_inputs(
     sort_method: str,
     mosaic_method: str,
@@ -238,6 +242,7 @@ def validate_inputs(
     percentile_value: Optional[float],
     resampling_method: str = "nearest",
     bounds: Optional[Tuple[float, float, float, float]] = None,
+    bounds_crs: Optional[int] = None,
     resolution: Optional[int] = None,
     cloud_mask: str = CLOUD_MASK_OCM,
 ) -> None:
@@ -252,6 +257,46 @@ def validate_inputs(
         minx, miny, maxx, maxy = bounds
         if minx >= maxx or miny >= maxy:
             raise ValueError(f"Invalid bounds: {bounds}")
+
+        # Range check for EPSG:4326 (lon/lat). A swapped (lat, lon, lat, lon)
+        # tuple is caught here whenever a longitude > 90 lands in the latitude
+        # slots; ambiguous near (0, 0), which we can't disambiguate without
+        # more context.
+        if bounds_crs == 4326:
+            if not (-180 <= minx <= 180 and -180 <= maxx <= 180):
+                raise ValueError(
+                    f"Invalid bounds: longitude must be in [-180, 180] for "
+                    f"EPSG:4326, got minx={minx}, maxx={maxx}"
+                )
+            if not (-90 <= miny <= 90 and -90 <= maxy <= 90):
+                raise ValueError(
+                    f"Invalid bounds: latitude must be in [-90, 90] for "
+                    f"EPSG:4326, got miny={miny}, maxy={maxy} "
+                    f"(possible lat/lon axis swap)"
+                )
+
+        # Size check. For EPSG:4326, convert degrees to approximate metres
+        # using the bbox-centre latitude; otherwise treat bounds units as
+        # metres (true for UTM and most projected CRSes).
+        if bounds_crs == 4326:
+            center_lat = (miny + maxy) / 2
+            width_m = (maxx - minx) * 111_111 * np.cos(np.radians(center_lat))
+            height_m = (maxy - miny) * 111_111
+        else:
+            width_m = maxx - minx
+            height_m = maxy - miny
+        if width_m < BOUNDS_MIN_DIM_M or height_m < BOUNDS_MIN_DIM_M:
+            raise ValueError(
+                f"Invalid bounds: width and height must each be at least "
+                f"{BOUNDS_MIN_DIM_M}m, got width={width_m:.2f}m "
+                f"height={height_m:.2f}m"
+            )
+        if width_m > BOUNDS_MAX_DIM_M or height_m > BOUNDS_MAX_DIM_M:
+            raise ValueError(
+                f"Invalid bounds: width and height must each be at most "
+                f"{BOUNDS_MAX_DIM_M / 1000:.0f}km, got "
+                f"width={width_m / 1000:.2f}km height={height_m / 1000:.2f}km"
+            )
     if resolution is not None and resolution <= 0:
         raise ValueError(f"resolution must be positive, got {resolution}")
     if cloud_mask not in VALID_CLOUD_MASKS:

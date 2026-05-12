@@ -11,6 +11,7 @@ sys.path.insert(0, str(project_root))
 from s2mosaic import mosaic
 from s2mosaic import bounds as bounds_module
 from s2mosaic.bounds import aggregate_stack, pick_utm_epsg, reproject_bbox
+from s2mosaic.helpers import validate_inputs
 from s2mosaic.frequent_coverage import (
     get_coverage,
     get_frequent_coverage_for_bbox,
@@ -295,6 +296,80 @@ class TestMosaicBoundsValidation:
     def test_neither_grid_id_nor_bounds_rejected(self):
         with pytest.raises(ValueError, match="Exactly one"):
             mosaic(start_year=2023)
+
+    def test_lon_out_of_range_rejected(self):
+        with pytest.raises(ValueError, match="longitude must be in"):
+            self._call((181.0, -31.97, 181.1, -31.94))
+
+    def test_neg_lon_out_of_range_rejected(self):
+        with pytest.raises(ValueError, match="longitude must be in"):
+            self._call((-181.0, -31.97, -180.9, -31.94))
+
+    def test_lat_out_of_range_rejected(self):
+        with pytest.raises(ValueError, match="latitude must be in"):
+            self._call((115.83, -91.0, 115.91, -90.9))
+
+    def test_swapped_axes_caught_when_lon_exceeds_lat_range(self):
+        # User swapped (lat, lon, lat, lon) for the Perth example — the
+        # would-be-latitude slots now hold 115.83/115.91, exceeding ±90.
+        with pytest.raises(ValueError, match="latitude must be in"):
+            self._call((-31.97, 115.83, -31.94, 115.91))
+
+    def test_lon_range_not_checked_when_bounds_crs_not_4326(self):
+        # Bounds in UTM zone 50S (metres) — values larger than 180 are valid.
+        # validate_inputs must accept this without raising on range.
+        utm_bounds = (390_000.0, 6_460_000.0, 400_000.0, 6_470_000.0)
+        validate_inputs(
+            sort_method="valid_data",
+            mosaic_method="mean",
+            no_data_threshold=0.01,
+            required_bands=["B04"],
+            grid_id=None,
+            percentile_value=None,
+            bounds=utm_bounds,
+            bounds_crs=32750,
+            resolution=10,
+        )
+
+    def test_bounds_too_small_4326_rejected(self):
+        # 5m × 5m AOI at lat=-32: well below the 10m floor.
+        delta_lon = 5 / (111_111 * np.cos(np.radians(32)))
+        delta_lat = 5 / 111_111
+        with pytest.raises(ValueError, match="at least 10m"):
+            self._call((115.83, -31.97, 115.83 + delta_lon, -31.97 + delta_lat))
+
+    def test_bounds_too_small_utm_rejected(self):
+        with pytest.raises(ValueError, match="at least 10m"):
+            self._call(
+                (390_000.0, 6_460_000.0, 390_005.0, 6_460_005.0), bounds_crs=32750
+            )
+
+    def test_bounds_too_large_4326_rejected(self):
+        # 5° × 5° AOI at lat=-32: width ~470km, height ~556km — well over 200km.
+        with pytest.raises(ValueError, match="at most 200km"):
+            self._call((110.0, -35.0, 115.0, -30.0))
+
+    def test_bounds_too_large_utm_rejected(self):
+        # 300km × 300km in UTM.
+        with pytest.raises(ValueError, match="at most 200km"):
+            self._call(
+                (300_000.0, 6_300_000.0, 600_000.0, 6_600_000.0), bounds_crs=32750
+            )
+
+    def test_typical_cross_tile_bounds_accepted(self):
+        # ~80km × 80km, larger than a single S2 tile's overlap zone but well
+        # under the 200km ceiling — must pass validation cleanly.
+        validate_inputs(
+            sort_method="valid_data",
+            mosaic_method="mean",
+            no_data_threshold=0.01,
+            required_bands=["B04"],
+            grid_id=None,
+            percentile_value=None,
+            bounds=(119.0, -29.0, 119.8, -28.2),
+            bounds_crs=4326,
+            resolution=10,
+        )
 
 
 class TestAggregate:
