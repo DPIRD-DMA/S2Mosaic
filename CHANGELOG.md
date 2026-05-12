@@ -2,19 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [2.0.0] - Unreleased
 
 ### Added
 - `cloud_mask` parameter on `mosaic()` selects the cloud-mask provider: `"OCM"` (default, OmniCloudMask deep-learning model) or `"SCL"` (the L2A Scene Classification Layer that ships with each scene). SCL is much cheaper — useful on CPU-only machines and for bulk processing — at the cost of accuracy.
-- Bounds mode: pass `bounds=(minx, miny, maxx, maxy)` (with optional `bounds_crs` / `target_crs`) to mosaic an arbitrary rectangle, including AOIs that cross MGRS tile boundaries — scenes from intersecting tiles are reprojected onto a common UTM grid via stackstac.
+- Bounds mode: pass `bounds=(minx, miny, maxx, maxy)` (with optional `bounds_crs` / `target_crs`) to mosaic an arbitrary rectangle, including AOIs that intersect Sentinel-2 tiles in different UTM zone projections — scenes from intersecting tiles are reprojected onto a common UTM grid via stackstac.
+- Bounds validation: rejects longitudes outside ±180 or latitudes outside ±90 when `bounds_crs=4326` (catches most lat/lon axis swaps), and rejects bboxes whose width or height falls outside the 10m–200km range.
 - Pre-commit hooks (`ruff-check`, `ruff-format`, `mypy`) and a pre-push `pytest` hook.
 - GitHub Actions CI running lint, type-check, and tests on push and PR.
 - `@overload`s on `mosaic()` so the return type narrows to `Tuple[ndarray, dict]` when `output_dir` is omitted and to `Path` when it is set.
-- Unit tests covering masking, frequent-coverage, bounds reprojection, and percentile aggregation.
+- Unit tests covering masking, frequent-coverage, bounds reprojection, bounds validation, and percentile aggregation.
+- Transient per-scene fetch failures (network blips, expired SAS tokens, 5xx from MPC) are now retried with exponential backoff (3 attempts, 1/2/4s). If retries are exhausted, the scene is logged at WARNING and skipped instead of aborting the whole mosaic; a summary line reports `N/M scenes failed`. Cloud-mask inference errors are *not* swallowed — they still hard-stop so they can be diagnosed.
 
 ### Changed
 - Replaced `scipy.ndimage` with OpenCV (`cv2.dilate` / `cv2.resize`) for no-data mask dilation and band resampling — drops the SciPy dependency.
 - Mask post-processing now uses `multiclean`.
+- "No scenes found" and "no usable scenes" conditions now raise `ValueError` and `RuntimeError` respectively instead of bare `Exception`, so callers can catch them specifically.
+- Bounds mode now streams per-scene fetches and accumulates the mosaic in place (mirroring grid mode's `download_bands_pool`). Peak memory is dropped from O(N scenes) to O(one scene + accumulator) for `mosaic_method="mean"` and `"first"`; benchmarked on a 22 × 22km Perth AOI × 28 scenes × 4 bands, peak RSS fell from 15 GB → 2.1 GB (~7×). `"percentile"` / `"median"` still buffer N scenes (exact percentiles need all values per pixel) but avoid stackstac's transient float32 doubling.
+- Bounds-mode output grid is now derived from `_target_grid(bounds, resolution, target_crs)` for the user bands (matching the cloud-mask, coverage-mask, and TCI paths) instead of stackstac's `snap_bounds=True` global-aligned grid. The output may differ by ~1 pixel in width/height from 1.x for the same bounds, and pixel centres can shift by a sub-pixel fraction — the math is unchanged (verified bit-exact against `aggregate_stack`), only the bbox-to-grid rounding moved.
 - `uv.lock` is no longer tracked in the repo.
 
 ## [1.1.0] - 2026-01-22

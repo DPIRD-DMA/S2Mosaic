@@ -1,4 +1,3 @@
-import logging
 from typing import Any, Dict, Tuple
 
 import cv2
@@ -8,12 +7,10 @@ import rasterio as rio
 from rasterio.enums import Resampling
 from rasterio.windows import Window
 
-from .helpers import disk_cache
-
-logger = logging.getLogger(__name__)
+from .helpers import disk_cache, with_scene_retry
 
 
-def read_in_chunks(
+def _read_in_chunks(
     href: str,
     index: int,
     mask: np.ndarray,
@@ -75,7 +72,6 @@ def _band_with_mask_key(
     mask: np.ndarray,
     target_size: int,
     resampling: Resampling = Resampling.nearest,
-    attempt: int = 0,
     mosaic_method: str = "",
 ) -> str:
     href, index = href_and_index
@@ -87,97 +83,65 @@ def _band_with_mask_key(
 
 
 @disk_cache("band", key_fn=_band_with_mask_key)
+@with_scene_retry()
 def get_band_with_mask(
     href_and_index: tuple[str, int],
     mask: np.ndarray,
     target_size: int,
     resampling: Resampling = Resampling.nearest,
-    attempt: int = 0,
     mosaic_method: str = "",
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Download a S2 band at `target_size` resolution, in chunks intersecting `mask`."""
     href = href_and_index[0]
     index = href_and_index[1]
 
-    try:
-        singed_href = planetary_computer.sign(href)
-        with rio.open(singed_href) as src:
-            array = read_in_chunks(
-                href=singed_href,
-                index=index,
-                mask=mask,
-                target_size=target_size,
-                resampling=resampling,
-            )
-            profile = src.profile.copy()
-            scale_x = src.width / target_size
-            scale_y = src.height / target_size
-            profile["transform"] = src.transform * rio.Affine.scale(scale_x, scale_y)
-            profile["width"] = target_size
-            profile["height"] = target_size
-            return array, profile
-
-    except Exception as e:
-        logger.error(f"Failed to open {href}: {e}")
-        if attempt < 3:
-            logger.info(f"Retrying attempt {attempt + 1}/3")
-            return get_band_with_mask(
-                href_and_index=href_and_index,
-                mask=mask,
-                target_size=target_size,
-                resampling=resampling,
-                attempt=attempt + 1,
-                mosaic_method=mosaic_method,
-            )
-        else:
-            logger.error(f"All retry attempts failed for {href}")
-            raise Exception(
-                f"Failed to open {href} after {attempt + 1} attempts"
-            ) from None
+    singed_href = planetary_computer.sign(href)
+    with rio.open(singed_href) as src:
+        array = _read_in_chunks(
+            href=singed_href,
+            index=index,
+            mask=mask,
+            target_size=target_size,
+            resampling=resampling,
+        )
+        profile = src.profile.copy()
+        scale_x = src.width / target_size
+        scale_y = src.height / target_size
+        profile["transform"] = src.transform * rio.Affine.scale(scale_x, scale_y)
+        profile["width"] = target_size
+        profile["height"] = target_size
+        return array, profile
 
 
-def _full_band_key(href: str, attempt: int = 0, res: int = 10) -> str:
+def _full_band_key(href: str, res: int = 10) -> str:
     href_parts = href.split("/")
     return f"{href_parts[-4]}|{href_parts[-1]}|{res / 10}|{res}"
 
 
 @disk_cache("full_band", key_fn=_full_band_key)
-def get_full_band(
-    href: str, attempt: int = 0, res: int = 10
-) -> Tuple[np.ndarray, Dict[str, Any]]:
+@with_scene_retry()
+def get_full_band(href: str, res: int = 10) -> Tuple[np.ndarray, Dict[str, Any]]:
     spatial_ratio = res / 10
 
-    try:
-        singed_href = planetary_computer.sign(href)
-        is_tci = "TCI_10m" in href
-        with rio.open(singed_href) as src:
-            target_side = int(10980 / spatial_ratio)
-            # Passing an explicit window is required for rasterio to use COG
-            # overviews. Single-band reads must use a scalar index rather than
-            # a 1-element list — the latter triggers a slow path that reads at
-            # native resolution.
-            full_window = Window(0, 0, src.width, src.height)  # type: ignore
-            if is_tci:
-                array = src.read(
-                    [1, 2, 3],
-                    window=full_window,
-                    out_shape=(3, target_side, target_side),
-                ).astype(np.uint16)
-            else:
-                array = src.read(
-                    1,
-                    window=full_window,
-                    out_shape=(target_side, target_side),
-                ).astype(np.uint16)[None, :, :]
-            return array, src.profile.copy()
-
-    except Exception as e:
-        logger.error(f"Failed to open {href}: {e}")
-        if attempt < 3:
-            logger.info(f"Retrying attempt {attempt + 1}/3")
-            return get_full_band(href=href, attempt=attempt + 1, res=res)
+    singed_href = planetary_computer.sign(href)
+    is_tci = "TCI_10m" in href
+    with rio.open(singed_href) as src:
+        target_side = int(10980 / spatial_ratio)
+        # Passing an explicit window is required for rasterio to use COG
+        # overviews. Single-band reads must use a scalar index rather than
+        # a 1-element list — the latter triggers a slow path that reads at
+        # native resolution.
+        full_window = Window(0, 0, src.width, src.height)  # type: ignore
+        if is_tci:
+            array = src.read(
+                [1, 2, 3],
+                window=full_window,
+                out_shape=(3, target_side, target_side),
+            ).astype(np.uint16)
         else:
-            logger.error(f"All retry attempts failed for {href}")
-            raise Exception(
-                f"Failed to open {href} after {attempt + 1} attempts"
-            ) from None
+            array = src.read(
+                1,
+                window=full_window,
+                out_shape=(target_side, target_side),
+            ).astype(np.uint16)[None, :, :]
+        return array, src.profile.copy()

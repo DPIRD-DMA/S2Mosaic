@@ -31,7 +31,7 @@ def calculate_percentile_mosaic(
 
     # Process row chunks in parallel
     process_chunk_partial = partial(
-        process_row_chunk,
+        _process_row_chunk,
         all_scene_data=all_scene_data,
         percentile_value=percentile_value,
     )
@@ -48,7 +48,7 @@ def calculate_percentile_mosaic(
     return mosaic
 
 
-def process_row_chunk(
+def _process_row_chunk(
     row_range: Tuple[int, int],
     all_scene_data: List[np.ndarray],
     percentile_value: float,

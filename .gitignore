@@ -171,3 +171,4 @@ visual_test_outputs/*.tif
 uv.lock
 examples/output/*
 cache/*
+.claude/scheduled_tasks.lock

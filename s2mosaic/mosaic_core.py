@@ -15,6 +15,7 @@ from .helpers import (
     MOSAIC_FIRST,
     MOSAIC_MEAN,
     MOSAIC_PERCENTILE,
+    SceneFetchError,
     get_rasterio_resampling,
     pick_ocm_resolution,
 )
@@ -64,22 +65,32 @@ def download_bands_pool(
 
     good_pixel_tracker = np.zeros((s2_scene_size, s2_scene_size), dtype=np.uint16)
     last_profile: Dict[str, Any] = {}
+    n_fetch_failed = 0
+    n_succeeded = 0
 
     for index, item in enumerate(sorted_scenes[ITEM_COL].tolist()):
-        if cloud_mask == CLOUD_MASK_SCL:
-            non_cloud_pixels, valid_pixels = get_scl_masks(
-                item=item,
-                user_resolution=resolution,
+        try:
+            if cloud_mask == CLOUD_MASK_SCL:
+                non_cloud_pixels, valid_pixels = get_scl_masks(
+                    item=item,
+                    user_resolution=resolution,
+                )
+            else:
+                non_cloud_pixels, valid_pixels = get_masks(
+                    item=item,
+                    batch_size=ocm_batch_size,
+                    inference_dtype=ocm_inference_dtype,
+                    max_dl_workers=max_dl_workers,
+                    target_size=s2_scene_size,
+                    ocm_resolution=ocm_resolution,
+                )
+        except SceneFetchError as e:
+            n_fetch_failed += 1
+            logger.warning(
+                f"Scene {index + 1}/{len(sorted_scenes)} ({item.id}): mask fetch "
+                f"failed, skipping ({e})"
             )
-        else:
-            non_cloud_pixels, valid_pixels = get_masks(
-                item=item,
-                batch_size=ocm_batch_size,
-                inference_dtype=ocm_inference_dtype,
-                max_dl_workers=max_dl_workers,
-                target_size=s2_scene_size,
-                ocm_resolution=ocm_resolution,
-            )
+            continue
 
         combo_mask = (non_cloud_pixels * valid_pixels).astype(bool)
 
@@ -88,8 +99,6 @@ def download_bands_pool(
         # else download all valid non cloudy pixels
         if mosaic_method == MOSAIC_FIRST:
             combo_mask = (good_pixel_tracker == 0) & combo_mask
-
-        good_pixel_tracker += combo_mask
 
         hrefs_and_indexes = [
             (item.assets[asset].href, band_index)
@@ -104,10 +113,23 @@ def download_bands_pool(
             mosaic_method=mosaic_method,
         )
 
-        with ThreadPoolExecutor(max_workers=max_dl_workers) as executor:
-            bands_and_profiles = list(
-                executor.map(get_band_with_mask_partial, hrefs_and_indexes)
+        try:
+            with ThreadPoolExecutor(max_workers=max_dl_workers) as executor:
+                bands_and_profiles = list(
+                    executor.map(get_band_with_mask_partial, hrefs_and_indexes)
+                )
+        except SceneFetchError as e:
+            n_fetch_failed += 1
+            logger.warning(
+                f"Scene {index + 1}/{len(sorted_scenes)} ({item.id}): band fetch "
+                f"failed, skipping ({e})"
             )
+            continue
+
+        # Tracker updates only after a successful fetch so MEAN's divisor and
+        # FIRST's fill mask reflect scenes that actually contributed data.
+        good_pixel_tracker += combo_mask
+        n_succeeded += 1
 
         bands = []
         for band, profile in bands_and_profiles:
@@ -142,6 +164,16 @@ def download_bands_pool(
             possible_pixel_count * no_data_threshold
         ):
             break
+
+    if n_fetch_failed:
+        logger.warning(
+            f"Fetch summary: {n_fetch_failed}/{len(sorted_scenes)} scenes failed "
+            f"after retries; {n_succeeded} contributed to the mosaic"
+        )
+    if n_succeeded == 0:
+        raise RuntimeError(
+            f"All {len(sorted_scenes)} scenes failed to fetch — no data to mosaic"
+        )
 
     if mosaic_method == MOSAIC_PERCENTILE:
         if percentile_value is None:

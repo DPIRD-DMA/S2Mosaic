@@ -18,6 +18,7 @@ S2Mosaic is a Python package for creating cloud-free mosaics from Sentinel-2 sat
 - Multiple mosaic creation methods: mean, arbitrary percentile, median or first valid pixel.
 - Support for different spectral bands, including visual (RGB) composites.
 - State-of-the-art cloud masking using the OmniCloudMask library.
+- Resilient to transient COG read failures — per-scene fetches retry with exponential backoff, and a scene that still fails is logged and skipped so one bad asset doesn't abort the whole mosaic.
 - Export mosaics as GeoTIFF files or return as NumPy arrays.
 
 ## Changelog
@@ -167,6 +168,11 @@ If your application already configures the `logging` module, the package logger 
 - `ocm_inference_dtype`: if the device supports it 'bf16' tends to be the fastest option, failing this try 'fp16' then 'fp32'.
 - `sort_method`: Using "valid_data" as the sort method tends to be the fastest option if no_data_threshold is not None.
 - `mosaic_method`: Using 'first' can be a lot faster than 'mean' as only valid, non cloudy, new pixels are downloaded.
+
+## Known limitations
+
+- **Memory for percentile / median.** `mean` and `first` aggregation stream per-scene and have a memory footprint independent of the scene count. `percentile` and `median` (in both grid and bounds mode) must hold all kept scenes in memory at once because exact percentiles need every observation per pixel — peak memory scales with AOI area × bands × number of kept scenes. Use `mean` or `first` for large AOIs or long date windows where memory matters.
+- **SCL is less accurate than OCM.** The L2A Scene Classification Layer is fast (one COG read per scene, no inference) but is consistently less accurate than OCM at identifying clouds and cloud shadow. Use SCL when compute is the bottleneck (CPU-only machines, bulk processing); use OCM when accuracy matters.
 
 ## Contributing
 

@@ -3,6 +3,7 @@ import hashlib
 import logging
 import os
 import pickle
+import time
 from datetime import date, datetime
 from functools import lru_cache
 from importlib import resources
@@ -70,6 +71,53 @@ def disk_cache(
             return pickle_cache(
                 prefix, key_fn(*args, **kwargs), lambda: fn(*args, **kwargs)
             )
+
+        return wrapper
+
+    return decorator
+
+
+class SceneFetchError(Exception):
+    """Raised by a per-scene COG/asset fetch after all retries are exhausted.
+
+    Caught at the pipeline-loop level so one bad scene doesn't abort the whole
+    mosaic — the loop logs and skips. Errors that aren't fetch-related (e.g.
+    OCM inference failures) bypass this and propagate.
+    """
+
+
+def with_scene_retry(
+    attempts: int = 3,
+    base_delay: float = 1.0,
+) -> Callable[[Callable[..., T]], Callable[..., T]]:
+    """Decorator: retry a per-scene fetcher with exponential backoff.
+
+    On exhaustion, the last exception is wrapped in :class:`SceneFetchError`
+    so the pipeline loop can catch fetch failures specifically without also
+    swallowing inference or programming errors that arise outside the fetch.
+    Backoff doubles each attempt (``base_delay``, ``2 * base_delay``, ...).
+    """
+
+    def decorator(fn: Callable[..., T]) -> Callable[..., T]:
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> T:
+            last_exc: Optional[BaseException] = None
+            for attempt in range(attempts):
+                try:
+                    return fn(*args, **kwargs)
+                except Exception as e:
+                    last_exc = e
+                    if attempt < attempts - 1:
+                        delay = base_delay * (2**attempt)
+                        logger.warning(
+                            f"{fn.__name__} attempt {attempt + 1}/{attempts} "
+                            f"failed: {e}; retrying in {delay:.1f}s"
+                        )
+                        time.sleep(delay)
+            assert last_exc is not None
+            raise SceneFetchError(
+                f"{fn.__name__} failed after {attempts} attempts: {last_exc}"
+            ) from last_exc
 
         return wrapper
 
@@ -394,7 +442,7 @@ def get_output_path(
     )
 
 
-def export_tif(
+def _export_tif(
     array: np.ndarray,
     profile: Dict[str, Any],
     export_path: Path,
@@ -434,7 +482,7 @@ def finalize_output(
 
     if export_path is not None:
         logger.info(f"Writing GeoTIFF to {export_path}")
-        export_tif(
+        _export_tif(
             array=array,
             profile=profile,
             export_path=export_path,

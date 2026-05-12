@@ -158,7 +158,10 @@ def mosaic(
         returns the path to the saved GeoTIFF file.
 
     Raises:
-        Exception: If no scenes are found for the specified grid ID and time range.
+        ValueError: If inputs fail validation, or if no scenes are found for the
+            specified grid_id / bounds and time range.
+        RuntimeError: If scenes were found but all were fully cloud-masked or
+            invalid (bounds mode only).
 
     Note:
         - The function uses the STAC API to search for Sentinel-2 scenes.
@@ -273,7 +276,7 @@ def mosaic(
     )
     logger.info(f"Found {len(items)} scenes for grid {grid_id}.")
     if len(items) == 0:
-        raise Exception(
+        raise ValueError(
             f"No scenes found for {grid_id} between {start_date.strftime('%Y-%m-%d')} "
             f"and {end_date.strftime('%Y-%m-%d')}"
         )
