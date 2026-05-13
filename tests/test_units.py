@@ -9,7 +9,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from s2mosaic import mosaic
-from s2mosaic.bounds import aggregate_stack, pick_utm_epsg, reproject_bbox
+from s2mosaic.bounds import pick_utm_epsg, reproject_bbox
 from s2mosaic.helpers import validate_inputs
 from s2mosaic.frequent_coverage import (
     get_coverage,
@@ -21,7 +21,7 @@ from s2mosaic.masking import (
     compute_masks_from_scl,
     get_valid_mask,
 )
-from s2mosaic.mosaic_utils import calculate_percentile_mosaic
+from s2mosaic.mosaic_core import run_tile_aggregation
 
 
 class TestGetValidMask:
@@ -156,67 +156,6 @@ class TestZoomAlignmentConvention:
         np.testing.assert_array_equal(out, expected)
 
 
-class TestCalculatePercentileMosaic:
-    """Tests for the percentile mosaic codepath (numbagg.nanquantile)."""
-
-    SCENE_SIZE = 50
-
-    def _scene(self, value, bands=1):
-        if value is None:
-            return np.full(
-                (bands, self.SCENE_SIZE, self.SCENE_SIZE), np.nan, dtype=np.float32
-            )
-        return np.full(
-            (bands, self.SCENE_SIZE, self.SCENE_SIZE), value, dtype=np.float32
-        )
-
-    def test_single_scene_returns_that_scene(self):
-        scene = self._scene(5.0)
-        out = calculate_percentile_mosaic([scene], s2_scene_size=self.SCENE_SIZE)
-        np.testing.assert_allclose(out, 5.0)
-        assert out.shape == scene.shape
-
-    def test_median_of_three_constant_scenes(self):
-        scenes = [self._scene(1.0), self._scene(5.0), self._scene(9.0)]
-        out = calculate_percentile_mosaic(
-            scenes, s2_scene_size=self.SCENE_SIZE, percentile_value=50.0
-        )
-        np.testing.assert_allclose(out, 5.0)
-
-    def test_p90_of_three_constant_scenes(self):
-        scenes = [self._scene(1.0), self._scene(5.0), self._scene(9.0)]
-        out = calculate_percentile_mosaic(
-            scenes, s2_scene_size=self.SCENE_SIZE, percentile_value=90.0
-        )
-        # 90th percentile of [1, 5, 9] is 8.2 (linear interp between 5 and 9)
-        np.testing.assert_allclose(out, 8.2, rtol=1e-5)
-
-    def test_all_nan_input_replaced_with_zero(self):
-        scene = self._scene(None)
-        out = calculate_percentile_mosaic([scene], s2_scene_size=self.SCENE_SIZE)
-        np.testing.assert_array_equal(out, 0.0)
-
-    def test_nans_skipped_in_percentile(self):
-        # Median of [NaN, 5, 15] should be 10 (NaN ignored)
-        scenes = [self._scene(None), self._scene(5.0), self._scene(15.0)]
-        out = calculate_percentile_mosaic(
-            scenes, s2_scene_size=self.SCENE_SIZE, percentile_value=50.0
-        )
-        np.testing.assert_allclose(out, 10.0)
-
-    def test_chunk_concatenation_matches_unchunked(self):
-        # Output should be the same regardless of chunk_size
-        scenes = [self._scene(1.0), self._scene(5.0), self._scene(9.0)]
-        out_chunked = calculate_percentile_mosaic(
-            scenes, s2_scene_size=self.SCENE_SIZE, chunk_size=10
-        )
-        out_one_chunk = calculate_percentile_mosaic(
-            scenes, s2_scene_size=self.SCENE_SIZE, chunk_size=self.SCENE_SIZE
-        )
-        np.testing.assert_array_equal(out_chunked, out_one_chunk)
-        assert out_chunked.shape == (1, self.SCENE_SIZE, self.SCENE_SIZE)
-
-
 class TestPickUtmEpsg:
     """UTM zone picking from lat/lon."""
 
@@ -233,6 +172,108 @@ class TestPickUtmEpsg:
     )
     def test_known_locations(self, lon, lat, expected):
         assert pick_utm_epsg(lon, lat) == expected
+
+
+class TestRunTileAggregation:
+    """Fast coverage for the shared tile-streamed aggregation engine."""
+
+    H, W = 5, 7
+
+    def _read_fn_for(self, scenes):
+        def read_fn(scene_idx, band_idx, spec):
+            r, c, h, w = spec
+            return scenes[scene_idx, band_idx, r : r + h, c : c + w]
+
+        return read_fn
+
+    def test_mean_uses_only_masked_pixels_across_tiles(self):
+        scenes = np.stack(
+            [
+                np.full((2, self.H, self.W), 10, dtype=np.uint16),
+                np.full((2, self.H, self.W), 30, dtype=np.uint16),
+            ],
+            axis=0,
+        )
+        masks = [
+            np.ones((self.H, self.W), dtype=bool),
+            np.ones((self.H, self.W), dtype=bool),
+        ]
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=self._read_fn_for(scenes),
+            bands_count=2,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            no_data_threshold=None,
+            mosaic_method="mean",
+            percentile_value=None,
+            tile_size=3,
+            tile_workers=1,
+        )
+
+        np.testing.assert_allclose(out, 20.0)
+
+    def test_first_picks_first_valid_pixel(self):
+        scenes = np.stack(
+            [
+                np.full((1, self.H, self.W), 10, dtype=np.uint16),
+                np.full((1, self.H, self.W), 20, dtype=np.uint16),
+                np.full((1, self.H, self.W), 30, dtype=np.uint16),
+            ],
+            axis=0,
+        )
+        masks = [
+            np.zeros((self.H, self.W), dtype=bool),
+            np.ones((self.H, self.W), dtype=bool),
+            np.ones((self.H, self.W), dtype=bool),
+        ]
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=self._read_fn_for(scenes),
+            bands_count=1,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            no_data_threshold=None,
+            mosaic_method="first",
+            percentile_value=None,
+            tile_size=4,
+            tile_workers=1,
+        )
+
+        np.testing.assert_allclose(out, 20.0)
+
+    def test_percentile_skips_nan_masked_pixels(self):
+        scenes = np.stack(
+            [
+                np.full((1, self.H, self.W), 5, dtype=np.uint16),
+                np.full((1, self.H, self.W), 15, dtype=np.uint16),
+            ],
+            axis=0,
+        )
+        masks = [
+            np.zeros((self.H, self.W), dtype=bool),
+            np.ones((self.H, self.W), dtype=bool),
+        ]
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=self._read_fn_for(scenes),
+            bands_count=1,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            no_data_threshold=None,
+            mosaic_method="percentile",
+            percentile_value=50.0,
+            tile_size=2,
+            tile_workers=1,
+        )
+
+        np.testing.assert_allclose(out, 15.0)
 
 
 class TestReprojectBbox:
@@ -369,46 +410,6 @@ class TestMosaicBoundsValidation:
             bounds_crs=4326,
             resolution=10,
         )
-
-
-class TestAggregate:
-    """Tests for the in-memory aggregation step (no network)."""
-
-    H, W = 20, 30  # non-square to exercise the bounds case
-
-    def _stack(self, time_values, bands=2):
-        return np.stack(
-            [np.full((bands, self.H, self.W), v, dtype=np.uint16) for v in time_values],
-            axis=0,
-        )
-
-    def _mask(self, value):
-        return np.full((self.H, self.W), value, dtype=bool)
-
-    def test_mean_with_all_masks_true(self):
-        stack = self._stack([10, 20, 30])
-        masks = [self._mask(True)] * 3
-        out = aggregate_stack(stack, masks, "mean", percentile_value=None)
-        np.testing.assert_allclose(out, 20.0)
-
-    def test_mean_zero_where_no_valid_pixels(self):
-        stack = self._stack([10, 20])
-        masks = [self._mask(False)] * 2
-        out = aggregate_stack(stack, masks, "mean", percentile_value=None)
-        np.testing.assert_array_equal(out, 0.0)
-
-    def test_first_picks_earliest_valid(self):
-        stack = self._stack([10, 20, 30])
-        # Only 2nd scene is valid → output should be 20
-        masks = [self._mask(False), self._mask(True), self._mask(True)]
-        out = aggregate_stack(stack, masks, "first", percentile_value=None)
-        np.testing.assert_allclose(out, 20.0)
-
-    def test_percentile_50_matches_median(self):
-        stack = self._stack([10, 50, 90])
-        masks = [self._mask(True)] * 3
-        out = aggregate_stack(stack, masks, "percentile", percentile_value=50.0)
-        np.testing.assert_allclose(out, 50.0)
 
 
 class _FakeItem:

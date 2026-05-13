@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import date
 from typing import Any, Dict, List
@@ -12,7 +13,7 @@ from pystac_client.stac_api_io import StacApiIO
 from shapely.geometry.polygon import Polygon
 from urllib3 import Retry
 
-from .helpers import SORT_NEWEST, SORT_OLDEST, SORT_VALID_DATA
+from .helpers import SORT_NEWEST, SORT_OLDEST, SORT_VALID_DATA, pickle_cache
 
 logger = logging.getLogger(__name__)
 
@@ -69,28 +70,40 @@ def search_for_items(
     }
 
     logger.info(
-        f"""Searching for items in grid {grid_id} from 
+        f"""Searching for items in grid {grid_id} from
         {start_date} to {end_date} with query: {query}"""
     )
 
-    retry = Retry(
-        total=5,
-        backoff_factor=1,
-        status_forcelist=[502, 503, 504],
-        allowed_methods=None,
+    # Cache the STAC query result so dev iteration survives PC outages and
+    # avoids redundant network calls. URLs in cached items aren't signed yet
+    # (signing happens at asset read time), so the cached payload is stable
+    # across runs.
+    cache_key = (
+        f"{grid_id}|{start_date.isoformat()}|{end_date.isoformat()}|"
+        f"{shapely.to_geojson(bounds)}|"
+        f"{json.dumps(additional_query or {}, sort_keys=True, default=str)}|"
+        f"dedupe={ignore_duplicate_items}"
     )
-    stac_api_io = StacApiIO(max_retries=retry)
-    catalog = pystac_client.Client.open(
-        "https://planetarycomputer.microsoft.com/api/stac/v1", stac_io=stac_api_io
-    )
-    items = catalog.search(**query).item_collection()
-    logger.info(f"Found {len(items)}")
 
-    if ignore_duplicate_items:
-        items = filter_latest_processing_baselines(items)
-        logger.info(f"After filtering, {len(items)} items remain")
+    def _do_search() -> ItemCollection:
+        retry = Retry(
+            total=5,
+            backoff_factor=1,
+            status_forcelist=[502, 503, 504],
+            allowed_methods=None,
+        )
+        stac_api_io = StacApiIO(max_retries=retry)
+        catalog = pystac_client.Client.open(
+            "https://planetarycomputer.microsoft.com/api/stac/v1", stac_io=stac_api_io
+        )
+        items = catalog.search(**query).item_collection()
+        logger.info(f"Found {len(items)}")
+        if ignore_duplicate_items:
+            items = filter_latest_processing_baselines(items)
+            logger.info(f"After filtering, {len(items)} items remain")
+        return items
 
-    return items
+    return pickle_cache("stac_search", cache_key, _do_search)
 
 
 def sort_items(items: DataFrame, sort_method: str) -> DataFrame:

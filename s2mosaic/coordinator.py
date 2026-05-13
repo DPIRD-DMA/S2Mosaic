@@ -15,7 +15,7 @@ from .helpers import (
     normalize_mosaic_inputs,
     validate_inputs,
 )
-from .mosaic_core import download_bands_pool
+from .mosaic_core import stream_mosaic_pipeline
 from .stac_utils import add_item_info, search_for_items, sort_items
 
 logger = logging.getLogger(__name__)
@@ -128,6 +128,14 @@ def mosaic(
 
     Args:
         grid_id (str, optional): MGRS tile ID (e.g. "50HMH"). Mutually exclusive with bounds.
+        bounds (Tuple[float, float, float, float], optional): Arbitrary AOI
+            rectangle as ``(minx, miny, maxx, maxy)`` in ``bounds_crs``.
+            Mutually exclusive with ``grid_id``.
+        bounds_crs (int, optional): EPSG code of ``bounds``. Defaults to 4326.
+            Only used in bounds mode.
+        target_crs (int, optional): EPSG code for the output grid. In bounds
+            mode, defaults to the UTM zone containing the AOI centroid. Ignored
+            in grid mode.
         start_year (int): The start year of the time range.
         start_month (int, optional): The start month of the time range. Defaults to 1 (January).
         start_day (int, optional): The start day of the time range. Defaults to 1.
@@ -150,6 +158,13 @@ def mosaic(
         percentile_value (Optional[float], optional): If provided, calculates the specified percentile mosaic.
             must be used with `mosaic_method='percentile'`. Defaults to None, can be a value between 0 and 100.
         ignore_duplicate_items (bool, optional): Whether to remove duplicate scenes based on their IDs. Defaults to True.
+        resolution (int, optional): Output pixel size in metres. Defaults to 10.
+        coverage_threshold_pct (float, optional): Drop pixels covered by fewer
+            than this fraction of overlapping scenes. Set to None to disable.
+            Defaults to 0.1.
+        resampling_method (str, optional): Rasterio resampling method used when
+            reading source COGs onto the output grid. Options include "nearest",
+            "bilinear", "cubic", "average", and "lanczos". Defaults to "nearest".
         cloud_mask (str, optional): Cloud-mask provider. ``"OCM"`` (default) runs the
             OmniCloudMask deep-learning model on R+G+NIR; ``"SCL"`` reads the L2A
             Scene Classification Layer published with the scene. SCL is much cheaper
@@ -164,7 +179,7 @@ def mosaic(
         ValueError: If inputs fail validation, or if no scenes are found for the
             specified grid_id / bounds and time range.
         RuntimeError: If scenes were found but all were fully cloud-masked or
-            invalid (bounds mode only).
+            invalid, or if every scene failed to fetch after retries.
 
     Note:
         - The function uses the STAC API to search for Sentinel-2 scenes.
@@ -304,7 +319,7 @@ def mosaic(
 
     logger.info(f"Sorted {len(sorted_items)} scenes using {sort_method} method.")
 
-    mosaic, profile = download_bands_pool(
+    mosaic, profile = stream_mosaic_pipeline(
         sorted_scenes=sorted_items,
         required_bands=required_bands,
         no_data_threshold=no_data_threshold,

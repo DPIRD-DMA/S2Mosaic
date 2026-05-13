@@ -149,6 +149,37 @@ VALID_RESAMPLING_METHODS = {
 }
 
 
+def get_band_template(
+    required_bands: List[str],
+) -> Tuple[List[Tuple[str, int]], int, List[int]]:
+    """Return per-band STAC asset/raster-band template + sizes.
+
+    The result is the same shape for grid_id and bounds modes:
+
+        * ``href_template`` — list of ``(stac_asset_name, raster_band_idx)``;
+          one entry per output band.
+        * ``bands_count`` — number of output bands.
+        * ``href_band_indices`` — just the raster band indices, pulled out
+          for the hot path.
+
+    ``"visual"`` is the 3-band TCI asset; spectral requests are one asset
+    per band, each reading raster band 1.
+    """
+    is_visual = "visual" in required_bands
+    if is_visual:
+        href_template: List[Tuple[str, int]] = [
+            ("visual", 1),
+            ("visual", 2),
+            ("visual", 3),
+        ]
+        bands_count = 3
+    else:
+        href_template = [(band, 1) for band in required_bands]
+        bands_count = len(required_bands)
+    href_band_indices = [band_idx for _, band_idx in href_template]
+    return href_template, bands_count, href_band_indices
+
+
 def get_rasterio_resampling(method: str):
     """Map a string resampling method to a rasterio.enums.Resampling value."""
     from rasterio.enums import Resampling

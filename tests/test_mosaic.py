@@ -871,9 +871,9 @@ class TestMosaicBoundsEndToEnd:
         arr2, _ = mosaic(**kw)
         # Warm-cache run must be byte-for-byte identical to the cold run
         np.testing.assert_array_equal(arr1, arr2)
-        # Cache files should have been written (one per kept scene)
-        cache_files = list((tmp_path / "cache").glob("user_scene_*.pkl"))
-        assert len(cache_files) >= 1, "expected at least one user_scene cache file"
+        # Tile-source cache files should have been written (one per kept scene/band)
+        cache_files = list((tmp_path / "cache").glob("tiled_band_*.tif"))
+        assert len(cache_files) >= 1, "expected at least one tiled band cache file"
 
 
 if __name__ == "__main__":

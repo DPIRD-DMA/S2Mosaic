@@ -18,6 +18,7 @@ S2Mosaic is a Python package for creating cloud-free mosaics from Sentinel-2 sat
 - Multiple mosaic creation methods: mean, arbitrary percentile, median or first valid pixel.
 - Support for different spectral bands, including visual (RGB) composites.
 - State-of-the-art cloud masking using the OmniCloudMask library.
+- Tile-streaming pipeline keeps peak memory low even for full-MGRS percentile mosaics over many scenes — the aggregation is parallelised across ~2048-pixel tiles, so only a handful of tile-sized buffers live in RAM at a time.
 - Resilient to transient COG read failures — per-scene fetches retry with exponential backoff, and a scene that still fails is logged and skipped so one bad asset doesn't abort the whole mosaic.
 - Export mosaics as GeoTIFF files or return as NumPy arrays.
 
@@ -171,7 +172,6 @@ If your application already configures the `logging` module, the package logger 
 
 ## Known limitations
 
-- **Memory for percentile / median.** `mean` and `first` aggregation stream per-scene and have a memory footprint independent of the scene count. `percentile` and `median` (in both grid and bounds mode) must hold all kept scenes in memory at once because exact percentiles need every observation per pixel — peak memory scales with AOI area × bands × number of kept scenes. Use `mean` or `first` for large AOIs or long date windows where memory matters.
 - **SCL is less accurate than OCM.** The L2A Scene Classification Layer is fast (one COG read per scene, no inference) but is consistently less accurate than OCM at identifying clouds and cloud shadow. Use SCL when compute is the bottleneck (CPU-only machines, bulk processing); use OCM when accuracy matters.
 
 ## Contributing
@@ -188,7 +188,7 @@ When iterating on the code or running the slow test suite, set the `S2MOSAIC_DEB
 export S2MOSAIC_DEBUG_CACHE=1
 ```
 
-When set (to `1`, `true`, or `yes`), STAC search results and per-scene band fetches are pickled to a `cache/` directory next to the working directory and reused on subsequent runs. Leave it unset for production — caching adds disk I/O and stores stale data on the next acquisition.
+When set (to `1`, `true`, or `yes`), STAC search results, per-scene cloud masks, and per-(scene, band) tile sources are written to a `cache/` directory next to the working directory and reused on subsequent runs. Tile sources are stored as tiled GeoTIFFs on the target grid, so warm-cache reads bypass both the PC download and (for bounds mode) the WarpedVRT reprojection.
 
 ## License
 

@@ -2,12 +2,13 @@
 
 Each scene's bands are fetched on-the-fly through a rasterio WarpedVRT snapped
 to a common UTM grid, so scenes from MGRS tiles in different native projections
-are all read into the same output frame. The aggregation loop runs per-scene
-and accumulates in place (MEAN / FIRST) so peak memory is independent of the
-scene count.
+are all read into the same output frame. Bounds mode computes per-scene masks
+on the target grid, keeps only scenes that can contribute pixels, then uses the
+shared tile-streamed aggregation path from ``mosaic_core``.
 """
 
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
@@ -24,6 +25,7 @@ from pystac_client.stac_api_io import StacApiIO
 from rasterio.crs import CRS
 from rasterio.transform import Affine
 from rasterio.vrt import WarpedVRT
+from rasterio.windows import Window
 from urllib3 import Retry
 
 from .frequent_coverage import get_frequent_coverage_for_bbox
@@ -31,12 +33,12 @@ from .helpers import (
     CLOUD_MASK_OCM,
     CLOUD_MASK_SCL,
     MOSAIC_FIRST,
-    MOSAIC_MEAN,
     MOSAIC_PERCENTILE,
     SceneFetchError,
     define_dates,
     disk_cache,
     finalize_output,
+    get_band_template,
     get_output_path,
     get_rasterio_resampling,
     normalize_mosaic_inputs,
@@ -45,7 +47,7 @@ from .helpers import (
     with_scene_retry,
 )
 from .masking import compute_masks_from_array, compute_masks_from_scl
-from .mosaic_utils import calculate_percentile_mosaic
+from .mosaic_core import materialise_tiled_band, run_tile_aggregation
 from .stac_utils import (
     ITEM_COL,
     add_item_info,
@@ -111,54 +113,6 @@ def _search_for_items_by_bbox(
     return items
 
 
-def aggregate_stack(
-    user_data: np.ndarray,
-    combo_masks: List[np.ndarray],
-    mosaic_method: str,
-    percentile_value: Optional[float],
-) -> np.ndarray:
-    """Aggregate a fetch-then-aggregate ``(time, bands, h, w)`` stack into one mosaic.
-
-    Pure reference implementation kept for tests and external callers. The
-    bounds-mode pipeline itself runs the same math one scene at a time inside
-    ``run_bounds_pipeline`` so peak memory is independent of the scene count.
-    """
-    n_time, _, h, _ = user_data.shape
-
-    if mosaic_method == MOSAIC_PERCENTILE:
-        scenes = [
-            np.where(
-                combo_masks[i][None, :, :], user_data[i].astype(np.float32), np.nan
-            )
-            for i in range(n_time)
-        ]
-        return calculate_percentile_mosaic(
-            scenes, s2_scene_size=h, percentile_value=percentile_value or 50.0
-        )
-
-    if mosaic_method == MOSAIC_MEAN:
-        sum_arr = np.zeros(user_data.shape[1:], dtype=np.float32)
-        count = np.zeros(user_data.shape[2:], dtype=np.uint32)
-        for i in range(n_time):
-            mask = combo_masks[i]
-            sum_arr += user_data[i].astype(np.float32) * mask[None, :, :]
-            count += mask
-        with np.errstate(divide="ignore", invalid="ignore"):
-            mosaic = np.where(count > 0, sum_arr / count, 0)
-        return mosaic.astype(np.float32)
-
-    if mosaic_method == MOSAIC_FIRST:
-        mosaic = np.zeros(user_data.shape[1:], dtype=np.float32)
-        filled = np.zeros(user_data.shape[2:], dtype=bool)
-        for i in range(n_time):
-            mask = combo_masks[i] & ~filled
-            mosaic += user_data[i].astype(np.float32) * mask[None, :, :]
-            filled |= mask
-        return mosaic
-
-    raise ValueError(f"Unsupported mosaic_method: {mosaic_method}")
-
-
 _OCM_BANDS: Tuple[str, str, str] = ("B04", "B03", "B8A")
 
 
@@ -172,6 +126,153 @@ def _target_grid(
     transform = Affine(resolution, 0, minx, 0, -resolution, maxy)
     target_crs_obj = CRS.from_epsg(target_crs)
     return transform, width, height, target_crs_obj
+
+
+def _materialise_bounds_band(
+    item: Any,
+    asset_name: str,
+    bounds_target: Bbox,
+    target_crs: int,
+    width: int,
+    height: int,
+    resolution: int,
+    rio_resampling: Any,
+) -> Callable[[Path], None]:
+    """Build a materialiser for a bounds-mode band cache entry.
+
+    Closes over the item, asset, target grid, and resampling. The returned
+    function opens the COG via WarpedVRT (which handles reprojection to the
+    user's target grid) and writes the full warped output as a tiled
+    GeoTIFF. Subsequent reads of any tile window can open the local file
+    directly — no WarpedVRT needed once materialised.
+    """
+    target_crs_obj = CRS.from_epsg(target_crs)
+    minx, _, _, maxy = bounds_target
+    transform = Affine(resolution, 0, minx, 0, -resolution, maxy)
+
+    def write(tmp_path: Path) -> None:
+        signed = planetary_computer.sign(item.assets[asset_name].href)
+        with rio.open(signed) as src:
+            with WarpedVRT(
+                src,
+                crs=target_crs_obj,
+                transform=transform,
+                width=width,
+                height=height,
+                resampling=rio_resampling,
+            ) as vrt:
+                data = vrt.read()
+                n_bands = vrt.count
+                dtype = vrt.dtypes[0]
+        profile = {
+            "driver": "GTiff",
+            "count": n_bands,
+            "dtype": dtype,
+            "width": width,
+            "height": height,
+            "crs": target_crs_obj,
+            "transform": transform,
+            "tiled": True,
+            "blockxsize": 512,
+            "blockysize": 512,
+            "compress": "lzw",
+            "BIGTIFF": "IF_SAFER",
+        }
+        with rio.open(tmp_path, "w", **profile) as dst:
+            dst.write(data)
+
+    return write
+
+
+def make_bounds_tile_reader(
+    items: List[Any],
+    href_template: List[Tuple[str, int]],
+    bounds_target: Bbox,
+    target_crs: int,
+    user_transform: Affine,
+    width: int,
+    height: int,
+    resolution: int,
+    resampling_method: str,
+):
+    """Build a tile-reader for bounds mode (WarpedVRT-backed reads).
+
+    Walks every (scene, asset) once at setup, materialising the local cache
+    file (already on the user's target grid) or signing the PC URL. Workers
+    open handles lazily per thread; PC URLs get wrapped in a ``WarpedVRT``
+    to reproject on read, while cached local files are opened directly
+    (they're already on the target grid).
+    """
+    target_crs_obj = CRS.from_epsg(target_crs)
+    rio_resampling = get_rasterio_resampling(resampling_method)
+    href_band_indices = [band_idx for _, band_idx in href_template]
+
+    sources: List[List[str]] = []
+    is_local: List[List[bool]] = []
+    for item in items:
+        scene_urls: List[str] = []
+        scene_local: List[bool] = []
+        for asset, _ in href_template:
+            cache_key = (
+                f"bounds|{item.id}|{asset}|{bounds_target}|{target_crs}|"
+                f"{width}|{height}|{resolution}|{resampling_method}"
+            )
+            local = materialise_tiled_band(
+                cache_key,
+                _materialise_bounds_band(
+                    item,
+                    asset,
+                    bounds_target,
+                    target_crs,
+                    width,
+                    height,
+                    resolution,
+                    rio_resampling,
+                ),
+            )
+            if local is not None:
+                scene_urls.append(str(local))
+                scene_local.append(True)
+            else:
+                scene_urls.append(planetary_computer.sign(item.assets[asset].href))
+                scene_local.append(False)
+        sources.append(scene_urls)
+        is_local.append(scene_local)
+
+    vrt_local = threading.local()
+
+    def _get_source(scene_idx: int, asset_idx: int):
+        per_thread = getattr(vrt_local, "handles", None)
+        if per_thread is None:
+            per_thread = {}
+            vrt_local.handles = per_thread
+        key = (scene_idx, asset_idx)
+        entry = per_thread.get(key)
+        if entry is None:
+            src = rio.open(sources[scene_idx][asset_idx])
+            if is_local[scene_idx][asset_idx]:
+                handle: Any = src
+            else:
+                handle = WarpedVRT(
+                    src,
+                    crs=target_crs_obj,
+                    transform=user_transform,
+                    width=width,
+                    height=height,
+                    resampling=rio_resampling,
+                )
+            entry = (src, handle)
+            per_thread[key] = entry
+        return entry[1]
+
+    def read_fn(
+        scene_idx: int, band_idx: int, spec: Tuple[int, int, int, int]
+    ) -> np.ndarray:
+        r, c, th, tw = spec
+        src = _get_source(scene_idx, band_idx)
+        return src.read(href_band_indices[band_idx], window=Window(c, r, tw, th))
+
+    return read_fn
 
 
 def _read_warpvrt(
@@ -269,85 +370,6 @@ def _fetch_one_ocm(
     return np.stack(bands, axis=0).astype(np.uint16)
 
 
-def _fetch_one_user_scene_key(
-    item: Any,
-    assets: List[str],
-    bounds_target: Bbox,
-    target_crs: int,
-    resolution: int,
-    dtype: str,
-    resampling: str,
-) -> str:
-    return (
-        f"{item.id}|{bounds_target}|{target_crs}|{resolution}|"
-        f"{','.join(assets)}|{dtype}|{resampling}"
-    )
-
-
-@disk_cache("user_scene", key_fn=_fetch_one_user_scene_key)
-@with_scene_retry()
-def _fetch_one_user_scene(
-    item: Any,
-    assets: List[str],
-    bounds_target: Bbox,
-    target_crs: int,
-    resolution: int,
-    dtype: str,
-    resampling: str,
-) -> np.ndarray:
-    """Fetch one scene's spectral bands as ``(n_bands, h, w)`` of ``dtype``.
-
-    Mirrors ``_fetch_one_ocm`` but for an arbitrary band list. Used by the
-    bounds-mode streaming aggregation loop so that only one scene's worth of
-    band data is in memory at a time.
-    """
-    transform, width, height, target_crs_obj = _target_grid(
-        bounds_target, resolution, target_crs
-    )
-    rio_resampling = get_rasterio_resampling(resampling)
-
-    def _read_band(asset_name: str) -> np.ndarray:
-        href = planetary_computer.sign(item.assets[asset_name].href)
-        return _read_warpvrt(
-            href, 1, transform, width, height, target_crs_obj, rio_resampling
-        )
-
-    with ThreadPoolExecutor(max_workers=max(1, len(assets))) as executor:
-        bands = list(executor.map(_read_band, assets))
-    return np.stack(bands, axis=0).astype(dtype)
-
-
-def _fetch_one_tci_key(
-    item: Any,
-    bounds_target: Bbox,
-    target_crs: int,
-    resolution: int,
-    resampling: str,
-) -> str:
-    return f"{item.id}|{bounds_target}|{target_crs}|{resolution}|{resampling}|visual"
-
-
-@disk_cache("tci_one", key_fn=_fetch_one_tci_key)
-@with_scene_retry()
-def _fetch_one_tci(
-    item: Any,
-    bounds_target: Bbox,
-    target_crs: int,
-    resolution: int,
-    resampling: str,
-) -> np.ndarray:
-    """Fetch one scene's TCI as ``(3, h, w)`` uint8 on the target grid."""
-    transform, width, height, target_crs_obj = _target_grid(
-        bounds_target, resolution, target_crs
-    )
-    rio_resampling = get_rasterio_resampling(resampling)
-    href = planetary_computer.sign(item.assets["visual"].href)
-    arr = _read_warpvrt(
-        href, [1, 2, 3], transform, width, height, target_crs_obj, rio_resampling
-    )
-    return arr.astype(np.uint8)
-
-
 def run_bounds_pipeline(
     bounds: Bbox,
     start_year: int,
@@ -403,9 +425,10 @@ def run_bounds_pipeline(
             :func:`s2mosaic.mosaic`.
         required_bands: Spectral bands to fetch (e.g. ``["B04", "B03", "B02"]``)
             or ``["visual"]`` for the 3-band uint8 TCI asset.
-        no_data_threshold: Stop the mask-streaming loop once the fraction of
-            uncovered pixels (within the coverage mask) drops below this.
-            Ignored for ``mosaic_method="percentile"``.
+        no_data_threshold: Stop early once the uncovered fraction within the
+            coverage mask drops below this. For ``percentile``, the bounds
+            mask scan still examines every usable scene, but per-tile user-band
+            aggregation can stop once the tile is sufficiently covered.
         coverage_threshold_pct: Drop pixels covered by fewer than this fraction
             of overlapping scenes (scene-edge pixels). ``None`` disables.
         ocm_batch_size, ocm_inference_dtype: Only used when ``cloud_mask="OCM"``.
@@ -649,11 +672,7 @@ def run_bounds_pipeline(
             "or failed to fetch"
         )
 
-    # Phase 3: stream per-scene user-band fetches and accumulate into the
-    # mosaic in place. Mirrors grid mode's ``download_bands_pool`` loop so peak
-    # memory is O(one scene + accumulator) rather than O(N scenes) for MEAN
-    # and FIRST. PERCENTILE still buffers N scenes because exact percentiles
-    # need all values per pixel.
+    # Prepare the user-resolution masks and target grid for tile aggregation.
     kept_indices = sorted(kept_combo_masks_ocm.keys())
     kept_items = [items_list[i] for i in kept_indices]
     logger.info(f"Streaming user bands for {len(kept_items)}/{n_time} kept scenes")
@@ -678,110 +697,51 @@ def run_bounds_pipeline(
     # OCM-resolution mask dict can be released once the user-resolution copies exist.
     del kept_combo_masks_ocm
 
-    scene_dtype = "uint8" if is_visual else "uint16"
+    # Phase 3 — tile-streamed aggregation. Same architecture as grid_id mode:
+    # per-tile workers each read tile windows via the bounds tile reader
+    # (WarpedVRT-backed, or direct read from a local cached file), apply
+    # the per-tile slice of the precomputed mask, and aggregate by method.
+    # Peak RAM is one tile per worker rather than the full N-scene stack.
+    href_template, _, _ = get_band_template(required_bands)
+    kept_items = [items_list[i] for i in kept_indices]
+    read_fn = make_bounds_tile_reader(
+        items=kept_items,
+        href_template=href_template,
+        bounds_target=bounds_target,
+        target_crs=target_crs,
+        user_transform=user_transform,
+        width=w,
+        height=h,
+        resolution=resolution,
+        resampling_method=resampling_method,
+    )
 
-    # Initialise accumulators sized to the user grid.
-    sum_arr: Optional[np.ndarray] = None
-    count: Optional[np.ndarray] = None
-    first_mosaic: Optional[np.ndarray] = None
-    filled: Optional[np.ndarray] = None
-    percentile_scenes: List[np.ndarray] = []
-
-    if mosaic_method == MOSAIC_MEAN:
-        sum_arr = np.zeros((n_bands, h, w), dtype=np.float32)
-        count = np.zeros((h, w), dtype=np.uint32)
-    elif mosaic_method == MOSAIC_FIRST:
-        first_mosaic = np.zeros((n_bands, h, w), dtype=np.float32)
-        filled = np.zeros((h, w), dtype=bool)
-
-    n_user_fetch_failed = 0
-    n_user_succeeded = 0
-    for loop_idx, scene_idx in enumerate(kept_indices):
-        item = items_list[scene_idx]
-        mask = combo_masks_user[scene_idx]
-
-        try:
-            if is_visual:
-                scene = _fetch_one_tci(
-                    item, bounds_target, target_crs, resolution, resampling_method
-                )
-            else:
-                scene = _fetch_one_user_scene(
-                    item,
-                    list(required_bands),
-                    bounds_target,
-                    target_crs,
-                    resolution,
-                    scene_dtype,
-                    resampling_method,
-                )
-        except SceneFetchError as e:
-            n_user_fetch_failed += 1
-            logger.warning(
-                f"Scene {loop_idx + 1}/{len(kept_indices)} ({item.id}): user-band "
-                f"fetch failed, skipping ({e})"
-            )
-            continue
-
-        # Scene fetcher returns its native (h, w); resize to user grid only if
-        # WarpedVRT snapped differently (shouldn't, but guard against drift).
-        if scene.shape[1:] != (h, w):
-            scene = np.stack(
-                [
-                    cv2.resize(scene[b], (w, h), interpolation=cv2.INTER_NEAREST)
-                    for b in range(scene.shape[0])
-                ],
-                axis=0,
-            )
-
-        if mosaic_method == MOSAIC_MEAN:
-            assert sum_arr is not None and count is not None
-            sum_arr += scene.astype(np.float32) * mask[None, :, :]
-            count += mask
-        elif mosaic_method == MOSAIC_FIRST:
-            assert first_mosaic is not None and filled is not None
-            new_pixels = mask & ~filled
-            if new_pixels.any():
-                first_mosaic += scene.astype(np.float32) * new_pixels[None, :, :]
-                filled |= new_pixels
-        else:  # MOSAIC_PERCENTILE
-            percentile_scenes.append(
-                np.where(mask[None, :, :], scene.astype(np.float32), np.nan)
-            )
-
-        del scene  # free before next iteration
-        n_user_succeeded += 1
-
-        logger.info(
-            f"Aggregated scene {loop_idx + 1}/{len(kept_indices)} ({mosaic_method})"
-        )
-
-    if n_user_fetch_failed:
-        logger.warning(
-            f"User-band phase: {n_user_fetch_failed}/{len(kept_indices)} kept "
-            "scenes failed to fetch after retries"
-        )
-    if n_user_succeeded == 0:
-        raise RuntimeError(
-            f"All {len(kept_indices)} kept scenes failed to fetch during the "
-            "user-band phase"
-        )
-
-    # Finalise.
-    mosaic: np.ndarray
-    if mosaic_method == MOSAIC_MEAN:
-        assert sum_arr is not None and count is not None
-        with np.errstate(divide="ignore", invalid="ignore"):
-            mosaic = np.where(count > 0, sum_arr / count, 0).astype(np.float32)
-    elif mosaic_method == MOSAIC_FIRST:
-        assert first_mosaic is not None
-        mosaic = first_mosaic
-    else:
-        mosaic = calculate_percentile_mosaic(
-            percentile_scenes,
-            s2_scene_size=h,
-            percentile_value=percentile_value or 50.0,
-        )
+    masks_in_order: List[Optional[np.ndarray]] = [
+        combo_masks_user[scene_idx] for scene_idx in kept_indices
+    ]
+    # Tile small AOIs as a single tile; tile large AOIs at the streaming cap.
+    tile_size = min(2048, max(h, w))
+    logger.info(
+        "Tile-streaming %d scenes x %d bands at tile=%d (%dx%d output)",
+        len(kept_items),
+        n_bands,
+        tile_size,
+        h,
+        w,
+    )
+    mosaic = run_tile_aggregation(
+        masks=masks_in_order,
+        read_fn=read_fn,
+        bands_count=n_bands,
+        height=h,
+        width=w,
+        coverage_mask=coverage_mask,
+        no_data_threshold=no_data_threshold,
+        mosaic_method=mosaic_method,
+        percentile_value=percentile_value,
+        tile_size=tile_size,
+        tile_workers=None,
+    )
 
     if is_visual:
         output_array = np.clip(np.nan_to_num(mosaic, nan=0), 0, 255).astype(np.uint8)
