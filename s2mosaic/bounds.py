@@ -47,7 +47,7 @@ from .helpers import (
     with_scene_retry,
 )
 from .masking import compute_masks_from_array, compute_masks_from_scl
-from .mosaic_core import materialise_tiled_band, run_tile_aggregation
+from .mosaic_core import _write_tiled_copy, materialise_tiled_band, run_tile_aggregation
 from .stac_utils import (
     ITEM_COL,
     add_item_info,
@@ -142,9 +142,9 @@ def _materialise_bounds_band(
 
     Closes over the item, asset, target grid, and resampling. The returned
     function opens the COG via WarpedVRT (which handles reprojection to the
-    user's target grid) and writes the full warped output as a tiled
-    GeoTIFF. Subsequent reads of any tile window can open the local file
-    directly — no WarpedVRT needed once materialised.
+    user's target grid) and streams destination blocks to a tiled GeoTIFF.
+    Subsequent reads of any tile window can open the local file directly —
+    no WarpedVRT needed once materialised.
     """
     target_crs_obj = CRS.from_epsg(target_crs)
     minx, _, _, maxy = bounds_target
@@ -161,25 +161,23 @@ def _materialise_bounds_band(
                 height=height,
                 resampling=rio_resampling,
             ) as vrt:
-                data = vrt.read()
                 n_bands = vrt.count
                 dtype = vrt.dtypes[0]
-        profile = {
-            "driver": "GTiff",
-            "count": n_bands,
-            "dtype": dtype,
-            "width": width,
-            "height": height,
-            "crs": target_crs_obj,
-            "transform": transform,
-            "tiled": True,
-            "blockxsize": 512,
-            "blockysize": 512,
-            "compress": "lzw",
-            "BIGTIFF": "IF_SAFER",
-        }
-        with rio.open(tmp_path, "w", **profile) as dst:
-            dst.write(data)
+                profile = {
+                    "driver": "GTiff",
+                    "count": n_bands,
+                    "dtype": dtype,
+                    "width": width,
+                    "height": height,
+                    "crs": target_crs_obj,
+                    "transform": transform,
+                    "tiled": True,
+                    "blockxsize": 512,
+                    "blockysize": 512,
+                    "compress": "lzw",
+                    "BIGTIFF": "IF_SAFER",
+                }
+                _write_tiled_copy(vrt, tmp_path, profile, rio_resampling, lambda w: w)
 
     return write
 
@@ -197,47 +195,49 @@ def make_bounds_tile_reader(
 ):
     """Build a tile-reader for bounds mode (WarpedVRT-backed reads).
 
-    Walks every (scene, asset) once at setup, materialising the local cache
-    file (already on the user's target grid) or signing the PC URL. Workers
-    open handles lazily per thread; PC URLs get wrapped in a ``WarpedVRT``
-    to reproject on read, while cached local files are opened directly
-    (they're already on the target grid).
+    Builds lazy source resolvers for every (scene, asset). Workers open
+    handles lazily per thread; if ``S2MOSAIC_DEBUG_CACHE`` is on, the local
+    cache file is materialised only when a tile actually reads that source.
+    PC URLs get wrapped in a ``WarpedVRT`` to reproject on read, while cached
+    local files are opened directly (they're already on the target grid).
     """
     target_crs_obj = CRS.from_epsg(target_crs)
     rio_resampling = get_rasterio_resampling(resampling_method)
     href_band_indices = [band_idx for _, band_idx in href_template]
 
-    sources: List[List[str]] = []
-    is_local: List[List[bool]] = []
+    sources: List[List[Callable[[], Tuple[str, bool]]]] = []
     for item in items:
-        scene_urls: List[str] = []
-        scene_local: List[bool] = []
+        scene_sources: List[Callable[[], Tuple[str, bool]]] = []
         for asset, _ in href_template:
             cache_key = (
                 f"bounds|{item.id}|{asset}|{bounds_target}|{target_crs}|"
                 f"{width}|{height}|{resolution}|{resampling_method}"
             )
-            local = materialise_tiled_band(
-                cache_key,
-                _materialise_bounds_band(
-                    item,
-                    asset,
-                    bounds_target,
-                    target_crs,
-                    width,
-                    height,
-                    resolution,
-                    rio_resampling,
-                ),
-            )
-            if local is not None:
-                scene_urls.append(str(local))
-                scene_local.append(True)
-            else:
-                scene_urls.append(planetary_computer.sign(item.assets[asset].href))
-                scene_local.append(False)
-        sources.append(scene_urls)
-        is_local.append(scene_local)
+            signed_url = planetary_computer.sign(item.assets[asset].href)
+
+            def source_for(
+                item: Any = item,
+                asset: str = asset,
+                cache_key: str = cache_key,
+                signed_url: str = signed_url,
+            ) -> Tuple[str, bool]:
+                local = materialise_tiled_band(
+                    cache_key,
+                    _materialise_bounds_band(
+                        item,
+                        asset,
+                        bounds_target,
+                        target_crs,
+                        width,
+                        height,
+                        resolution,
+                        rio_resampling,
+                    ),
+                )
+                return (str(local), True) if local is not None else (signed_url, False)
+
+            scene_sources.append(source_for)
+        sources.append(scene_sources)
 
     vrt_local = threading.local()
 
@@ -249,8 +249,9 @@ def make_bounds_tile_reader(
         key = (scene_idx, asset_idx)
         entry = per_thread.get(key)
         if entry is None:
-            src = rio.open(sources[scene_idx][asset_idx])
-            if is_local[scene_idx][asset_idx]:
+            source, is_local = sources[scene_idx][asset_idx]()
+            src = rio.open(source)
+            if is_local:
                 handle: Any = src
             else:
                 handle = WarpedVRT(

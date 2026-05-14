@@ -30,6 +30,7 @@ import hashlib
 import logging
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -38,6 +39,7 @@ import numpy as np
 import pandas as pd
 import planetary_computer
 import rasterio as rio
+from rasterio.errors import RasterioIOError
 from numbagg import nanquantile
 from rasterio.enums import Resampling
 from rasterio.windows import Window
@@ -59,6 +61,7 @@ from .masking import get_masks, get_scl_masks
 from .stac_utils import ITEM_COL
 
 logger = logging.getLogger(__name__)
+REMOTE_READ_ATTEMPTS = 3
 
 
 def _tiled_gtiff_cache_path(cache_key: str) -> Path:
@@ -74,9 +77,8 @@ def materialise_tiled_band(
 
     Returns the local cache path that the reader should open instead of the
     PC URL. Returns None when caching is disabled — caller falls back to the
-    direct (streaming) read path. ``materialiser`` is mode-specific: grid_id
-    does a direct full-band read at target size; bounds runs the
-    ``WarpedVRT`` to the user grid before writing.
+    direct streaming read path. ``materialiser`` is mode-specific and should
+    write a tiled GeoTIFF on the target grid.
     """
     if not debug_cache_enabled():
         return None
@@ -94,6 +96,50 @@ def materialise_tiled_band(
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
     return cache_path
+
+
+def _read_with_retry(
+    src: rio.DatasetReader,
+    *,
+    window: Window,
+    out_shape: Tuple[int, int, int],
+    resampling: Resampling,
+    attempts: int = REMOTE_READ_ATTEMPTS,
+) -> np.ndarray:
+    """Read one source window, retrying transient remote COG tile failures."""
+    last_error: RasterioIOError | None = None
+    for attempt in range(attempts):
+        try:
+            return src.read(window=window, out_shape=out_shape, resampling=resampling)
+        except RasterioIOError as exc:
+            last_error = exc
+            if attempt == attempts - 1:
+                break
+            time.sleep(0.5 * (attempt + 1))
+    raise last_error  # type: ignore[misc]
+
+
+def _write_tiled_copy(
+    src: rio.DatasetReader,
+    tmp_path: Path,
+    profile: Dict[str, Any],
+    rio_resampling: Resampling,
+    source_window_for: Callable[[Window], Window],
+) -> None:
+    """Write a local tiled GeoTIFF by streaming destination blocks."""
+    with rio.open(tmp_path, "w", **profile) as dst:
+        for _, dst_window in dst.block_windows(1):
+            data = _read_with_retry(
+                src,
+                window=source_window_for(dst_window),
+                out_shape=(
+                    profile["count"],
+                    int(dst_window.height),
+                    int(dst_window.width),
+                ),
+                resampling=rio_resampling,
+            )
+            dst.write(data, window=dst_window)
 
 
 def _materialise_grid_band(
@@ -115,18 +161,11 @@ def _materialise_grid_band(
             n_bands = src.count
             scale_x = src.width / s2_scene_size
             scale_y = src.height / s2_scene_size
-            if src.width == s2_scene_size and src.height == s2_scene_size:
-                data = src.read()
-            else:
-                data = src.read(
-                    out_shape=(n_bands, s2_scene_size, s2_scene_size),
-                    resampling=rio_resampling,
-                )
             transform = src.transform * rio.Affine.scale(scale_x, scale_y)
             profile = {
                 "driver": "GTiff",
                 "count": n_bands,
-                "dtype": data.dtype,
+                "dtype": src.dtypes[0],
                 "width": s2_scene_size,
                 "height": s2_scene_size,
                 "crs": src.crs,
@@ -137,8 +176,16 @@ def _materialise_grid_band(
                 "compress": "lzw",
                 "BIGTIFF": "IF_SAFER",
             }
-        with rio.open(tmp_path, "w", **profile) as dst:
-            dst.write(data)
+
+            def source_window_for(dst_window: Window) -> Window:
+                return Window(
+                    dst_window.col_off * scale_x,
+                    dst_window.row_off * scale_y,
+                    dst_window.width * scale_x,
+                    dst_window.height * scale_y,
+                )
+
+            _write_tiled_copy(src, tmp_path, profile, rio_resampling, source_window_for)
 
     return write
 
@@ -208,9 +255,9 @@ class _HandleCache:
     don't pay the open cost for the rest.
     """
 
-    def __init__(self, signed_urls: List[List[str]]):
-        # signed_urls[scene_idx][band_idx] -> str
-        self._urls = signed_urls
+    def __init__(self, source_resolvers: List[List[Callable[[], str]]]):
+        # source_resolvers[scene_idx][band_idx]() -> local cache path or signed URL
+        self._source_resolvers = source_resolvers
         self._local = threading.local()
 
     def get(self, scene_idx: int, band_idx: int) -> rio.DatasetReader:
@@ -221,7 +268,7 @@ class _HandleCache:
         key = (scene_idx, band_idx)
         h = per_thread.get(key)
         if h is None:
-            h = rio.open(self._urls[scene_idx][band_idx])
+            h = rio.open(self._source_resolvers[scene_idx][band_idx]())
             per_thread[key] = h
         return h
 
@@ -280,6 +327,11 @@ def _tile_threshold_met(
 ReaderFn = Callable[[int, int, Tuple[int, int, int, int]], np.ndarray]
 
 
+def _empty_tile(spec: Tuple[int, int, int, int], bands_count: int) -> np.ndarray:
+    _, _, h, w = spec
+    return np.zeros((bands_count, h, w), dtype=np.float32)
+
+
 def tile_percentile(
     spec: Tuple[int, int, int, int],
     masks: List[Optional[np.ndarray]],
@@ -291,6 +343,8 @@ def tile_percentile(
 ) -> Tuple[Tuple[int, int, int, int], np.ndarray]:
     r, c, h, w = spec
     tile_coverage = coverage_mask[r : r + h, c : c + w]
+    if not tile_coverage.any():
+        return spec, _empty_tile(spec, bands_count)
     # Walk scenes in priority order so the short-circuit picks the best ones
     # first (sort order is set upstream — e.g. valid_data).
     blocks: List[np.ndarray] = []
@@ -313,7 +367,7 @@ def tile_percentile(
             break
 
     if not blocks:
-        return spec, np.zeros((bands_count, h, w), dtype=np.float32)
+        return spec, _empty_tile(spec, bands_count)
     stack = np.stack(blocks, axis=0)
     res = nanquantile(stack, percentile_value / 100.0, axis=0)
     return spec, np.nan_to_num(res, nan=0.0).astype(np.float32)
@@ -329,6 +383,8 @@ def tile_mean(
 ) -> Tuple[Tuple[int, int, int, int], np.ndarray]:
     r, c, h, w = spec
     tile_coverage = coverage_mask[r : r + h, c : c + w]
+    if not tile_coverage.any():
+        return spec, _empty_tile(spec, bands_count)
     sum_block = np.zeros((bands_count, h, w), dtype=np.float32)
     count = np.zeros((h, w), dtype=np.uint16)
     filled = np.zeros((h, w), dtype=bool)
@@ -359,6 +415,8 @@ def tile_first(
 ) -> Tuple[Tuple[int, int, int, int], np.ndarray]:
     r, c, h, w = spec
     tile_coverage = coverage_mask[r : r + h, c : c + w]
+    if not tile_coverage.any():
+        return spec, _empty_tile(spec, bands_count)
     result = np.zeros((bands_count, h, w), dtype=np.float32)
     filled = np.zeros((h, w), dtype=bool)
     for scene_idx, m in enumerate(masks):
@@ -462,32 +520,37 @@ def make_grid_tile_reader(
 ) -> ReaderFn:
     """Build a tile-reader for grid_id mode (direct MGRS COG reads).
 
-    Walks every (scene, asset) once at setup, materialising the local cache
-    file (when ``S2MOSAIC_DEBUG_CACHE`` is on) or signing the PC URL. Workers
-    in Phase 2 open handles lazily per thread and resample to the target
-    grid via ``out_shape`` on read.
+    Builds lazy source resolvers for every (scene, asset). Workers in Phase 2
+    open handles lazily per thread; if ``S2MOSAIC_DEBUG_CACHE`` is on, the
+    cache file is materialised only when a tile actually reads that source.
     """
     rio_resampling = get_rasterio_resampling(resampling_method)
     href_band_indices = [band_idx for _, band_idx in href_template]
 
-    sources: List[List[str]] = []
+    sources: List[List[Callable[[], str]]] = []
     for item in items:
-        scene_urls: List[str] = []
+        scene_sources: List[Callable[[], str]] = []
         for asset, _ in href_template:
             cache_key = (
                 f"grid|{item.id}|{asset}|{s2_scene_size}|"
                 f"{resolution}|{resampling_method}"
             )
-            local = materialise_tiled_band(
-                cache_key,
-                _materialise_grid_band(item, asset, s2_scene_size, rio_resampling),
-            )
-            scene_urls.append(
-                str(local)
-                if local is not None
-                else planetary_computer.sign(item.assets[asset].href)
-            )
-        sources.append(scene_urls)
+            signed_url = planetary_computer.sign(item.assets[asset].href)
+
+            def source_for(
+                item: Any = item,
+                asset: str = asset,
+                cache_key: str = cache_key,
+                signed_url: str = signed_url,
+            ) -> str:
+                local = materialise_tiled_band(
+                    cache_key,
+                    _materialise_grid_band(item, asset, s2_scene_size, rio_resampling),
+                )
+                return str(local) if local is not None else signed_url
+
+            scene_sources.append(source_for)
+        sources.append(scene_sources)
     cache = _HandleCache(sources)
 
     def read_fn(

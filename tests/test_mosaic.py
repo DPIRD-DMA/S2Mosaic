@@ -199,35 +199,25 @@ class TestMosaicEndToEnd:
 
     def test_mosaic_return_array_no_output_dir(self):
         """Test mosaic returns array and profile when no output_dir is specified"""
-        print("\n🔄 Starting test_mosaic_return_array_no_output_dir")
-
-        try:
-            result = mosaic(
-                "50HMH",
-                start_year=2023,
-                start_month=6,
-                start_day=1,
-                duration_days=7,
-                required_bands=["B04", "B03", "B02"],
-            )
-            print(f"✅ Mosaic function completed, result type: {type(result)}")
-        except Exception as e:
-            print(f"❌ Mosaic function failed with error: {e}")
-            raise
+        result = mosaic(
+            "50HMH",
+            start_year=2023,
+            start_month=6,
+            start_day=1,
+            duration_days=7,
+            required_bands=["B04", "B03", "B02"],
+        )
 
         # Check if result is a tuple
         assert isinstance(result, tuple), f"Expected tuple, got {type(result)}"
-        print(f"✅ Result is tuple: {isinstance(result, tuple)}")
 
         # Check tuple length
         assert len(result) == 2, f"Expected tuple of length 2, got length {len(result)}"
-        print(f"✅ Tuple length is 2: {len(result) == 2}")
 
         array, profile = result
 
         # Check array type
         assert isinstance(array, np.ndarray), f"Expected numpy array, got {type(array)}"
-        print(f"✅ Array is numpy.ndarray: {isinstance(array, np.ndarray)}")
 
         # Check profile is dict-like (has keys, values, items methods)
         assert (
@@ -235,7 +225,6 @@ class TestMosaicEndToEnd:
             and hasattr(profile, "values")
             and hasattr(profile, "items")
         ), f"Profile should be dict-like, got {type(profile)}"
-        print(f"✅ Profile is dict-like: {type(profile)}")
 
         # Check profile has expected rasterio keys
         expected_keys = {
@@ -250,26 +239,20 @@ class TestMosaicEndToEnd:
         profile_keys = set(profile.keys())
         missing_keys = expected_keys - profile_keys
         assert len(missing_keys) == 0, f"Profile missing expected keys: {missing_keys}"
-        print(f"✅ Profile has expected keys: {profile_keys}")
 
         # Check array dimensions
         assert array.ndim == 3, (
             f"Expected 3D array, got {array.ndim}D array with shape {array.shape}"
         )
-        print(f"✅ Array is 3D: {array.ndim == 3}, shape: {array.shape}")
 
         # Check number of bands
         assert array.shape[0] == 3, f"Expected 3 bands, got {array.shape[0]} bands"
-        print(f"✅ Array has 3 bands: {array.shape[0] == 3}")
 
         # Check data type
         valid_dtypes = [np.uint8, np.int16, np.uint16, np.float32]
         assert array.dtype in valid_dtypes, (
             f"Expected dtype in {valid_dtypes}, got {array.dtype}"
         )
-        print(f"✅ Array dtype is valid: {array.dtype} in {valid_dtypes}")
-
-        print("🎉 All assertions passed!")
 
     def test_mosaic_save_to_file(self, temp_output_dir):
         """Test mosaic saves file when output_dir is specified"""
@@ -388,7 +371,6 @@ class TestMosaicEndToEnd:
         assert isinstance(result, tuple)
         array, profile = result
         assert isinstance(array, np.ndarray)
-        assert hasattr(profile, "keys")  # Check it's dict-like
         assert hasattr(profile, "keys")  # Check it's dict-like
         assert array.shape[0] == 3  # RGB channels
         assert array.dtype == np.uint8  # Visual should be uint8

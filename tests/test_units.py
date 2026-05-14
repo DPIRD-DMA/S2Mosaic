@@ -4,12 +4,17 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
+import rasterio as rio
+from rasterio.enums import Resampling
+from rasterio.errors import RasterioIOError
+from rasterio.transform import from_origin
 
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from s2mosaic import mosaic
 from s2mosaic.bounds import pick_utm_epsg, reproject_bbox
+from s2mosaic.bounds import make_bounds_tile_reader
 from s2mosaic.helpers import validate_inputs
 from s2mosaic.frequent_coverage import (
     get_coverage,
@@ -21,7 +26,12 @@ from s2mosaic.masking import (
     compute_masks_from_scl,
     get_valid_mask,
 )
-from s2mosaic.mosaic_core import run_tile_aggregation
+from s2mosaic.mosaic_core import (
+    _HandleCache,
+    _read_with_retry,
+    _write_tiled_copy,
+    run_tile_aggregation,
+)
 
 
 class TestGetValidMask:
@@ -274,6 +284,59 @@ class TestRunTileAggregation:
         )
 
         np.testing.assert_allclose(out, 15.0)
+
+    def test_empty_coverage_tile_does_not_read_sources(self):
+        reads = {"n": 0}
+
+        def read_fn(scene_idx, band_idx, spec):
+            reads["n"] += 1
+            _, _, h, w = spec
+            return np.ones((h, w), dtype=np.uint16)
+
+        out = run_tile_aggregation(
+            masks=[np.ones((self.H, self.W), dtype=bool)],
+            read_fn=read_fn,
+            bands_count=1,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.zeros((self.H, self.W), dtype=bool),
+            no_data_threshold=None,
+            mosaic_method="mean",
+            percentile_value=None,
+            tile_size=3,
+            tile_workers=1,
+        )
+
+        assert reads["n"] == 0
+        np.testing.assert_array_equal(out, np.zeros((1, self.H, self.W)))
+
+    def test_no_data_threshold_stops_before_later_scene_reads(self):
+        reads = []
+
+        def read_fn(scene_idx, band_idx, spec):
+            reads.append(scene_idx)
+            _, _, h, w = spec
+            return np.full((h, w), scene_idx + 1, dtype=np.uint16)
+
+        out = run_tile_aggregation(
+            masks=[
+                np.ones((self.H, self.W), dtype=bool),
+                np.ones((self.H, self.W), dtype=bool),
+            ],
+            read_fn=read_fn,
+            bands_count=1,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            no_data_threshold=0.01,
+            mosaic_method="mean",
+            percentile_value=None,
+            tile_size=10,
+            tile_workers=1,
+        )
+
+        assert reads == [0]
+        np.testing.assert_array_equal(out, np.ones((1, self.H, self.W)))
 
 
 class TestReprojectBbox:
@@ -704,6 +767,161 @@ class TestDiskCacheDecorator:
         assert len(files) == 2
         assert any(f.startswith("alpha_") for f in files)
         assert any(f.startswith("beta_") for f in files)
+
+
+class TestTiledBandMaterialisation:
+    """Local tiled GeoTIFF materialisation helpers."""
+
+    def test_handle_cache_resolves_sources_only_on_first_read(self, monkeypatch):
+        calls = {"resolver": 0, "open": 0}
+
+        def resolver():
+            calls["resolver"] += 1
+            return "lazy-source.tif"
+
+        class FakeDataset:
+            pass
+
+        def fake_open(source):
+            calls["open"] += 1
+            assert source == "lazy-source.tif"
+            return FakeDataset()
+
+        monkeypatch.setattr("s2mosaic.mosaic_core.rio.open", fake_open)
+        cache = _HandleCache([[resolver]])
+
+        assert calls == {"resolver": 0, "open": 0}
+        first = cache.get(0, 0)
+        second = cache.get(0, 0)
+
+        assert first is second
+        assert calls == {"resolver": 1, "open": 1}
+
+    def test_bounds_reader_materialises_cache_only_on_read(self, monkeypatch):
+        calls = {"materialise": 0, "materialiser_factory": 0, "open": 0}
+
+        class FakeAsset:
+            href = "remote.tif"
+
+        class FakeItem:
+            assets = {"B04": FakeAsset()}
+            id = "fake-scene"
+
+        class FakeDataset:
+            def read(self, band_idx, window):
+                return np.full(
+                    (int(window.height), int(window.width)),
+                    band_idx,
+                    dtype=np.uint16,
+                )
+
+        def fake_materialiser_factory(*args, **kwargs):
+            calls["materialiser_factory"] += 1
+
+            def write(path):
+                return None
+
+            return write
+
+        def fake_materialise(cache_key, materialiser):
+            calls["materialise"] += 1
+            return Path("cached.tif")
+
+        def fake_open(source):
+            calls["open"] += 1
+            assert source == "cached.tif"
+            return FakeDataset()
+
+        monkeypatch.setattr(
+            "s2mosaic.bounds.planetary_computer.sign", lambda href: href
+        )
+        monkeypatch.setattr(
+            "s2mosaic.bounds._materialise_bounds_band", fake_materialiser_factory
+        )
+        monkeypatch.setattr("s2mosaic.bounds.materialise_tiled_band", fake_materialise)
+        monkeypatch.setattr("s2mosaic.bounds.rio.open", fake_open)
+
+        read_fn = make_bounds_tile_reader(
+            items=[FakeItem()],
+            href_template=[("B04", 1)],
+            bounds_target=(0.0, 0.0, 10.0, 10.0),
+            target_crs=32750,
+            user_transform=from_origin(0, 10, 1, 1),
+            width=10,
+            height=10,
+            resolution=1,
+            resampling_method="nearest",
+        )
+
+        assert calls == {"materialise": 0, "materialiser_factory": 0, "open": 0}
+        data = read_fn(0, 0, (2, 3, 4, 5))
+
+        np.testing.assert_array_equal(data, np.ones((4, 5), dtype=np.uint16))
+        assert calls == {"materialise": 1, "materialiser_factory": 1, "open": 1}
+
+    def test_read_with_retry_recovers_from_transient_rasterio_error(self, monkeypatch):
+        monkeypatch.setattr("s2mosaic.mosaic_core.time.sleep", lambda _: None)
+
+        class FlakySource:
+            calls = 0
+
+            def read(self, *, window, out_shape, resampling):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RasterioIOError("temporary read failure")
+                return np.full(out_shape, 7, dtype=np.uint16)
+
+        src = FlakySource()
+        data = _read_with_retry(
+            src,
+            window=rio.windows.Window(0, 0, 2, 2),
+            out_shape=(1, 2, 2),
+            resampling=Resampling.nearest,
+        )
+        assert src.calls == 2
+        np.testing.assert_array_equal(data, np.full((1, 2, 2), 7, dtype=np.uint16))
+
+    def test_write_tiled_copy_streams_destination_blocks(self, tmp_path):
+        class FakeSource:
+            def __init__(self):
+                self.windows = []
+
+            def read(self, *, window, out_shape, resampling):
+                self.windows.append(window)
+                return np.full(out_shape, int(window.col_off + window.row_off))
+
+        src = FakeSource()
+        profile = {
+            "driver": "GTiff",
+            "count": 1,
+            "dtype": "uint16",
+            "width": 4,
+            "height": 4,
+            "crs": "EPSG:32750",
+            "transform": from_origin(0, 4, 1, 1),
+            "tiled": True,
+            "blockxsize": 16,
+            "blockysize": 16,
+        }
+        out_path = tmp_path / "cached.tif"
+
+        _write_tiled_copy(
+            src,
+            out_path,
+            profile,
+            Resampling.nearest,
+            lambda window: rio.windows.Window(
+                window.col_off * 2,
+                window.row_off * 2,
+                window.width * 2,
+                window.height * 2,
+            ),
+        )
+
+        assert src.windows == [rio.windows.Window(0, 0, 8, 8)]
+        with rio.open(out_path) as cached:
+            data = cached.read(1)
+        np.testing.assert_array_equal(data, np.zeros((4, 4), dtype=np.uint16))
 
 
 class TestMosaicSharedParamsValidation:

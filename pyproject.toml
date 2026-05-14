@@ -76,6 +76,9 @@ ignore_missing_imports = true
 [tool.ruff.lint]
 select = ["E", "F", "B"]
 
+[tool.ruff]
+extend-exclude = ["s2mosaic/_version.py"]
+
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["E402"]
 "*.ipynb" = ["E402"]
