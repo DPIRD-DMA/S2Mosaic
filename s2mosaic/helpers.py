@@ -502,7 +502,7 @@ def finalize_output(
     export-vs-return decision live in one place.
     """
     if coverage_mask is not None:
-        array = np.where(coverage_mask[None, :, :], array, 0)
+        np.multiply(array, coverage_mask[None, :, :], out=array, casting="unsafe")
 
     if "visual" in required_bands:
         band_descriptions = ["Red", "Green", "Blue"]

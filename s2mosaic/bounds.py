@@ -47,7 +47,13 @@ from .helpers import (
     with_scene_retry,
 )
 from .masking import compute_masks_from_array, compute_masks_from_scl
-from .mosaic_core import _write_tiled_copy, materialise_tiled_band, run_tile_aggregation
+from .mosaic_core import (
+    _prewarm_sources,
+    _write_tiled_copy,
+    materialise_tiled_band,
+    run_tile_aggregation,
+    should_prewarm_sources,
+)
 from .stac_utils import (
     ITEM_COL,
     add_item_info,
@@ -192,6 +198,7 @@ def make_bounds_tile_reader(
     height: int,
     resolution: int,
     resampling_method: str,
+    prewarm: bool = True,
 ):
     """Build a tile-reader for bounds mode (WarpedVRT-backed reads).
 
@@ -200,6 +207,9 @@ def make_bounds_tile_reader(
     cache file is materialised only when a tile actually reads that source.
     PC URLs get wrapped in a ``WarpedVRT`` to reproject on read, while cached
     local files are opened directly (they're already on the target grid).
+
+    With ``prewarm=True`` (default) the resolvers are called in parallel once
+    before returning. Pass ``prewarm=False`` to keep them strictly lazy.
     """
     target_crs_obj = CRS.from_epsg(target_crs)
     rio_resampling = get_rasterio_resampling(resampling_method)
@@ -238,6 +248,13 @@ def make_bounds_tile_reader(
 
             scene_sources.append(source_for)
         sources.append(scene_sources)
+
+    if prewarm:
+        # Pre-warm sources in parallel. With debug cache on this materialises
+        # every (scene, asset) up front; without cache it's just parallel URL
+        # signing. Avoids the serial fan-out tile workers would otherwise do
+        # when each first touches a (scene, asset) inside the tile loop.
+        _prewarm_sources(sources)
 
     vrt_local = threading.local()
 
@@ -715,12 +732,16 @@ def run_bounds_pipeline(
         height=h,
         resolution=resolution,
         resampling_method=resampling_method,
+        prewarm=should_prewarm_sources(mosaic_method, no_data_threshold),
     )
 
     masks_in_order: List[Optional[np.ndarray]] = [
         combo_masks_user[scene_idx] for scene_idx in kept_indices
     ]
-    # Tile small AOIs as a single tile; tile large AOIs at the streaming cap.
+    # Tile small AOIs as a single tile; cap large AOIs at 2048 so each
+    # tile read from PC stays one big range request. Smaller tiles trade
+    # round-trip latency for worker utilisation — a bad deal when reads
+    # are network-bound (i.e., production with no debug cache).
     tile_size = min(2048, max(h, w))
     logger.info(
         "Tile-streaming %d scenes x %d bands at tile=%d (%dx%d output)",
@@ -730,7 +751,7 @@ def run_bounds_pipeline(
         h,
         w,
     )
-    mosaic = run_tile_aggregation(
+    output_array = run_tile_aggregation(
         masks=masks_in_order,
         read_fn=read_fn,
         bands_count=n_bands,
@@ -742,12 +763,8 @@ def run_bounds_pipeline(
         percentile_value=percentile_value,
         tile_size=tile_size,
         tile_workers=None,
+        out_dtype=np.dtype(np.uint8) if is_visual else np.dtype(np.uint16),
     )
-
-    if is_visual:
-        output_array = np.clip(np.nan_to_num(mosaic, nan=0), 0, 255).astype(np.uint8)
-    else:
-        output_array = np.clip(np.nan_to_num(mosaic, nan=0), 0, 65535).astype(np.uint16)
 
     profile: Dict[str, Any] = {
         "driver": "GTiff",

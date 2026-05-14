@@ -62,11 +62,29 @@ from .stac_utils import ITEM_COL
 
 logger = logging.getLogger(__name__)
 REMOTE_READ_ATTEMPTS = 3
+DEFAULT_OUTPUT_DTYPE = np.dtype(np.uint16)
 
 
 def _tiled_gtiff_cache_path(cache_key: str) -> Path:
     digest = hashlib.md5(cache_key.encode()).hexdigest()
     return DEBUG_CACHE_DIR / f"tiled_band_{digest}.tif"
+
+
+# Per-key locks deduplicate concurrent materialise calls for the same
+# (scene, asset). Without this, every tile-worker that needs a (scene, asset)
+# for its first tile races on the same cache entry, runs the WarpedVRT
+# concurrently, and writes the same output N times.
+_materialise_locks: Dict[str, threading.Lock] = {}
+_materialise_locks_guard = threading.Lock()
+
+
+def _get_materialise_lock(cache_key: str) -> threading.Lock:
+    with _materialise_locks_guard:
+        lock = _materialise_locks.get(cache_key)
+        if lock is None:
+            lock = threading.Lock()
+            _materialise_locks[cache_key] = lock
+        return lock
 
 
 def materialise_tiled_band(
@@ -79,22 +97,31 @@ def materialise_tiled_band(
     PC URL. Returns None when caching is disabled — caller falls back to the
     direct streaming read path. ``materialiser`` is mode-specific and should
     write a tiled GeoTIFF on the target grid.
+
+    Safe to call from multiple threads with the same key: a per-key lock
+    serialises the write, and the second caller sees the materialised file
+    on its re-check.
     """
     if not debug_cache_enabled():
         return None
     cache_path = _tiled_gtiff_cache_path(cache_key)
     if cache_path.exists():
         return cache_path
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    # Write to a pid-suffixed tmp file and atomically rename so parallel
-    # workers materialising the same cache entry don't corrupt each other.
-    tmp_path = cache_path.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}.tif")
-    try:
-        materialiser(tmp_path)
-        tmp_path.rename(cache_path)
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
+    with _get_materialise_lock(cache_key):
+        # Re-check inside the lock — another thread may have materialised
+        # it while we waited.
+        if cache_path.exists():
+            return cache_path
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_path.with_suffix(
+            f".tmp.{os.getpid()}.{threading.get_ident()}.tif"
+        )
+        try:
+            materialiser(tmp_path)
+            tmp_path.rename(cache_path)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
     return cache_path
 
 
@@ -327,9 +354,42 @@ def _tile_threshold_met(
 ReaderFn = Callable[[int, int, Tuple[int, int, int, int]], np.ndarray]
 
 
-def _empty_tile(spec: Tuple[int, int, int, int], bands_count: int) -> np.ndarray:
+def _empty_tile(
+    spec: Tuple[int, int, int, int], bands_count: int, out_dtype: np.dtype
+) -> np.ndarray:
     _, _, h, w = spec
-    return np.zeros((bands_count, h, w), dtype=np.float32)
+    return np.zeros((bands_count, h, w), dtype=out_dtype)
+
+
+def _finalise_tile(arr: np.ndarray, out_dtype: np.dtype) -> np.ndarray:
+    """Clip + cast a tile result so workers return the pipeline's output dtype.
+
+    Doing the cast per tile lets ``run_tile_aggregation`` allocate ``out`` as
+    the final dtype, which halves the output buffer footprint for non-visual
+    mosaics (uint16 instead of float32) and is essentially free overhead
+    per tile (a clip + a cast).
+    """
+    if np.issubdtype(out_dtype, np.unsignedinteger):
+        info = np.iinfo(out_dtype)
+        return np.clip(arr, info.min, info.max).astype(out_dtype, copy=False)
+    return arr.astype(out_dtype, copy=False)
+
+
+def _copy_single_scene_tile(
+    spec: Tuple[int, int, int, int],
+    mask_tile: np.ndarray,
+    read_fn: ReaderFn,
+    scene_idx: int,
+    bands_count: int,
+    out_dtype: np.dtype,
+) -> np.ndarray:
+    """Copy one contributing scene into an output tile, zeroing masked pixels."""
+    _, _, h, w = spec
+    out = np.zeros((bands_count, h, w), dtype=out_dtype)
+    for j in range(bands_count):
+        data = read_fn(scene_idx, j, spec)
+        np.copyto(out[j], data, where=mask_tile, casting="unsafe")
+    return out
 
 
 def tile_percentile(
@@ -340,14 +400,18 @@ def tile_percentile(
     percentile_value: float,
     coverage_mask: np.ndarray,
     no_data_threshold: Optional[float],
+    out_dtype: np.dtype,
 ) -> Tuple[Tuple[int, int, int, int], np.ndarray]:
     r, c, h, w = spec
     tile_coverage = coverage_mask[r : r + h, c : c + w]
     if not tile_coverage.any():
-        return spec, _empty_tile(spec, bands_count)
-    # Walk scenes in priority order so the short-circuit picks the best ones
-    # first (sort order is set upstream — e.g. valid_data).
-    blocks: List[np.ndarray] = []
+        return spec, _empty_tile(spec, bands_count, out_dtype)
+
+    # Pre-count scenes that actually contribute pixels in this tile so we
+    # can allocate the stack once instead of building a list + np.stack-ing.
+    # mask_tile.any() is cheap (bool reduction over h*w bytes) compared to
+    # an extra h*w*bands*4-byte temporary per scene.
+    contributing: List[int] = []
     filled = np.zeros((h, w), dtype=bool)
     for scene_idx, m in enumerate(masks):
         if m is None:
@@ -355,22 +419,36 @@ def tile_percentile(
         mask_tile = m[r : r + h, c : c + w]
         if not mask_tile.any():
             continue
-        block_one = np.empty((bands_count, h, w), dtype=np.float32)
-        for j in range(bands_count):
-            data = read_fn(scene_idx, j, spec)
-            block_one[j] = np.where(
-                mask_tile, data.astype(np.float32), np.float32(np.nan)
-            )
-        blocks.append(block_one)
+        contributing.append(scene_idx)
         filled |= mask_tile
         if _tile_threshold_met(filled, tile_coverage, no_data_threshold):
             break
 
-    if not blocks:
-        return spec, _empty_tile(spec, bands_count)
-    stack = np.stack(blocks, axis=0)
+    if not contributing:
+        return spec, _empty_tile(spec, bands_count, out_dtype)
+
+    if len(contributing) == 1:
+        scene_idx = contributing[0]
+        mask = masks[scene_idx]
+        assert mask is not None
+        mask_tile = mask[r : r + h, c : c + w]
+        return spec, _copy_single_scene_tile(
+            spec, mask_tile, read_fn, scene_idx, bands_count, out_dtype
+        )
+
+    stack = np.empty((len(contributing), bands_count, h, w), dtype=np.float32)
+    for k, scene_idx in enumerate(contributing):
+        mask = masks[scene_idx]
+        assert mask is not None
+        mask_tile = mask[r : r + h, c : c + w]
+        for j in range(bands_count):
+            data = read_fn(scene_idx, j, spec)
+            stack[k, j].fill(np.nan)
+            np.copyto(stack[k, j], data, where=mask_tile, casting="unsafe")
+
     res = nanquantile(stack, percentile_value / 100.0, axis=0)
-    return spec, np.nan_to_num(res, nan=0.0).astype(np.float32)
+    res = np.nan_to_num(res, nan=0.0)
+    return spec, _finalise_tile(res, out_dtype)
 
 
 def tile_mean(
@@ -380,13 +458,14 @@ def tile_mean(
     bands_count: int,
     coverage_mask: np.ndarray,
     no_data_threshold: Optional[float],
+    out_dtype: np.dtype,
 ) -> Tuple[Tuple[int, int, int, int], np.ndarray]:
     r, c, h, w = spec
     tile_coverage = coverage_mask[r : r + h, c : c + w]
     if not tile_coverage.any():
-        return spec, _empty_tile(spec, bands_count)
-    sum_block = np.zeros((bands_count, h, w), dtype=np.float32)
-    count = np.zeros((h, w), dtype=np.uint16)
+        return spec, _empty_tile(spec, bands_count, out_dtype)
+
+    contributing: List[int] = []
     filled = np.zeros((h, w), dtype=bool)
     for scene_idx, m in enumerate(masks):
         if m is None:
@@ -394,15 +473,35 @@ def tile_mean(
         mask_tile = m[r : r + h, c : c + w]
         if not mask_tile.any():
             continue
-        for j in range(bands_count):
-            data = read_fn(scene_idx, j, spec).astype(np.float32)
-            sum_block[j][mask_tile] += data[mask_tile]
-        count += mask_tile.astype(np.uint16)
+        contributing.append(scene_idx)
         filled |= mask_tile
         if _tile_threshold_met(filled, tile_coverage, no_data_threshold):
             break
+
+    if not contributing:
+        return spec, _empty_tile(spec, bands_count, out_dtype)
+
+    if len(contributing) == 1:
+        scene_idx = contributing[0]
+        mask = masks[scene_idx]
+        assert mask is not None
+        mask_tile = mask[r : r + h, c : c + w]
+        return spec, _copy_single_scene_tile(
+            spec, mask_tile, read_fn, scene_idx, bands_count, out_dtype
+        )
+
+    sum_block = np.zeros((bands_count, h, w), dtype=np.float32)
+    count = np.zeros((h, w), dtype=np.uint16)
+    for scene_idx in contributing:
+        mask = masks[scene_idx]
+        assert mask is not None
+        mask_tile = mask[r : r + h, c : c + w]
+        for j in range(bands_count):
+            data = read_fn(scene_idx, j, spec)
+            np.add(sum_block[j], data, out=sum_block[j], where=mask_tile)
+        np.add(count, mask_tile, out=count, casting="unsafe")
     result = np.divide(sum_block, count, out=np.zeros_like(sum_block), where=count != 0)
-    return spec, result
+    return spec, _finalise_tile(result, out_dtype)
 
 
 def tile_first(
@@ -412,12 +511,15 @@ def tile_first(
     bands_count: int,
     coverage_mask: np.ndarray,
     no_data_threshold: Optional[float],
+    out_dtype: np.dtype,
 ) -> Tuple[Tuple[int, int, int, int], np.ndarray]:
     r, c, h, w = spec
     tile_coverage = coverage_mask[r : r + h, c : c + w]
     if not tile_coverage.any():
-        return spec, _empty_tile(spec, bands_count)
-    result = np.zeros((bands_count, h, w), dtype=np.float32)
+        return spec, _empty_tile(spec, bands_count, out_dtype)
+    # FIRST copies source pixels straight through, so we can accumulate
+    # directly in the output dtype — no float32 working buffer needed.
+    result = np.zeros((bands_count, h, w), dtype=out_dtype)
     filled = np.zeros((h, w), dtype=bool)
     for scene_idx, m in enumerate(masks):
         if m is None:
@@ -461,9 +563,16 @@ def run_tile_aggregation(
     percentile_value: Optional[float],
     tile_size: int,
     tile_workers: Optional[int],
+    out_dtype: np.dtype = DEFAULT_OUTPUT_DTYPE,
 ) -> np.ndarray:
-    """Generic streaming aggregation. Called by both grid_id and bounds modes."""
-    out = np.zeros((bands_count, height, width), dtype=np.float32)
+    """Generic streaming aggregation. Called by both grid_id and bounds modes.
+
+    ``out_dtype`` is the pipeline's final output dtype (``uint16`` for
+    spectral, ``uint8`` for visual). Tile workers cast to it before
+    returning, so the output buffer can be allocated as the final dtype —
+    no intermediate float32 array the size of the whole mosaic.
+    """
+    out = np.zeros((bands_count, height, width), dtype=out_dtype)
     specs = tile_specs_for(height, width, tile_size)
     n_workers = tile_workers or os.cpu_count() or 8
 
@@ -475,7 +584,14 @@ def run_tile_aggregation(
             s: Tuple[int, int, int, int],
         ) -> Tuple[Tuple[int, int, int, int], np.ndarray]:
             return tile_percentile(
-                s, masks, read_fn, bands_count, pv, coverage_mask, no_data_threshold
+                s,
+                masks,
+                read_fn,
+                bands_count,
+                pv,
+                coverage_mask,
+                no_data_threshold,
+                out_dtype,
             )
 
     elif mosaic_method == MOSAIC_MEAN:
@@ -484,7 +600,13 @@ def run_tile_aggregation(
             s: Tuple[int, int, int, int],
         ) -> Tuple[Tuple[int, int, int, int], np.ndarray]:
             return tile_mean(
-                s, masks, read_fn, bands_count, coverage_mask, no_data_threshold
+                s,
+                masks,
+                read_fn,
+                bands_count,
+                coverage_mask,
+                no_data_threshold,
+                out_dtype,
             )
 
     elif mosaic_method == MOSAIC_FIRST:
@@ -493,7 +615,13 @@ def run_tile_aggregation(
             s: Tuple[int, int, int, int],
         ) -> Tuple[Tuple[int, int, int, int], np.ndarray]:
             return tile_first(
-                s, masks, read_fn, bands_count, coverage_mask, no_data_threshold
+                s,
+                masks,
+                read_fn,
+                bands_count,
+                coverage_mask,
+                no_data_threshold,
+                out_dtype,
             )
 
     else:
@@ -517,12 +645,19 @@ def make_grid_tile_reader(
     s2_scene_size: int,
     resolution: int,
     resampling_method: str,
+    prewarm: bool = True,
 ) -> ReaderFn:
     """Build a tile-reader for grid_id mode (direct MGRS COG reads).
 
     Builds lazy source resolvers for every (scene, asset). Workers in Phase 2
     open handles lazily per thread; if ``S2MOSAIC_DEBUG_CACHE`` is on, the
     cache file is materialised only when a tile actually reads that source.
+
+    With ``prewarm=True`` (default) the resolvers are called in parallel
+    once before returning, so cache materialisation happens in one parallel
+    burst rather than being fanned out serially by the per-tile workers.
+    Set ``prewarm=False`` to keep the resolvers strictly lazy (useful for
+    tests, or for callers that expect to skip many scenes via no_data_threshold).
     """
     rio_resampling = get_rasterio_resampling(resampling_method)
     href_band_indices = [band_idx for _, band_idx in href_template]
@@ -553,6 +688,13 @@ def make_grid_tile_reader(
         sources.append(scene_sources)
     cache = _HandleCache(sources)
 
+    if prewarm:
+        # Pre-warm the per-(scene, asset) sources in parallel. When the debug
+        # cache is on this materialises every cache entry up-front (much faster
+        # than serially-on-first-read inside the tile loop); when caching is off
+        # it's a cheap parallel URL-sign and adds negligible overhead.
+        _prewarm_sources(sources)
+
     def read_fn(
         scene_idx: int, band_idx: int, spec: Tuple[int, int, int, int]
     ) -> np.ndarray:
@@ -562,6 +704,41 @@ def make_grid_tile_reader(
         )
 
     return read_fn
+
+
+def _prewarm_sources(sources: List[List[Callable[..., Any]]]) -> None:
+    """Call every lazy source resolver in parallel.
+
+    Resolvers are no-ops when the debug cache is disabled (just URL signing).
+    With cache enabled they trigger materialisation — pre-warming avoids the
+    serial fan-out you'd otherwise get from tile workers each lazily
+    materialising the (scene, asset) entries they touch.
+    """
+    flat: List[Callable[..., Any]] = [
+        resolver for scene in sources for resolver in scene
+    ]
+    if not flat:
+        return
+    n_workers = min(len(flat), (os.cpu_count() or 8) * 2)
+    with ThreadPoolExecutor(max_workers=n_workers) as ex:
+        # Drain any exceptions — the lazy path would raise on first read
+        # anyway, but raising eagerly gives a clearer stack.
+        for _ in ex.map(lambda fn: fn(), flat):
+            pass
+
+
+def should_prewarm_sources(
+    mosaic_method: str,
+    no_data_threshold: Optional[float],
+) -> bool:
+    """Whether to pre-materialise tile sources before aggregation.
+
+    Prewarming improves throughput when most scene/band sources will be read
+    anyway. Keep sources lazy when the aggregation is likely to skip many reads:
+    ``first`` mode can stop as pixels fill, and any ``no_data_threshold`` can
+    stop per-tile scene walks before all scenes are touched.
+    """
+    return mosaic_method != MOSAIC_FIRST and no_data_threshold is None
 
 
 def stream_mosaic_pipeline(
@@ -665,6 +842,7 @@ def stream_mosaic_pipeline(
         s2_scene_size=s2_scene_size,
         resolution=resolution,
         resampling_method=resampling_method,
+        prewarm=should_prewarm_sources(mosaic_method, no_data_threshold),
     )
 
     logger.info(
@@ -684,10 +862,6 @@ def stream_mosaic_pipeline(
         percentile_value=percentile_value,
         tile_size=tile_size,
         tile_workers=tile_workers,
+        out_dtype=np.dtype(np.uint8) if is_visual else np.dtype(np.uint16),
     )
-
-    if is_visual:
-        out_final = np.clip(out, 0, 255).astype(np.uint8)
-    else:
-        out_final = np.clip(out, 0, 65535).astype(np.uint16)
-    return out_final, last_profile
+    return out, last_profile

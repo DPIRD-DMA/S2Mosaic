@@ -31,6 +31,7 @@ from s2mosaic.mosaic_core import (
     _read_with_retry,
     _write_tiled_copy,
     run_tile_aggregation,
+    should_prewarm_sources,
 )
 
 
@@ -772,6 +773,19 @@ class TestDiskCacheDecorator:
 class TestTiledBandMaterialisation:
     """Local tiled GeoTIFF materialisation helpers."""
 
+    @pytest.mark.parametrize(
+        "mosaic_method,no_data_threshold,expected",
+        [
+            ("mean", None, True),
+            ("percentile", None, True),
+            ("first", None, False),
+            ("mean", 0.01, False),
+            ("percentile", 0.01, False),
+        ],
+    )
+    def test_source_prewarm_policy(self, mosaic_method, no_data_threshold, expected):
+        assert should_prewarm_sources(mosaic_method, no_data_threshold) is expected
+
     def test_handle_cache_resolves_sources_only_on_first_read(self, monkeypatch):
         calls = {"resolver": 0, "open": 0}
 
@@ -851,6 +865,7 @@ class TestTiledBandMaterialisation:
             height=10,
             resolution=1,
             resampling_method="nearest",
+            prewarm=False,  # verify the strictly-lazy contract
         )
 
         assert calls == {"materialise": 0, "materialiser_factory": 0, "open": 0}
