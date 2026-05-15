@@ -332,6 +332,41 @@ class TestRunTileAggregation:
         assert set(thread_names) == {"MainThread"}
         np.testing.assert_allclose(out, 20.0)
 
+    def test_percentile_ignores_no_data_threshold_inside_tile(self):
+        reads = []
+        scenes = np.stack(
+            [
+                np.full((1, self.H, self.W), 10, dtype=np.uint16),
+                np.full((1, self.H, self.W), 30, dtype=np.uint16),
+            ],
+            axis=0,
+        )
+
+        def read_fn(scene_idx, band_idx, spec):
+            reads.append(scene_idx)
+            r, c, h, w = spec
+            return scenes[scene_idx, band_idx, r : r + h, c : c + w]
+
+        out = run_tile_aggregation(
+            masks=[
+                np.ones((self.H, self.W), dtype=bool),
+                np.ones((self.H, self.W), dtype=bool),
+            ],
+            read_fn=read_fn,
+            bands_count=1,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            no_data_threshold=0.01,
+            mosaic_method="percentile",
+            percentile_value=50.0,
+            tile_size=10,
+            tile_workers=1,
+        )
+
+        assert reads == [0, 1]
+        np.testing.assert_allclose(out, 20.0)
+
     def test_empty_coverage_tile_does_not_read_sources(self):
         reads = {"n": 0}
 
@@ -357,13 +392,13 @@ class TestRunTileAggregation:
         assert reads["n"] == 0
         np.testing.assert_array_equal(out, np.zeros((1, self.H, self.W)))
 
-    def test_no_data_threshold_stops_before_later_scene_reads(self):
+    def test_mean_ignores_no_data_threshold_inside_tile(self):
         reads = []
 
         def read_fn(scene_idx, band_idx, spec):
             reads.append(scene_idx)
             _, _, h, w = spec
-            return np.full((h, w), scene_idx + 1, dtype=np.uint16)
+            return np.full((h, w), 10 + scene_idx * 20, dtype=np.uint16)
 
         out = run_tile_aggregation(
             masks=[
@@ -382,8 +417,106 @@ class TestRunTileAggregation:
             tile_workers=1,
         )
 
-        assert reads == [0]
-        np.testing.assert_array_equal(out, np.ones((1, self.H, self.W)))
+        assert reads == [0, 1]
+        np.testing.assert_array_equal(out, np.full((1, self.H, self.W), 20))
+
+    def test_mean_stops_at_tile_observation_target(self):
+        reads = []
+
+        def read_fn(scene_idx, band_idx, spec):
+            reads.append(scene_idx)
+            _, _, h, w = spec
+            return np.full((h, w), 10 + scene_idx * 10, dtype=np.uint16)
+
+        out = run_tile_aggregation(
+            masks=[
+                np.ones((self.H, self.W), dtype=bool),
+                np.ones((self.H, self.W), dtype=bool),
+                np.ones((self.H, self.W), dtype=bool),
+            ],
+            read_fn=read_fn,
+            bands_count=1,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            no_data_threshold=None,
+            mosaic_method="mean",
+            percentile_value=None,
+            tile_size=10,
+            tile_workers=1,
+            tile_observation_target=2,
+        )
+
+        assert reads == [0, 1]
+        np.testing.assert_array_equal(out, np.full((1, self.H, self.W), 15))
+
+    def test_percentile_stops_at_tile_observation_target_per_pixel(self):
+        reads = []
+        masks = [
+            np.ones((self.H, self.W), dtype=bool),
+            np.ones((self.H, self.W), dtype=bool),
+            np.ones((self.H, self.W), dtype=bool),
+        ]
+        masks[0][0, 0] = False
+
+        def read_fn(scene_idx, band_idx, spec):
+            reads.append(scene_idx)
+            _, _, h, w = spec
+            return np.full((h, w), scene_idx * 10, dtype=np.uint16)
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=read_fn,
+            bands_count=1,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            no_data_threshold=None,
+            mosaic_method="percentile",
+            percentile_value=50.0,
+            tile_size=10,
+            tile_workers=1,
+            tile_observation_target=2,
+        )
+
+        expected = np.full((1, self.H, self.W), 10, dtype=np.uint16)
+        expected[0, 0, 0] = 15
+        assert reads == [0, 1, 2]
+        np.testing.assert_array_equal(out, expected)
+
+    def test_first_ignores_no_data_threshold_until_coverage_filled(self):
+        reads = []
+        first_mask = np.ones((self.H, self.W), dtype=bool)
+        first_mask[0, 0] = False
+        second_mask = np.zeros((self.H, self.W), dtype=bool)
+        second_mask[0, 0] = True
+
+        def read_fn(scene_idx, band_idx, spec):
+            reads.append(scene_idx)
+            _, _, h, w = spec
+            return np.full((h, w), scene_idx + 1, dtype=np.uint16)
+
+        out = run_tile_aggregation(
+            masks=[
+                first_mask,
+                second_mask,
+            ],
+            read_fn=read_fn,
+            bands_count=1,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            no_data_threshold=0.1,
+            mosaic_method="first",
+            percentile_value=None,
+            tile_size=10,
+            tile_workers=1,
+        )
+
+        expected = np.ones((1, self.H, self.W), dtype=np.uint16)
+        expected[0, 0, 0] = 2
+        assert reads == [0, 1]
+        np.testing.assert_array_equal(out, expected)
 
 
 class TestNanquantileAxis0:
@@ -1118,17 +1251,26 @@ class TestTiledBandMaterialisation:
     """Local tiled GeoTIFF materialisation helpers."""
 
     @pytest.mark.parametrize(
-        "mosaic_method,no_data_threshold,expected",
+        "mosaic_method,no_data_threshold,tile_observation_target,expected",
         [
-            ("mean", None, True),
-            ("percentile", None, True),
-            ("first", None, False),
-            ("mean", 0.01, False),
-            ("percentile", 0.01, False),
+            ("mean", None, None, True),
+            ("percentile", None, None, True),
+            ("first", None, None, False),
+            ("mean", 0.01, None, False),
+            ("percentile", 0.01, None, False),
+            ("mean", None, 2, False),
+            ("percentile", None, 2, False),
         ],
     )
-    def test_source_prewarm_policy(self, mosaic_method, no_data_threshold, expected):
-        assert should_prewarm_sources(mosaic_method, no_data_threshold) is expected
+    def test_source_prewarm_policy(
+        self, mosaic_method, no_data_threshold, tile_observation_target, expected
+    ):
+        assert (
+            should_prewarm_sources(
+                mosaic_method, no_data_threshold, tile_observation_target
+            )
+            is expected
+        )
 
     def test_handle_cache_resolves_sources_only_on_first_read(self, monkeypatch):
         calls = {"resolver": 0, "open": 0}

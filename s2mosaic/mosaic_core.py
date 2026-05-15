@@ -317,28 +317,6 @@ def _read_tile_window(
     )
 
 
-def _tile_threshold_met(
-    tile_filled: npt.NDArray[Any],
-    tile_coverage: npt.NDArray[Any],
-    no_data_threshold: Optional[float],
-) -> bool:
-    """Per-tile coverage short-circuit, mirroring the old global threshold.
-
-    Returns True when uncovered-possible-pixels / possible-pixels is below
-    ``no_data_threshold``. ``tile_coverage`` is the slice of the global
-    coverage mask for this tile (pixels that CAN have data); ``tile_filled``
-    is a bool array of pixels we've already contributed data to.
-    """
-    if no_data_threshold is None:
-        return False
-    possible = int(tile_coverage.sum())
-    if possible == 0:
-        return True  # no work to do here anyway
-    filled = int((tile_filled & tile_coverage).sum())
-    no_data = possible - filled
-    return no_data < possible * no_data_threshold
-
-
 # Reader function shared by grid_id and bounds streamers.
 # Signature: read_fn(scene_idx, band_idx, spec) -> ndarray of shape (h, w).
 # Implementations close over their own source-handle cache (HandleCache for
@@ -452,27 +430,19 @@ def _copy_single_scene_tile(
     return out
 
 
-def tile_percentile(
+def _contributing_scene_indices(
     spec: Tuple[int, int, int, int],
     masks: List[Optional[npt.NDArray[Any]]],
-    read_fn: ReaderFn,
-    bands_count: int,
-    percentile_value: float,
-    coverage_mask: npt.NDArray[Any],
-    no_data_threshold: Optional[float],
-    out_dtype: "np.dtype[Any]",
-) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
+    tile_coverage: npt.NDArray[Any],
+    tile_observation_target: Optional[int],
+) -> List[int]:
+    """Scene indices that contribute to a tile before the observation target."""
     r, c, h, w = spec
-    tile_coverage = coverage_mask[r : r + h, c : c + w]
-    if not tile_coverage.any():
-        return spec, _empty_tile(spec, bands_count, out_dtype)
-
-    # Pre-count scenes that actually contribute pixels in this tile so we
-    # can allocate the stack once instead of building a list + np.stack-ing.
-    # mask_tile.any() is cheap (bool reduction over h*w bytes) compared to
-    # an extra h*w*bands*4-byte temporary per scene.
     contributing: List[int] = []
-    filled = np.zeros((h, w), dtype=bool)
+    observation_count: Optional[npt.NDArray[Any]] = None
+    if tile_observation_target is not None:
+        observation_count = np.zeros((h, w), dtype=np.uint16)
+
     for scene_idx, m in enumerate(masks):
         if m is None:
             continue
@@ -480,9 +450,38 @@ def tile_percentile(
         if not mask_tile.any():
             continue
         contributing.append(scene_idx)
-        filled |= mask_tile
-        if _tile_threshold_met(filled, tile_coverage, no_data_threshold):
-            break
+
+        if observation_count is not None:
+            np.add(
+                observation_count,
+                mask_tile & tile_coverage,
+                out=observation_count,
+                casting="unsafe",
+            )
+            if ((observation_count >= tile_observation_target) | ~tile_coverage).all():
+                break
+
+    return contributing
+
+
+def tile_percentile(
+    spec: Tuple[int, int, int, int],
+    masks: List[Optional[npt.NDArray[Any]]],
+    read_fn: ReaderFn,
+    bands_count: int,
+    percentile_value: float,
+    coverage_mask: npt.NDArray[Any],
+    tile_observation_target: Optional[int],
+    out_dtype: "np.dtype[Any]",
+) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
+    r, c, h, w = spec
+    tile_coverage = coverage_mask[r : r + h, c : c + w]
+    if not tile_coverage.any():
+        return spec, _empty_tile(spec, bands_count, out_dtype)
+
+    contributing = _contributing_scene_indices(
+        spec, masks, tile_coverage, tile_observation_target
+    )
 
     if not contributing:
         return spec, _empty_tile(spec, bands_count, out_dtype)
@@ -517,7 +516,7 @@ def tile_mean(
     read_fn: ReaderFn,
     bands_count: int,
     coverage_mask: npt.NDArray[Any],
-    no_data_threshold: Optional[float],
+    tile_observation_target: Optional[int],
     out_dtype: "np.dtype[Any]",
 ) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
     r, c, h, w = spec
@@ -525,18 +524,9 @@ def tile_mean(
     if not tile_coverage.any():
         return spec, _empty_tile(spec, bands_count, out_dtype)
 
-    contributing: List[int] = []
-    filled = np.zeros((h, w), dtype=bool)
-    for scene_idx, m in enumerate(masks):
-        if m is None:
-            continue
-        mask_tile = m[r : r + h, c : c + w]
-        if not mask_tile.any():
-            continue
-        contributing.append(scene_idx)
-        filled |= mask_tile
-        if _tile_threshold_met(filled, tile_coverage, no_data_threshold):
-            break
+    contributing = _contributing_scene_indices(
+        spec, masks, tile_coverage, tile_observation_target
+    )
 
     if not contributing:
         return spec, _empty_tile(spec, bands_count, out_dtype)
@@ -592,9 +582,7 @@ def tile_first(
             data = read_fn(scene_idx, j, spec)
             result[j][new_pixels] = data[new_pixels]
         filled |= new_pixels
-        if _tile_threshold_met(filled, tile_coverage, no_data_threshold):
-            break
-        if filled.all():
+        if (filled | ~tile_coverage).all():
             break
     return spec, result
 
@@ -624,6 +612,7 @@ def run_tile_aggregation(
     tile_size: int,
     tile_workers: Optional[int],
     out_dtype: "np.dtype[Any]" = DEFAULT_OUTPUT_DTYPE,
+    tile_observation_target: Optional[int] = None,
 ) -> npt.NDArray[Any]:
     """Generic streaming aggregation. Called by both grid_id and bounds modes.
 
@@ -650,7 +639,7 @@ def run_tile_aggregation(
                 bands_count,
                 pv,
                 coverage_mask,
-                no_data_threshold,
+                tile_observation_target,
                 out_dtype,
             )
 
@@ -666,7 +655,7 @@ def run_tile_aggregation(
                 read_fn,
                 bands_count,
                 coverage_mask,
-                no_data_threshold,
+                tile_observation_target,
                 out_dtype,
             )
 
@@ -728,7 +717,7 @@ def make_grid_tile_reader(
     once before returning, so cache materialisation happens in one parallel
     burst rather than being fanned out serially by the per-tile workers.
     Set ``prewarm=False`` to keep the resolvers strictly lazy (useful for
-    tests, or for callers that expect to skip many scenes via no_data_threshold).
+    tests, or for callers that expect to skip many reads via early stopping).
     """
     rio_resampling = get_rasterio_resampling(resampling_method)
     href_band_indices = [band_idx for _, band_idx in href_template]
@@ -801,15 +790,21 @@ def _prewarm_sources(sources: List[List[Callable[..., Any]]]) -> None:
 def should_prewarm_sources(
     mosaic_method: str,
     no_data_threshold: Optional[float],
+    tile_observation_target: Optional[int] = None,
 ) -> bool:
     """Whether to pre-materialise tile sources before aggregation.
 
     Prewarming improves throughput when most scene/band sources will be read
     anyway. Keep sources lazy when the aggregation is likely to skip many reads:
-    ``first`` mode can stop as pixels fill, and any ``no_data_threshold`` can
-    stop per-tile scene walks before all scenes are touched.
+    ``first`` mode can stop as pixels fill, ``no_data_threshold`` can stop
+    scene walks before all scenes are touched, and ``tile_observation_target``
+    can cap per-tile observations.
     """
-    return mosaic_method != MOSAIC_FIRST and no_data_threshold is None
+    return (
+        mosaic_method != MOSAIC_FIRST
+        and no_data_threshold is None
+        and tile_observation_target is None
+    )
 
 
 def stream_mosaic_pipeline(
@@ -817,6 +812,7 @@ def stream_mosaic_pipeline(
     required_bands: List[str],
     coverage_mask: npt.NDArray[Any],
     no_data_threshold: Union[float, None],
+    tile_observation_target: Optional[int] = None,
     mosaic_method: str = "mean",
     ocm_batch_size: int = 6,
     ocm_inference_dtype: str = "bf16",
@@ -835,11 +831,10 @@ def stream_mosaic_pipeline(
     set is per-worker (a few hundred MB), so 34-scene full-MGRS percentile
     mosaics that previously needed ~65 GB of RAM now fit in a few GB.
 
-    ``no_data_threshold`` is applied per-tile: each tile's time series
-    walks scenes in priority order and stops once the tile's coverage of
-    the global ``coverage_mask`` exceeds ``1 - threshold``. Different
-    tiles may use different numbers of scenes — clear tiles finish after
-    the first scene, cloudy tiles process more.
+    ``tile_observation_target`` is an optional per-tile early-stop target for
+    ``mean`` and ``percentile``: each tile walks scenes in priority order and
+    stops once every coverable pixel has at least that many valid observations.
+    ``first`` always stops once every coverable pixel has its first observation.
     """
     ocm_resolution = pick_ocm_resolution(resolution)
     logger.info(f"OCM resolution: {ocm_resolution}m")
@@ -913,7 +908,9 @@ def stream_mosaic_pipeline(
         s2_scene_size=s2_scene_size,
         resolution=resolution,
         resampling_method=resampling_method,
-        prewarm=should_prewarm_sources(mosaic_method, no_data_threshold),
+        prewarm=should_prewarm_sources(
+            mosaic_method, no_data_threshold, tile_observation_target
+        ),
     )
 
     logger.info(
@@ -929,6 +926,7 @@ def stream_mosaic_pipeline(
         width=s2_scene_size,
         coverage_mask=coverage_mask,
         no_data_threshold=no_data_threshold,
+        tile_observation_target=tile_observation_target,
         mosaic_method=mosaic_method,
         percentile_value=percentile_value,
         tile_size=tile_size,

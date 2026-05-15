@@ -64,7 +64,6 @@ array, rio_profile = mosaic(
     sort_method="valid_data",   # prioritise scenes with the most valid pixels
     mosaic_method="mean",       # combine valid pixels by mean
     required_bands=["B04", "B03", "B02", "B08"],
-    no_data_threshold=0.001,    # stop once the mosaic is essentially full
 )
 
 print(f"Mosaic array shape: {array.shape}")
@@ -120,6 +119,7 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 - `required_bands` (`["B04", "B03", "B02", "B08"]`): bands to include. Use `["visual"]` for the 3-band uint8 TCI RGB composite (mutually exclusive with other bands).
 - `mosaic_method` (`"mean"`): `"mean"`, `"first"`, `"percentile"` (with `percentile_value`), or `"median"` (shortcut for percentile 50).
 - `percentile_value` (`None`): percentile to compute when `mosaic_method="percentile"` (0–100).
+- `tile_observation_target` (`None`): optional per-tile early-stop target for `"mean"` and `"percentile"`. When set, aggregation stops reading later scenes for a tile once every coverable pixel has at least this many valid observations. This is not an output quality filter; pixels that cannot reach the target use whatever observations are available.
 
 **Output destination**
 
@@ -136,7 +136,7 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 **Scene selection**
 
 - `additional_query` (`{"eo:cloud_cover": {"lt": 100}}`): extra STAC query filters, e.g. `{"eo:cloud_cover": {"lt": 80}}`.
-- `no_data_threshold` (`0.01`): early-stop once the no-data fraction is below this. Set to `None` to process every scene.
+- `no_data_threshold` (`0.01`): bounds-mode scene-selection early stop once the AOI no-data fraction is below this. Set to `None` to examine every scene.
 - `coverage_threshold_pct` (`0.1`): drop scene-edge pixels covered by fewer than this fraction of overlapping scenes. Set to `None` to keep everything.
 - `ignore_duplicate_items` (`True`): drop duplicate acquisitions, keeping the latest processing baseline.
 
@@ -173,8 +173,9 @@ If your application already configures the `logging` module, the package logger 
 - `cloud_mask`: Default `"OCM"` runs the OmniCloudMask deep-learning model — most accurate but needs reasonable compute (GPU/MPS recommended). Switch to `"SCL"` on CPU-only machines or for bulk processing — it skips inference entirely and just reads the L2A Scene Classification Layer.
 - `ocm_batch_size`: If using a GPU, setting this above the default value (1) will speed up cloud masking. In most cases, a value of 4 works well. If you encounter CUDA errors, try using a lower number.
 - `ocm_inference_dtype`: if the device supports it 'bf16' tends to be the fastest option, failing this try 'fp16' then 'fp32'.
-- `sort_method`: Using "valid_data" as the sort method tends to be the fastest option if no_data_threshold is not None.
-- `mosaic_method`: Using 'first' can be a lot faster than 'mean' as only valid, non cloudy, new pixels are downloaded.
+- `sort_method`: Using `"valid_data"` tends to work well with early stopping because clear scenes are considered first.
+- `tile_observation_target`: For large `"mean"` or `"percentile"` jobs, set this to the number of observations per pixel you actually need to avoid reading later scenes for already-satisfied tiles.
+- `mosaic_method`: Using `"first"` can be a lot faster than `"mean"` as only valid, non-cloudy, new pixels are downloaded.
 
 ## Known limitations
 

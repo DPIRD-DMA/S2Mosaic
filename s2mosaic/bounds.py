@@ -449,6 +449,7 @@ def run_bounds_pipeline(
     resampling_method: str = "nearest",
     additional_query: Optional[Dict[str, Any]] = None,
     no_data_threshold: Optional[float] = 0.01,
+    tile_observation_target: Optional[int] = None,
     coverage_threshold_pct: Optional[float] = 0.1,
     ignore_duplicate_items: bool = True,
     sort_method: str = "valid_data",
@@ -496,9 +497,12 @@ def run_bounds_pipeline(
         additional_query: Extra STAC query filters
             (e.g. ``{"eo:cloud_cover": {"lt": 50}}``).
         no_data_threshold: Stop early once the uncovered fraction within the
-            coverage mask drops below this. For ``percentile``, the bounds
-            mask scan still examines every usable scene, but per-tile user-band
-            aggregation can stop once the tile is sufficiently covered.
+            coverage mask drops below this during scene selection.
+        tile_observation_target: Optional per-tile early-stop target for
+            ``mean`` and ``percentile``. When set, user-band aggregation stops
+            reading later scenes for a tile once every coverable pixel has at
+            least this many valid observations. This is not an output quality
+            filter.
         coverage_threshold_pct: Drop pixels covered by fewer than this fraction
             of overlapping scenes (scene-edge pixels). ``None`` disables.
         ignore_duplicate_items: Keep only the latest processing baseline per scene.
@@ -545,6 +549,7 @@ def run_bounds_pipeline(
         sort_method=sort_method,
         mosaic_method=mosaic_method,
         no_data_threshold=no_data_threshold,
+        tile_observation_target=tile_observation_target,
         required_bands=required_bands,
         grid_id=None,
         percentile_value=percentile_value,
@@ -787,7 +792,9 @@ def run_bounds_pipeline(
         height=h,
         resolution=resolution,
         resampling_method=resampling_method,
-        prewarm=should_prewarm_sources(mosaic_method, no_data_threshold),
+        prewarm=should_prewarm_sources(
+            mosaic_method, no_data_threshold, tile_observation_target
+        ),
     )
 
     masks_in_order: List[Optional[npt.NDArray[Any]]] = [
@@ -814,6 +821,7 @@ def run_bounds_pipeline(
         width=w,
         coverage_mask=coverage_mask,
         no_data_threshold=no_data_threshold,
+        tile_observation_target=tile_observation_target,
         mosaic_method=mosaic_method,
         percentile_value=percentile_value,
         tile_size=tile_size,

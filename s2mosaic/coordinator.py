@@ -45,6 +45,7 @@ def mosaic(
     resampling_method: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
     no_data_threshold: Union[float, None] = ...,
+    tile_observation_target: Optional[int] = ...,
     coverage_threshold_pct: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
     sort_method: str = ...,
@@ -78,6 +79,7 @@ def mosaic(
     resampling_method: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
     no_data_threshold: Union[float, None] = ...,
+    tile_observation_target: Optional[int] = ...,
     coverage_threshold_pct: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
     sort_method: str = ...,
@@ -111,6 +113,7 @@ def mosaic(
     resampling_method: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
     no_data_threshold: Union[float, None] = ...,
+    tile_observation_target: Optional[int] = ...,
     coverage_threshold_pct: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
     sort_method: str = ...,
@@ -143,6 +146,7 @@ def mosaic(
     resampling_method: str = "nearest",
     additional_query: Optional[Dict[str, Any]] = None,
     no_data_threshold: Union[float, None] = 0.01,
+    tile_observation_target: Optional[int] = None,
     coverage_threshold_pct: Optional[float] = 0.1,
     ignore_duplicate_items: bool = True,
     sort_method: str = "valid_data",
@@ -199,6 +203,11 @@ def mosaic(
         additional_query (Dict[str, Any], optional): Additional query parameters for STAC API.
             Defaults to {"eo:cloud_cover": {"lt": 100}}.
         no_data_threshold (float, optional): Threshold for no data values. Defaults to 0.01.
+        tile_observation_target (int, optional): Per-tile early-stop target
+            for ``mean`` and ``percentile``. When set, aggregation stops
+            reading later scenes for a tile once every coverable pixel has at
+            least this many valid observations. This is not an output quality
+            filter. Defaults to None.
         coverage_threshold_pct (float, optional): Drop pixels covered by fewer
             than this fraction of overlapping scenes. Set to None to disable.
             Defaults to 0.1.
@@ -252,6 +261,7 @@ def mosaic(
             resampling_method=resampling_method,
             additional_query=additional_query,
             no_data_threshold=no_data_threshold,
+            tile_observation_target=tile_observation_target,
             coverage_threshold_pct=coverage_threshold_pct,
             ignore_duplicate_items=ignore_duplicate_items,
             sort_method=sort_method,
@@ -287,6 +297,7 @@ def mosaic(
         sort_method=sort_method,
         mosaic_method=mosaic_method,
         no_data_threshold=no_data_threshold,
+        tile_observation_target=tile_observation_target,
         required_bands=required_bands,
         grid_id=grid_id,
         percentile_value=percentile_value,
@@ -367,6 +378,7 @@ def mosaic(
         sorted_scenes=sorted_items,
         required_bands=required_bands,
         no_data_threshold=no_data_threshold,
+        tile_observation_target=tile_observation_target,
         mosaic_method=mosaic_method,
         ocm_batch_size=ocm_batch_size,
         ocm_inference_dtype=ocm_inference_dtype,

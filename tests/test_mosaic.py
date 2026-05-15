@@ -185,6 +185,7 @@ class TestMosaicValidInputs:
         "sort_method": "valid_data",
         "mosaic_method": "mean",
         "no_data_threshold": 0.01,
+        "tile_observation_target": None,
         "required_bands": ["B04", "B03", "B02", "B08"],
         "grid_id": "50HMH",
         "percentile_value": None,
@@ -210,6 +211,15 @@ class TestMosaicValidInputs:
     @pytest.mark.parametrize("threshold", [0.0, 0.01, 0.5, 1.0, None])
     def test_valid_no_data_thresholds(self, threshold):
         self._validate(no_data_threshold=threshold)
+
+    @pytest.mark.parametrize("target", [1, 2, 10, None])
+    def test_valid_tile_observation_targets(self, target):
+        self._validate(tile_observation_target=target)
+
+    @pytest.mark.parametrize("target", [0, -1, 1.5, "2", True])
+    def test_invalid_tile_observation_targets(self, target):
+        with pytest.raises(ValueError, match="tile_observation_target"):
+            self._validate(tile_observation_target=target)
 
     @pytest.mark.parametrize(
         "bands",

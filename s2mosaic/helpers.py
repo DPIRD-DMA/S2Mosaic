@@ -339,6 +339,7 @@ def validate_inputs(
     bounds_crs: Optional[int] = None,
     resolution: Optional[int] = None,
     cloud_mask: str = CLOUD_MASK_OCM,
+    tile_observation_target: Optional[int] = None,
 ) -> None:
     if grid_id is not None and (not grid_id.isalnum() or not grid_id.isupper()):
         raise ValueError(
@@ -425,6 +426,16 @@ def validate_inputs(
             raise ValueError(
                 f"""No data threshold must be between 0 and 1 or None, 
                 got {no_data_threshold}"""
+            )
+    if tile_observation_target is not None:
+        if (
+            isinstance(tile_observation_target, bool)
+            or not isinstance(tile_observation_target, int)
+            or tile_observation_target < 1
+        ):
+            raise ValueError(
+                "tile_observation_target must be a positive integer or None, "
+                f"got {tile_observation_target}"
             )
     valid_bands = [
         "AOT",
