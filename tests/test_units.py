@@ -1,6 +1,8 @@
+import logging
 import sys
 import threading
 import warnings
+from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
@@ -15,8 +17,12 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from s2mosaic import mosaic
-from s2mosaic.bounds import pick_utm_epsg, reproject_bbox
-from s2mosaic.bounds import make_bounds_tile_reader
+from s2mosaic.bounds import (
+    _expand_bounds_for_ocm_context,
+    make_bounds_tile_reader,
+    pick_utm_epsg,
+    reproject_bbox,
+)
 from s2mosaic.helpers import validate_inputs
 from s2mosaic.frequent_coverage import (
     get_coverage,
@@ -539,7 +545,7 @@ class TestMosaicBoundsValidation:
         )
 
     def test_bounds_too_small_4326_rejected(self):
-        # 5m × 5m AOI at lat=-32: well below the 10m floor.
+        # 5m x 5m AOI at lat=-32: below both the side-length and area floors.
         delta_lon = 5 / (111_111 * np.cos(np.radians(32)))
         delta_lat = 5 / 111_111
         with pytest.raises(ValueError, match="at least 10m"):
@@ -551,17 +557,43 @@ class TestMosaicBoundsValidation:
                 (390_000.0, 6_460_000.0, 390_005.0, 6_460_005.0), bounds_crs=32750
             )
 
-    def test_bounds_too_large_4326_rejected(self):
-        # 5° × 5° AOI at lat=-32: width ~470km, height ~556km — well over 200km.
-        with pytest.raises(ValueError, match="at most 200km"):
-            self._call((110.0, -35.0, 115.0, -30.0))
-
-    def test_bounds_too_large_utm_rejected(self):
-        # 300km × 300km in UTM.
-        with pytest.raises(ValueError, match="at most 200km"):
+    def test_bounds_too_skinny_rejected_even_when_area_is_large_enough(self):
+        with pytest.raises(ValueError, match="at least 10m"):
             self._call(
-                (300_000.0, 6_300_000.0, 600_000.0, 6_600_000.0), bounds_crs=32750
+                (390_000.0, 6_460_000.0, 390_001.0, 6_460_200.0), bounds_crs=32750
             )
+
+    def test_bounds_large_4326_warns_but_is_accepted(self, caplog):
+        # 5 deg x 5 deg AOI at lat=-32: area is well over 200km x 200km.
+        with caplog.at_level(logging.WARNING, logger="s2mosaic.helpers"):
+            validate_inputs(
+                sort_method="valid_data",
+                mosaic_method="mean",
+                no_data_threshold=0.01,
+                required_bands=["B04"],
+                grid_id=None,
+                percentile_value=None,
+                bounds=(110.0, -35.0, 115.0, -30.0),
+                bounds_crs=4326,
+                resolution=10,
+            )
+        assert "larger than 200km x 200km" in caplog.text
+
+    def test_bounds_large_utm_warns_but_is_accepted(self, caplog):
+        # 300km x 300km in UTM.
+        with caplog.at_level(logging.WARNING, logger="s2mosaic.helpers"):
+            validate_inputs(
+                sort_method="valid_data",
+                mosaic_method="mean",
+                no_data_threshold=0.01,
+                required_bands=["B04"],
+                grid_id=None,
+                percentile_value=None,
+                bounds=(300_000.0, 6_300_000.0, 600_000.0, 6_600_000.0),
+                bounds_crs=32750,
+                resolution=10,
+            )
+        assert "larger than 200km x 200km" in caplog.text
 
     def test_typical_cross_tile_bounds_accepted(self):
         # ~80km × 80km, larger than a single S2 tile's overlap zone but well
@@ -577,6 +609,131 @@ class TestMosaicBoundsValidation:
             bounds_crs=4326,
             resolution=10,
         )
+
+
+class TestBoundsOcmContext:
+    def test_small_bounds_expand_to_minimum_ocm_context(self):
+        expanded, crop = _expand_bounds_for_ocm_context(
+            (390_000.0, 6_460_000.0, 390_200.0, 6_460_100.0),
+            resolution=20,
+        )
+
+        assert expanded == (
+            389_100.0,
+            6_459_040.0,
+            391_100.0,
+            6_461_040.0,
+        )
+        assert crop == (slice(47, 52), slice(45, 55))
+
+    def test_large_bounds_keep_requested_ocm_extent(self):
+        bounds = (390_000.0, 6_460_000.0, 393_000.0, 6_463_000.0)
+        expanded, crop = _expand_bounds_for_ocm_context(bounds, resolution=20)
+
+        assert expanded == bounds
+        assert crop == (slice(0, 150), slice(0, 150))
+
+    def test_bounds_pipeline_fetches_expanded_ocm_and_aggregates_cropped_mask(
+        self, monkeypatch
+    ):
+        import s2mosaic.bounds as bounds_mod
+
+        class FakeItem:
+            id = "fake-scene"
+            datetime = datetime(2023, 6, 1, tzinfo=timezone.utc)
+            properties = {
+                "s2:nodata_pixel_percentage": 0.0,
+                "s2:high_proba_clouds_percentage": 0.0,
+                "s2:cloud_shadow_percentage": 0.0,
+                "sat:relative_orbit": 1,
+            }
+
+        requested_bounds = (390_000.0, 6_460_000.0, 390_200.0, 6_460_100.0)
+        expected_expanded = (
+            389_100.0,
+            6_459_040.0,
+            391_100.0,
+            6_461_040.0,
+        )
+        fetch_calls = []
+        compute_input_shapes = []
+        aggregation_calls = []
+        expected_cropped_mask = np.array(
+            [
+                [1, 0, 0, 1, 0, 0, 1, 0, 0, 1],
+                [0, 1, 0, 0, 1, 0, 0, 1, 0, 0],
+                [0, 0, 1, 0, 0, 1, 0, 0, 1, 0],
+                [1, 1, 0, 0, 0, 1, 1, 0, 0, 0],
+                [0, 0, 1, 1, 0, 0, 0, 1, 1, 0],
+            ],
+            dtype=bool,
+        )
+
+        monkeypatch.setattr(
+            bounds_mod,
+            "_search_for_items_by_bbox",
+            lambda **_: [FakeItem()],
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "get_frequent_coverage_for_bbox",
+            lambda **_: np.ones((5, 10), dtype=bool),
+        )
+
+        def fake_fetch_one_ocm(item, bounds_target, target_crs, ocm_resolution):
+            fetch_calls.append((item.id, bounds_target, target_crs, ocm_resolution))
+            return np.zeros((3, 100, 100), dtype=np.uint16)
+
+        def fake_compute_masks_from_array(array, *, batch_size, inference_dtype):
+            compute_input_shapes.append(array.shape)
+            clear = np.zeros(array.shape[1:], dtype=bool)
+            valid = np.ones(array.shape[1:], dtype=bool)
+            clear[47:52, 45:55] = expected_cropped_mask
+            return clear, valid
+
+        def fake_make_bounds_tile_reader(**_):
+            return lambda scene_idx, band_idx, window: np.ones(
+                (window[2], window[3]), dtype=np.uint16
+            )
+
+        def fake_run_tile_aggregation(**kwargs):
+            aggregation_calls.append(kwargs)
+            return np.ones(
+                (kwargs["bands_count"], kwargs["height"], kwargs["width"]),
+                dtype=np.uint16,
+            )
+
+        monkeypatch.setattr(bounds_mod, "_fetch_one_ocm", fake_fetch_one_ocm)
+        monkeypatch.setattr(
+            bounds_mod, "compute_masks_from_array", fake_compute_masks_from_array
+        )
+        monkeypatch.setattr(
+            bounds_mod, "make_bounds_tile_reader", fake_make_bounds_tile_reader
+        )
+        monkeypatch.setattr(
+            bounds_mod, "run_tile_aggregation", fake_run_tile_aggregation
+        )
+
+        arr, profile = bounds_mod.run_bounds_pipeline(
+            bounds=requested_bounds,
+            bounds_crs=32750,
+            target_crs=32750,
+            resolution=20,
+            start_year=2023,
+            duration_days=1,
+            required_bands=["B04"],
+            cloud_mask="OCM",
+        )
+
+        assert fetch_calls == [("fake-scene", expected_expanded, 32750, 20)]
+        assert compute_input_shapes == [(3, 100, 100)]
+        assert arr.shape == (1, 5, 10)
+        assert profile["width"] == 10
+        assert profile["height"] == 5
+
+        mask = aggregation_calls[0]["masks"][0]
+        np.testing.assert_array_equal(mask, expected_cropped_mask)
+        assert aggregation_calls[0]["coverage_mask"].shape == (5, 10)
 
 
 class _FakeItem:

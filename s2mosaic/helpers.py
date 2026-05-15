@@ -322,8 +322,9 @@ def normalize_mosaic_inputs(
     )
 
 
+BOUNDS_MIN_AREA_M2 = 100
 BOUNDS_MIN_DIM_M = 10
-BOUNDS_MAX_DIM_M = 200_000
+BOUNDS_LARGE_AREA_WARNING_M2 = 200_000 * 200_000
 
 
 def validate_inputs(
@@ -384,11 +385,21 @@ def validate_inputs(
                 f"{BOUNDS_MIN_DIM_M}m, got width={width_m:.2f}m "
                 f"height={height_m:.2f}m"
             )
-        if width_m > BOUNDS_MAX_DIM_M or height_m > BOUNDS_MAX_DIM_M:
+        area_m2 = width_m * height_m
+        if area_m2 < BOUNDS_MIN_AREA_M2:
             raise ValueError(
-                f"Invalid bounds: width and height must each be at most "
-                f"{BOUNDS_MAX_DIM_M / 1000:.0f}km, got "
-                f"width={width_m / 1000:.2f}km height={height_m / 1000:.2f}km"
+                f"Invalid bounds: area must be at least {BOUNDS_MIN_AREA_M2} "
+                f"square metres, got area={area_m2:.2f}m^2 "
+                f"(width={width_m:.2f}m height={height_m:.2f}m)"
+            )
+        if area_m2 > BOUNDS_LARGE_AREA_WARNING_M2:
+            logger.warning(
+                "Bounds area is larger than 200km x 200km; this may require "
+                "substantial time, memory, and network I/O "
+                "(area=%.2fkm^2 width=%.2fkm height=%.2fkm)",
+                area_m2 / 1_000_000,
+                width_m / 1000,
+                height_m / 1000,
             )
     if resolution is not None and resolution <= 0:
         raise ValueError(f"resolution must be positive, got {resolution}")

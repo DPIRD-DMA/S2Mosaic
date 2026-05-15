@@ -2,12 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
-## [2.0.0] - Unreleased
+## [2.0.0b1] - 2026-05-15
 
 ### Added
 - `cloud_mask` parameter on `mosaic()` selects the cloud-mask provider: `"OCM"` (default, OmniCloudMask deep-learning model) or `"SCL"` (the L2A Scene Classification Layer that ships with each scene). SCL is much cheaper — useful on CPU-only machines and for bulk processing — at the cost of accuracy.
 - Bounds mode: pass `bounds=(minx, miny, maxx, maxy)` (with optional `bounds_crs` / `target_crs`) to mosaic an arbitrary rectangle, including AOIs that intersect Sentinel-2 tiles in different UTM zone projections — each scene is streamed through a rasterio `WarpedVRT` onto a common UTM grid.
-- Bounds validation: rejects longitudes outside ±180 or latitudes outside ±90 when `bounds_crs=4326` (catches most lat/lon axis swaps), and rejects bboxes whose width or height falls outside the 10m–200km range.
+- Bounds validation: rejects longitudes outside ±180 or latitudes outside ±90 when `bounds_crs=4326` (catches most lat/lon axis swaps), rejects bboxes smaller than 100 square metres or with either side shorter than 10m, and logs a warning for AOIs larger than 200km × 200km without blocking them.
+- Small bounds-mode AOIs using `cloud_mask="OCM"` are internally padded to at least 100×100 OCM pixels (20m+ resolution) before inference, then clipped back to the requested bounds so OmniCloudMask has enough spatial context without changing the output extent.
 - Pre-commit hooks (`ruff-check`, `ruff-format`, `mypy`) and a pre-push `pytest` hook.
 - GitHub Actions CI running lint, type-check, and tests on push and PR.
 - `@overload`s on `mosaic()` so the return type narrows to `Tuple[ndarray, dict]` when `output_dir` is omitted and to `Path` when it is set.

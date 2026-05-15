@@ -121,6 +121,7 @@ def _search_for_items_by_bbox(
 
 
 _OCM_BANDS: Tuple[str, str, str] = ("B04", "B03", "B8A")
+_OCM_MIN_CONTEXT_PIXELS = 100
 
 
 def _target_grid(
@@ -133,6 +134,44 @@ def _target_grid(
     transform = Affine(resolution, 0, minx, 0, -resolution, maxy)
     target_crs_obj = CRS.from_epsg(target_crs)
     return transform, width, height, target_crs_obj
+
+
+def _grid_shape_for_bounds(bounds_target: Bbox, resolution: int) -> Tuple[int, int]:
+    """Return (width, height), keeping tiny valid bounds at least one pixel."""
+    minx, miny, maxx, maxy = bounds_target
+    width = max(1, int(round((maxx - minx) / resolution)))
+    height = max(1, int(round((maxy - miny) / resolution)))
+    return width, height
+
+
+def _expand_bounds_for_ocm_context(
+    bounds_target: Bbox, resolution: int, min_pixels: int = _OCM_MIN_CONTEXT_PIXELS
+) -> Tuple[Bbox, Tuple[slice, slice]]:
+    """Pad OCM reads to at least ``min_pixels`` each way and return AOI crop.
+
+    The expanded bounds stay aligned to the requested mask grid. The returned
+    slices crop an expanded OCM prediction back to the originally requested
+    bounds at ``resolution``.
+    """
+    req_w, req_h = _grid_shape_for_bounds(bounds_target, resolution)
+    expanded_w = max(req_w, min_pixels)
+    expanded_h = max(req_h, min_pixels)
+
+    pad_x = expanded_w - req_w
+    pad_y = expanded_h - req_h
+    left = pad_x // 2
+    right = pad_x - left
+    top = pad_y // 2
+    bottom = pad_y - top
+
+    minx, miny, maxx, maxy = bounds_target
+    expanded_bounds = (
+        minx - left * resolution,
+        miny - bottom * resolution,
+        maxx + right * resolution,
+        maxy + top * resolution,
+    )
+    return expanded_bounds, (slice(top, top + req_h), slice(left, left + req_w))
 
 
 def _materialise_bounds_band(
@@ -430,8 +469,8 @@ def run_bounds_pipeline(
 
     Args:
         bounds: ``(minx, miny, maxx, maxy)`` in ``bounds_crs`` units. Validated
-            for orientation, size (10m–200km per side), and (for EPSG:4326) lon/lat
-            range.
+            for orientation, minimum area, and (for EPSG:4326) lon/lat range;
+            very large AOIs emit a warning but are not rejected.
         start_year, start_month, start_day, duration_years, duration_months,
             duration_days: Date window for the STAC search (start inclusive,
             end exclusive).
@@ -576,10 +615,16 @@ def run_bounds_pipeline(
 
     # Each per-scene fetch via WarpedVRT snaps to exactly this transform /
     # width / height, so all scenes share the same (h, w) without us
-    # materialising them.
-    mask_minx, mask_miny, mask_maxx, mask_maxy = bounds_target
-    mask_w = int(round((mask_maxx - mask_minx) / mask_resolution))
-    mask_h = int(round((mask_maxy - mask_miny) / mask_resolution))
+    # materialising them. OCM gets an expanded read if needed so the model sees
+    # at least 100 x 100 pixels of spatial context; predictions are cropped
+    # back to the requested bounds before scene-selection logic uses them.
+    mask_w, mask_h = _grid_shape_for_bounds(bounds_target, mask_resolution)
+    ocm_bounds_target = bounds_target
+    ocm_crop: Optional[Tuple[slice, slice]] = None
+    if cloud_mask == CLOUD_MASK_OCM:
+        ocm_bounds_target, ocm_crop = _expand_bounds_for_ocm_context(
+            bounds_target, mask_resolution
+        )
     n_time = len(items_list)
 
     # Coverage mask at mask resolution — used for skip decisions.
@@ -627,7 +672,7 @@ def run_bounds_pipeline(
             else:
                 ocm_scene = _fetch_one_ocm(
                     items_list[i],
-                    bounds_target,
+                    ocm_bounds_target,
                     target_crs,
                     mask_resolution,
                 )
@@ -649,6 +694,9 @@ def run_bounds_pipeline(
                 inference_dtype=ocm_inference_dtype,
             )
             del ocm_scene
+            if ocm_crop is not None:
+                clear = clear[ocm_crop]
+                valid = valid[ocm_crop]
         combo = clear & valid
 
         if mosaic_method == MOSAIC_FIRST:
