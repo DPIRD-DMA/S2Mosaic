@@ -1,4 +1,6 @@
 import sys
+import threading
+import warnings
 from pathlib import Path
 
 import cv2
@@ -28,7 +30,9 @@ from s2mosaic.masking import (
 )
 from s2mosaic.mosaic_core import (
     _HandleCache,
+    _nanquantile_axis0,
     _read_with_retry,
+    _warm_nanquantile_axis0,
     _write_tiled_copy,
     run_tile_aggregation,
     should_prewarm_sources,
@@ -286,6 +290,42 @@ class TestRunTileAggregation:
 
         np.testing.assert_allclose(out, 15.0)
 
+    def test_percentile_default_runs_reads_on_main_thread(self):
+        thread_names = []
+        scenes = np.stack(
+            [
+                np.full((1, self.H, self.W), 10, dtype=np.uint16),
+                np.full((1, self.H, self.W), 30, dtype=np.uint16),
+            ],
+            axis=0,
+        )
+        masks = [
+            np.ones((self.H, self.W), dtype=bool),
+            np.ones((self.H, self.W), dtype=bool),
+        ]
+
+        def read_fn(scene_idx, band_idx, spec):
+            thread_names.append(threading.current_thread().name)
+            r, c, h, w = spec
+            return scenes[scene_idx, band_idx, r : r + h, c : c + w]
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=read_fn,
+            bands_count=1,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            no_data_threshold=None,
+            mosaic_method="percentile",
+            percentile_value=50.0,
+            tile_size=3,
+            tile_workers=None,
+        )
+
+        assert set(thread_names) == {"MainThread"}
+        np.testing.assert_allclose(out, 20.0)
+
     def test_empty_coverage_tile_does_not_read_sources(self):
         reads = {"n": 0}
 
@@ -338,6 +378,69 @@ class TestRunTileAggregation:
 
         assert reads == [0]
         np.testing.assert_array_equal(out, np.ones((1, self.H, self.W)))
+
+
+class TestNanquantileAxis0:
+    """Custom Numba percentile reducer must match NumPy nanquantile semantics."""
+
+    def test_warm_compile_runs_before_threaded_aggregation(self):
+        _warm_nanquantile_axis0()
+        assert _nanquantile_axis0.signatures
+
+    @staticmethod
+    def _assert_matches_numpy(stack: np.ndarray, q: float):
+        got = _nanquantile_axis0(stack.astype(np.float32), q)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="All-NaN slice encountered")
+            expected = np.nanquantile(stack, q, axis=0).astype(np.float32)
+        np.testing.assert_allclose(got, expected, rtol=0, atol=1e-3, equal_nan=True)
+        got_uint16 = np.nan_to_num(got, nan=0.0).astype(np.uint16)
+        expected_uint16 = np.nan_to_num(expected, nan=0.0).astype(np.uint16)
+        assert np.abs(got_uint16.astype(int) - expected_uint16.astype(int)).max() <= 1
+
+    @pytest.mark.parametrize("q", [0.0, 0.1, 0.25, 0.5, 0.9, 1.0])
+    def test_random_sparse_nan_stacks(self, q):
+        rng = np.random.default_rng(42)
+        for scenes, bands, h, w, valid_fraction in [
+            (1, 1, 3, 4, 0.7),
+            (2, 3, 5, 4, 0.5),
+            (5, 2, 4, 6, 0.8),
+            (17, 3, 5, 7, 0.35),
+        ]:
+            stack = rng.integers(
+                0, 12000, size=(scenes, bands, h, w), dtype=np.uint16
+            ).astype(np.float32)
+            valid = rng.random((scenes, bands, h, w)) < valid_fraction
+            stack[~valid] = np.nan
+            self._assert_matches_numpy(stack, q)
+
+    @pytest.mark.parametrize("q", [0.0, 0.5, 1.0])
+    def test_all_nan_stack(self, q):
+        stack = np.full((4, 2, 3, 5), np.nan, dtype=np.float32)
+        self._assert_matches_numpy(stack, q)
+
+    @pytest.mark.parametrize("q", [0.1, 0.5, 0.9])
+    def test_single_valid_value_among_nans(self, q):
+        stack = np.full((6, 2, 3, 4), np.nan, dtype=np.float32)
+        stack[3] = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+        self._assert_matches_numpy(stack, q)
+
+    @pytest.mark.parametrize("q", [0.1, 0.25, 0.5, 0.75, 0.9])
+    def test_interpolation_matches_numpy(self, q):
+        base = np.array([0, 10, 20, 40, 80], dtype=np.float32)
+        stack = np.broadcast_to(base[:, None, None, None], (5, 1, 3, 4)).copy()
+        self._assert_matches_numpy(stack, q)
+
+    def test_preserves_band_pixel_independence(self):
+        stack = np.array(
+            [
+                [[[1, 100], [np.nan, 4]], [[10, np.nan], [30, 40]]],
+                [[[3, np.nan], [5, 6]], [[20, 25], [np.nan, 60]]],
+                [[[7, 200], [9, np.nan]], [[np.nan, 35], [50, 80]]],
+            ],
+            dtype=np.float32,
+        )
+        self._assert_matches_numpy(stack, 0.5)
 
 
 class TestReprojectBbox:

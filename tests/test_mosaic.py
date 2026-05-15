@@ -583,6 +583,32 @@ class TestMosaicBoundsEndToEnd:
         )
         self._assert_basic_geotiff(arr, profile, expect_bands=1, expect_dtype=np.uint16)
 
+    def test_percentile_ordering_25_vs_75(self):
+        """Same stack: per-pixel p75 should be >= p25 wherever both have data."""
+        kw = dict(
+            bounds=self.AOI_SMALL,
+            start_year=2023,
+            start_month=6,
+            start_day=1,
+            duration_months=2,
+            required_bands=["B04"],
+            mosaic_method="percentile",
+            additional_query=self.QUERY,
+        )
+
+        p25, profile25 = mosaic(**kw, percentile_value=25)
+        p75, profile75 = mosaic(**kw, percentile_value=75)
+
+        self._assert_basic_geotiff(
+            p25, profile25, expect_bands=1, expect_dtype=np.uint16
+        )
+        self._assert_basic_geotiff(
+            p75, profile75, expect_bands=1, expect_dtype=np.uint16
+        )
+        valid = (p25 > 0) & (p75 > 0)
+        assert valid.any()
+        assert np.all(p75[valid] >= p25[valid])
+
     # --- Sort methods ---
     @pytest.mark.parametrize("sort", ["valid_data", "oldest", "newest"])
     def test_sort_methods(self, sort):

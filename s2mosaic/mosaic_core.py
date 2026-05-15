@@ -33,14 +33,14 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
 import planetary_computer
 import rasterio as rio
+from numba import njit, prange
 from rasterio.errors import RasterioIOError
-from numbagg import nanquantile
 from rasterio.enums import Resampling
 from rasterio.windows import Window
 
@@ -217,18 +217,6 @@ def _materialise_grid_band(
     return write
 
 
-def _pin_numba_threads(n: int) -> None:
-    """Cap numba's parallel pool. Called once on the main thread to prevent
-    the worker-side corruption noted in the project memory.
-    """
-    try:
-        from numba import set_num_threads
-
-        set_num_threads(max(1, n))
-    except Exception:
-        pass
-
-
 def _compute_one_scene_mask(
     item: Any,
     cloud_mask: str,
@@ -375,6 +363,72 @@ def _finalise_tile(arr: np.ndarray, out_dtype: np.dtype) -> np.ndarray:
     return arr.astype(out_dtype, copy=False)
 
 
+@njit(parallel=True, cache=True)
+def _nanquantile_axis0(stack: np.ndarray, q: float) -> np.ndarray:
+    """NaN-skipping quantile over stack axis 0.
+
+    ``stack`` shape is ``(scene, band, height, width)``. This is intentionally
+    specialised to the tile aggregation hot path: scene counts are small, so a
+    per-pixel insertion sort avoids allocations and is faster than a generic
+    quantile implementation.
+    """
+    n_scenes, n_bands, height, width = stack.shape
+    out = np.empty((n_bands, height, width), dtype=np.float32)
+    total = n_bands * height * width
+
+    for idx in prange(total):
+        values = np.empty(n_scenes, dtype=np.float32)
+        band = idx // (height * width)
+        rem = idx - band * height * width
+        row = rem // width
+        col = rem - row * width
+
+        n_valid = 0
+        for scene_idx in range(n_scenes):
+            value = stack[scene_idx, band, row, col]
+            if not np.isnan(value):
+                values[n_valid] = value
+                n_valid += 1
+
+        if n_valid == 0:
+            out[band, row, col] = np.nan
+        elif n_valid == 1:
+            out[band, row, col] = values[0]
+        else:
+            for i in range(1, n_valid):
+                key = values[i]
+                j = i - 1
+                while j >= 0 and values[j] > key:
+                    values[j + 1] = values[j]
+                    j -= 1
+                values[j + 1] = key
+
+            q32 = np.float32(q)
+            pos = q32 * np.float32(n_valid - 1)
+            lo = int(np.floor(pos))
+            hi = int(np.ceil(pos))
+            if lo == hi:
+                out[band, row, col] = values[lo]
+            else:
+                frac = pos - lo
+                out[band, row, col] = values[lo] + (values[hi] - values[lo]) * frac
+
+    return out
+
+
+def _warm_nanquantile_axis0() -> None:
+    """Compile the Numba percentile kernel on the main thread.
+
+    The tile workers call this kernel concurrently. Letting the first call
+    happen inside the worker pool can make multiple threads enter Numba's
+    compilation path at once, which is fragile on macOS. A tiny warm call here
+    pays the compile cost before the pool starts and keeps workers on the
+    already-compiled execution path.
+    """
+    sample = np.array([[[[0.0]]], [[[1.0]]]], dtype=np.float32)
+    _nanquantile_axis0(sample, 0.5)
+
+
 def _copy_single_scene_tile(
     spec: Tuple[int, int, int, int],
     mask_tile: np.ndarray,
@@ -446,7 +500,7 @@ def tile_percentile(
             stack[k, j].fill(np.nan)
             np.copyto(stack[k, j], data, where=mask_tile, casting="unsafe")
 
-    res = nanquantile(stack, percentile_value / 100.0, axis=0)
+    res = _nanquantile_axis0(stack, percentile_value / 100.0)
     res = np.nan_to_num(res, nan=0.0)
     return spec, _finalise_tile(res, out_dtype)
 
@@ -574,11 +628,11 @@ def run_tile_aggregation(
     """
     out = np.zeros((bands_count, height, width), dtype=out_dtype)
     specs = tile_specs_for(height, width, tile_size)
-    n_workers = tile_workers or os.cpu_count() or 8
 
     if mosaic_method == MOSAIC_PERCENTILE:
-        _pin_numba_threads(1)
+        _warm_nanquantile_axis0()
         pv = percentile_value if percentile_value is not None else 50.0
+        n_workers = tile_workers if tile_workers is not None else 1
 
         def worker_fn(
             s: Tuple[int, int, int, int],
@@ -595,6 +649,7 @@ def run_tile_aggregation(
             )
 
     elif mosaic_method == MOSAIC_MEAN:
+        n_workers = tile_workers or os.cpu_count() or 8
 
         def worker_fn(
             s: Tuple[int, int, int, int],
@@ -610,6 +665,7 @@ def run_tile_aggregation(
             )
 
     elif mosaic_method == MOSAIC_FIRST:
+        n_workers = tile_workers or os.cpu_count() or 8
 
         def worker_fn(
             s: Tuple[int, int, int, int],
@@ -629,13 +685,22 @@ def run_tile_aggregation(
 
     completed = 0
     log_every = max(1, len(specs) // 10)
-    with ThreadPoolExecutor(max_workers=n_workers) as ex:
-        for spec, tile_data in ex.map(worker_fn, specs):
+    tile_iter: Iterator[Tuple[Tuple[int, int, int, int], np.ndarray]]
+    if n_workers <= 1:
+        tile_iter = map(worker_fn, specs)
+    else:
+        ex = ThreadPoolExecutor(max_workers=n_workers)
+        tile_iter = ex.map(worker_fn, specs)
+    try:
+        for spec, tile_data in tile_iter:
             r, c, h, w = spec
             out[:, r : r + h, c : c + w] = tile_data
             completed += 1
             if completed % log_every == 0 or completed == len(specs):
                 logger.info("Phase 2: %d/%d tiles done", completed, len(specs))
+    finally:
+        if n_workers > 1:
+            ex.shutdown(wait=True)
     return out
 
 
