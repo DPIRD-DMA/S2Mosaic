@@ -58,7 +58,7 @@ def pickle_cache(prefix: str, key: str, compute: Callable[[], T]) -> T:
     path = DEBUG_CACHE_DIR / f"{prefix}_{digest}.pkl"
     if path.exists():
         with open(path, "rb") as f:
-            return pickle.load(f)  # type: ignore[no-any-return]
+            return pickle.load(f)  # type: ignore[no-any-return, unused-ignore]
     result = compute()
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:

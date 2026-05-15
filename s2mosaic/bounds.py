@@ -289,7 +289,7 @@ def make_bounds_tile_reader(
     ) -> npt.NDArray[Any]:
         r, c, th, tw = spec
         src = _get_source(scene_idx, band_idx)
-        return src.read(href_band_indices[band_idx], window=Window(c, r, tw, th))  # type: ignore[no-any-return]
+        return src.read(href_band_indices[band_idx], window=Window(c, r, tw, th))  # type: ignore[no-any-return, unused-ignore]
 
     return read_fn
 
@@ -313,7 +313,7 @@ def _read_warpvrt(
             height=height,
             resampling=rio_resampling,
         ) as vrt:
-            return vrt.read(indices)  # type: ignore[no-any-return]
+            return vrt.read(indices)  # type: ignore[no-any-return, unused-ignore]
 
 
 def _fetch_one_scl_key(
@@ -386,7 +386,7 @@ def _fetch_one_ocm(
 
     with ThreadPoolExecutor(max_workers=len(_OCM_BANDS)) as executor:
         bands = list(executor.map(_read_band, _OCM_BANDS))
-    return np.stack(bands, axis=0).astype(np.uint16)  # type: ignore[no-any-return]
+    return np.stack(bands, axis=0).astype(np.uint16)  # type: ignore[no-any-return, unused-ignore]
 
 
 def run_bounds_pipeline(

@@ -39,7 +39,7 @@ def get_valid_mask(
     # create mask to remove pixels with no data, add dilation to remove edge pixels
     no_data = (bands.sum(axis=0) == 0).astype(np.uint8)
     no_data = _dilate_no_data(no_data, dilation_count)
-    return no_data == 0  # type: ignore[no-any-return]
+    return no_data == 0  # type: ignore[no-any-return, unused-ignore]
 
 
 def compute_masks_from_scl(

@@ -56,7 +56,7 @@ def get_raster_coverage(
         transform=Affine(resolution, 0, x_min, 0, -resolution, y_max),
         merge_alg=MergeAlg.add,
     )
-    return raster  # type: ignore[no-any-return]
+    return raster  # type: ignore[no-any-return, unused-ignore]
 
 
 def get_frequent_coverage(
@@ -95,7 +95,7 @@ def get_frequent_coverage(
     # Expand the mask to include nearby pixels, this grows the no data areas by 4 pixels
     kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
     dilated = cv2.dilate((~frequent_data_mask).astype(np.uint8), kernel, iterations=4)
-    return dilated == 0  # type: ignore[no-any-return]
+    return dilated == 0  # type: ignore[no-any-return, unused-ignore]
 
 
 def get_frequent_coverage_for_bbox(
@@ -138,4 +138,4 @@ def get_frequent_coverage_for_bbox(
 
     kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
     dilated = cv2.dilate((~frequent_data_mask).astype(np.uint8), kernel, iterations=4)
-    return dilated == 0  # type: ignore[no-any-return]
+    return dilated == 0  # type: ignore[no-any-return, unused-ignore]

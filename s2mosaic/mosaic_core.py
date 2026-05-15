@@ -138,7 +138,7 @@ def _read_with_retry(
     last_error: RasterioIOError | None = None
     for attempt in range(attempts):
         try:
-            return src.read(window=window, out_shape=out_shape, resampling=resampling)  # type: ignore[no-any-return]
+            return src.read(window=window, out_shape=out_shape, resampling=resampling)  # type: ignore[no-any-return, unused-ignore]
         except RasterioIOError as exc:
             last_error = exc
             if attempt == attempts - 1:
@@ -259,7 +259,7 @@ def _build_output_profile(
         profile["transform"] = src.transform * rio.Affine.scale(scale_x, scale_y)
         profile["width"] = s2_scene_size
         profile["height"] = s2_scene_size
-    return profile  # type: ignore[no-any-return]
+    return profile  # type: ignore[no-any-return, unused-ignore]
 
 
 class _HandleCache:
@@ -306,7 +306,7 @@ def _read_tile_window(
         width=w * scale_x,
         height=h * scale_y,
     )
-    return src.read(  # type: ignore[no-any-return]
+    return src.read(  # type: ignore[no-any-return, unused-ignore]
         raster_band_idx,
         window=src_window,
         out_shape=(h, w),
@@ -362,8 +362,8 @@ def _finalise_tile(
     """
     if np.issubdtype(out_dtype, np.unsignedinteger):
         info = np.iinfo(out_dtype)
-        return np.clip(arr, info.min, info.max).astype(out_dtype, copy=False)
-    return arr.astype(out_dtype, copy=False)
+        return np.clip(arr, info.min, info.max).astype(out_dtype, copy=False)  # type: ignore[no-any-return, unused-ignore]
+    return arr.astype(out_dtype, copy=False)  # type: ignore[no-any-return, unused-ignore]
 
 
 @njit(parallel=True, cache=True)  # type: ignore[untyped-decorator]
