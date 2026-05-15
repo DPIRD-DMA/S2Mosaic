@@ -70,7 +70,9 @@ array, rio_profile = mosaic(
 print(f"Mosaic array shape: {array.shape}")
 ```
 
-To save a GeoTIFF instead of returning the array, pass `output_dir=Path("output")` — the function then returns the file path.
+To save a GeoTIFF instead of returning the array, pass `output_dir=Path("output")`
+for an auto-generated filename, or `output_path=Path("output/custom.tif")` to
+choose the exact filename. The function then returns the file path.
 
 ## Quick start — arbitrary bounding box
 
@@ -113,20 +115,35 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 - `start_year` (required), `start_month` (`1`), `start_day` (`1`): start of the scene-search window.
 - `duration_years` (`0`), `duration_months` (`0`), `duration_days` (`0`): length of the search window. Inclusive of `start_*`, exclusive of the end.
 
+**Output content**
+
+- `required_bands` (`["B04", "B03", "B02", "B08"]`): bands to include. Use `["visual"]` for the 3-band uint8 TCI RGB composite (mutually exclusive with other bands).
+- `mosaic_method` (`"mean"`): `"mean"`, `"first"`, `"percentile"` (with `percentile_value`), or `"median"` (shortcut for percentile 50).
+- `percentile_value` (`None`): percentile to compute when `mosaic_method="percentile"` (0–100).
+
+**Output destination**
+
+- `output_dir` (`None`): if set, writes a GeoTIFF to this directory using an auto-generated filename and returns the file path. Mutually exclusive with `output_path`.
+- `output_path` (`None`): if set, writes a GeoTIFF to this exact `.tif`/`.tiff` path and returns it. Mutually exclusive with `output_dir`.
+- `overwrite` (`True`): when exporting and the target path exists, controls whether to overwrite it.
+
+**Output grid**
+
+- `target_crs` (`None`): EPSG of the output. In bounds mode, auto-picked from the AOI centroid (UTM zone) if omitted. Ignored in grid mode.
+- `resolution` (`10`): output pixel size in metres. At lower resolutions rasterio reads from COG overviews — much less data over the wire.
+- `resampling_method` (`"nearest"`): how the source is resampled to the output grid. Also accepts `"bilinear"`, `"cubic"`, `"average"`, `"lanczos"`.
+
 **Scene selection**
+
+- `additional_query` (`{"eo:cloud_cover": {"lt": 100}}`): extra STAC query filters, e.g. `{"eo:cloud_cover": {"lt": 80}}`.
+- `no_data_threshold` (`0.01`): early-stop once the no-data fraction is below this. Set to `None` to process every scene.
+- `coverage_threshold_pct` (`0.1`): drop scene-edge pixels covered by fewer than this fraction of overlapping scenes. Set to `None` to keep everything.
+- `ignore_duplicate_items` (`True`): drop duplicate acquisitions, keeping the latest processing baseline.
+
+**Scene ordering**
 
 - `sort_method` (`"valid_data"`): scene ordering — `"valid_data"`, `"oldest"`, or `"newest"`.
 - `sort_function` (`None`): custom callable `fn(items: pd.DataFrame) -> pd.DataFrame`. Overrides `sort_method` when set.
-- `additional_query` (`{"eo:cloud_cover": {"lt": 100}}`): extra STAC query filters, e.g. `{"eo:cloud_cover": {"lt": 80}}`.
-- `ignore_duplicate_items` (`True`): drop duplicate acquisitions, keeping the latest processing baseline.
-- `coverage_threshold_pct` (`0.1`): drop scene-edge pixels covered by fewer than this fraction of overlapping scenes. Set to `None` to keep everything.
-
-**Mosaic composition**
-
-- `mosaic_method` (`"mean"`): `"mean"`, `"first"`, `"percentile"` (with `percentile_value`), or `"median"` (shortcut for percentile 50).
-- `percentile_value` (`None`): percentile to compute when `mosaic_method="percentile"` (0–100).
-- `required_bands` (`["B04", "B03", "B02", "B08"]`): bands to include. Use `["visual"]` for the 3-band uint8 TCI RGB composite (mutually exclusive with other bands).
-- `no_data_threshold` (`0.01`): early-stop once the no-data fraction is below this. Set to `None` to process every scene.
 
 **Cloud masking**
 
@@ -134,17 +151,9 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 - `ocm_batch_size` (`1`): OCM inference batch size. Only used with `cloud_mask="OCM"`.
 - `ocm_inference_dtype` (`"bf16"`): OCM inference dtype. Only used with `cloud_mask="OCM"`.
 
-**Output grid (both modes)**
-
-- `output_dir` (`None`): if set, writes a GeoTIFF to this directory and returns the file path. If omitted, returns `(array, profile)`.
-- `overwrite` (`True`): when `output_dir` is set and the target path exists, controls whether to overwrite it.
-- `resolution` (`10`): output pixel size in metres. At lower resolutions rasterio reads from COG overviews — much less data over the wire.
-- `resampling_method` (`"nearest"`): how the source is resampled to the output grid. Also accepts `"bilinear"`, `"cubic"`, `"average"`, `"lanczos"`.
-
 **Bounds-mode-specific options**
 
 - `bounds_crs` (`4326`): EPSG of `bounds`.
-- `target_crs` (`None`): EPSG of the output. Auto-picked from the AOI centroid (UTM zone) if omitted.
 
 For more detailed information on these options and additional functionality, please refer to the function docstring in the source code.
 

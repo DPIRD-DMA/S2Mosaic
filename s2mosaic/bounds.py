@@ -40,10 +40,10 @@ from .helpers import (
     disk_cache,
     finalize_output,
     get_band_template,
-    get_output_path,
     get_rasterio_resampling,
     normalize_mosaic_inputs,
     pick_ocm_resolution,
+    resolve_export_path,
     validate_inputs,
     with_scene_retry,
 )
@@ -429,31 +429,33 @@ def _fetch_one_ocm(
 
 
 def run_bounds_pipeline(
+    *,
     bounds: Bbox,
-    start_year: int,
     bounds_crs: int = 4326,
-    target_crs: Optional[int] = None,
-    resolution: int = 10,
+    start_year: int,
     start_month: int = 1,
     start_day: int = 1,
-    output_dir: Optional[Union[Path, str]] = None,
-    sort_method: str = "valid_data",
-    sort_function: Optional[Callable[..., Any]] = None,
-    mosaic_method: str = "mean",
     duration_years: int = 0,
     duration_months: int = 0,
     duration_days: int = 0,
     required_bands: Optional[List[str]] = None,
-    no_data_threshold: Optional[float] = 0.01,
+    mosaic_method: str = "mean",
+    percentile_value: Optional[float] = None,
+    output_dir: Optional[Union[Path, str]] = None,
+    output_path: Optional[Union[Path, str]] = None,
     overwrite: bool = True,
+    target_crs: Optional[int] = None,
+    resolution: int = 10,
+    resampling_method: str = "nearest",
+    additional_query: Optional[Dict[str, Any]] = None,
+    no_data_threshold: Optional[float] = 0.01,
+    coverage_threshold_pct: Optional[float] = 0.1,
+    ignore_duplicate_items: bool = True,
+    sort_method: str = "valid_data",
+    sort_function: Optional[Callable[..., Any]] = None,
+    cloud_mask: str = CLOUD_MASK_OCM,
     ocm_batch_size: int = 1,
     ocm_inference_dtype: str = "bf16",
-    additional_query: Optional[Dict[str, Any]] = None,
-    percentile_value: Optional[float] = None,
-    ignore_duplicate_items: bool = True,
-    coverage_threshold_pct: Optional[float] = 0.1,
-    resampling_method: str = "nearest",
-    cloud_mask: str = CLOUD_MASK_OCM,
 ) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
     """Bounds-mode pipeline. Called from mosaic() when bounds is set.
 
@@ -471,39 +473,42 @@ def run_bounds_pipeline(
         bounds: ``(minx, miny, maxx, maxy)`` in ``bounds_crs`` units. Validated
             for orientation, minimum area, and (for EPSG:4326) lon/lat range;
             very large AOIs emit a warning but are not rejected.
+        bounds_crs: EPSG code of ``bounds``. Defaults to 4326 (lon/lat).
         start_year, start_month, start_day, duration_years, duration_months,
             duration_days: Date window for the STAC search (start inclusive,
             end exclusive).
-        bounds_crs: EPSG code of ``bounds``. Defaults to 4326 (lon/lat).
+        required_bands: Spectral bands to fetch (e.g. ``["B04", "B03", "B02"]``)
+            or ``["visual"]`` for the 3-band uint8 TCI asset.
+        mosaic_method, percentile_value: As for :func:`s2mosaic.mosaic`.
+        output_dir: Directory to write the GeoTIFF using an auto-generated
+            filename. Mutually exclusive with ``output_path``. If neither is
+            provided, returns the array + profile instead.
+        output_path: Full GeoTIFF path to write, including the filename.
+            Mutually exclusive with ``output_dir``.
+        overwrite: If ``False`` and the output file already exists, skip the
+            mosaic and return the existing path.
         target_crs: EPSG code of the output grid. If ``None``, auto-picked as
             the UTM zone containing the bbox centroid.
         resolution: Output pixel size in metres. Reads come from the nearest
             COG overview for non-native resolutions.
-        sort_method, sort_function, mosaic_method, percentile_value: As for
-            :func:`s2mosaic.mosaic`.
-        required_bands: Spectral bands to fetch (e.g. ``["B04", "B03", "B02"]``)
-            or ``["visual"]`` for the 3-band uint8 TCI asset.
+        resampling_method: How source COGs are resampled to ``target_crs``
+            / ``resolution`` during the WarpedVRT read.
+        additional_query: Extra STAC query filters
+            (e.g. ``{"eo:cloud_cover": {"lt": 50}}``).
         no_data_threshold: Stop early once the uncovered fraction within the
             coverage mask drops below this. For ``percentile``, the bounds
             mask scan still examines every usable scene, but per-tile user-band
             aggregation can stop once the tile is sufficiently covered.
         coverage_threshold_pct: Drop pixels covered by fewer than this fraction
             of overlapping scenes (scene-edge pixels). ``None`` disables.
-        ocm_batch_size, ocm_inference_dtype: Only used when ``cloud_mask="OCM"``.
-        additional_query: Extra STAC query filters
-            (e.g. ``{"eo:cloud_cover": {"lt": 50}}``).
         ignore_duplicate_items: Keep only the latest processing baseline per scene.
-        resampling_method: How source COGs are resampled to ``target_crs``
-            / ``resolution`` during the WarpedVRT read.
+        sort_method, sort_function: As for :func:`s2mosaic.mosaic`.
         cloud_mask: ``"OCM"`` (deep-learning, default) or ``"SCL"`` (L2A scene
             classification layer — cheaper, less accurate).
-        output_dir: Directory to write the GeoTIFF. If ``None``, returns the
-            array + profile instead.
-        overwrite: If ``False`` and the output file already exists, skip the
-            mosaic and return the existing path.
+        ocm_batch_size, ocm_inference_dtype: Only used when ``cloud_mask="OCM"``.
 
     Returns:
-        ``(array, profile)`` if ``output_dir`` is ``None``, otherwise the
+        ``(array, profile)`` if no export path is requested, otherwise the
         ``Path`` of the written GeoTIFF. ``array`` has shape
         ``(bands, height, width)`` and dtype ``uint8`` (visual) or ``uint16``.
 
@@ -568,17 +573,18 @@ def run_bounds_pipeline(
         duration_days,
     )
 
-    export_path: Optional[Path] = None
-    if output_dir:
-        export_path = get_output_path(
-            output_dir=output_dir,
-            start_date=start_date,
-            end_date=end_date,
-            sort_method=sort_method,
-            mosaic_method=mosaic_method,
-            required_bands=required_bands,
-            bounds=bounds_4326,
-        )
+    export_path = resolve_export_path(
+        output_dir=output_dir,
+        output_path=output_path,
+        start_date=start_date,
+        end_date=end_date,
+        sort_method=sort_method,
+        mosaic_method=mosaic_method,
+        required_bands=required_bands,
+        percentile_value=percentile_value,
+        bounds=bounds_4326,
+    )
+    if export_path is not None:
         if export_path.exists() and not overwrite:
             return export_path
 

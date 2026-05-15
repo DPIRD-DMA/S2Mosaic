@@ -2,7 +2,7 @@ import logging
 import sys
 import threading
 import warnings
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import cv2
@@ -23,7 +23,7 @@ from s2mosaic.bounds import (
     pick_utm_epsg,
     reproject_bbox,
 )
-from s2mosaic.helpers import validate_inputs
+from s2mosaic.helpers import get_output_path, resolve_export_path, validate_inputs
 from s2mosaic.frequent_coverage import (
     get_coverage,
     get_frequent_coverage_for_bbox,
@@ -609,6 +609,90 @@ class TestMosaicBoundsValidation:
             bounds_crs=4326,
             resolution=10,
         )
+
+
+class TestExportPaths:
+    def test_auto_filename_keeps_existing_mean_format(self, tmp_path):
+        path = get_output_path(
+            output_dir=tmp_path,
+            start_date=date(2023, 6, 1),
+            end_date=date(2023, 6, 8),
+            sort_method="oldest",
+            mosaic_method="mean",
+            required_bands=["B04", "B03", "B02"],
+            grid_id="50HMH",
+        )
+
+        assert path.name == (
+            "50HMH_2023-06-01_to_2023-06-08_oldest_mean_B04_B03_B02.tif"
+        )
+
+    def test_auto_percentile_filename_includes_percentile(self, tmp_path):
+        p25 = get_output_path(
+            output_dir=tmp_path,
+            start_date=date(2023, 6, 1),
+            end_date=date(2023, 8, 1),
+            sort_method="valid_data",
+            mosaic_method="percentile",
+            percentile_value=25,
+            required_bands=["B04"],
+            bounds=(115.8301, -31.9702, 115.9103, -31.9404),
+        )
+        p75 = get_output_path(
+            output_dir=tmp_path,
+            start_date=date(2023, 6, 1),
+            end_date=date(2023, 8, 1),
+            sort_method="valid_data",
+            mosaic_method="percentile",
+            percentile_value=75,
+            required_bands=["B04"],
+            bounds=(115.8301, -31.9702, 115.9103, -31.9404),
+        )
+
+        assert "_percentile_p25_" in p25.name
+        assert "_percentile_p75_" in p75.name
+        assert p25 != p75
+
+    def test_output_path_is_used_directly(self, tmp_path):
+        path = resolve_export_path(
+            output_dir=None,
+            output_path=tmp_path / "nested" / "custom.tif",
+            start_date=date(2023, 6, 1),
+            end_date=date(2023, 6, 8),
+            sort_method="oldest",
+            mosaic_method="mean",
+            required_bands=["B04"],
+            grid_id="50HMH",
+        )
+
+        assert path == tmp_path / "nested" / "custom.tif"
+        assert path.parent.exists()
+
+    def test_output_dir_and_output_path_are_mutually_exclusive(self, tmp_path):
+        with pytest.raises(ValueError, match="Only one of output_dir or output_path"):
+            resolve_export_path(
+                output_dir=tmp_path,
+                output_path=tmp_path / "custom.tif",
+                start_date=date(2023, 6, 1),
+                end_date=date(2023, 6, 8),
+                sort_method="oldest",
+                mosaic_method="mean",
+                required_bands=["B04"],
+                grid_id="50HMH",
+            )
+
+    def test_output_path_requires_tif_filename(self, tmp_path):
+        with pytest.raises(ValueError, match="must include a .tif or .tiff filename"):
+            resolve_export_path(
+                output_dir=None,
+                output_path=tmp_path / "custom",
+                start_date=date(2023, 6, 1),
+                end_date=date(2023, 6, 8),
+                sort_method="oldest",
+                mosaic_method="mean",
+                required_bands=["B04"],
+                grid_id="50HMH",
+            )
 
 
 class TestBoundsOcmContext:
@@ -1206,7 +1290,7 @@ class TestMosaicSharedParamsValidation:
 
     def test_grid_mode_rejects_invalid_band(self):
         with pytest.raises(ValueError, match="Invalid band"):
-            mosaic("50HMH", start_year=2023, required_bands=["FOO"])
+            mosaic(grid_id="50HMH", start_year=2023, required_bands=["FOO"])
 
     def test_bounds_mode_rejects_invalid_band(self):
         with pytest.raises(ValueError, match="Invalid band"):
@@ -1225,7 +1309,7 @@ class TestMosaicSharedParamsValidation:
 
     def test_grid_mode_rejects_invalid_resampling(self):
         with pytest.raises(ValueError, match="Invalid resampling method"):
-            mosaic("50HMH", start_year=2023, resampling_method="not_a_method")
+            mosaic(grid_id="50HMH", start_year=2023, resampling_method="not_a_method")
 
     def test_bounds_mode_rejects_invalid_resampling(self):
         with pytest.raises(ValueError, match="Invalid resampling method"):
@@ -1235,7 +1319,7 @@ class TestMosaicSharedParamsValidation:
 
     def test_grid_mode_rejects_invalid_cloud_mask(self):
         with pytest.raises(ValueError, match="Invalid cloud_mask"):
-            mosaic("50HMH", start_year=2023, cloud_mask="bogus")
+            mosaic(grid_id="50HMH", start_year=2023, cloud_mask="bogus")
 
     def test_bounds_mode_rejects_invalid_cloud_mask(self):
         with pytest.raises(ValueError, match="Invalid cloud_mask"):

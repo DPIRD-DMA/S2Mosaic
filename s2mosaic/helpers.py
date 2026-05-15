@@ -475,12 +475,17 @@ def get_output_path(
     sort_method: str,
     mosaic_method: str,
     required_bands: List[str],
+    percentile_value: Optional[float] = None,
     grid_id: Optional[str] = None,
     bounds: Optional[Tuple[float, float, float, float]] = None,
 ) -> Path:
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
     bands_str = "_".join(required_bands)
+    method_str = mosaic_method
+    if mosaic_method == MOSAIC_PERCENTILE and percentile_value is not None:
+        percentile_str = f"{percentile_value:g}".replace(".", "p")
+        method_str = f"{mosaic_method}_p{percentile_str}"
 
     if grid_id is not None:
         prefix = grid_id
@@ -493,8 +498,44 @@ def get_output_path(
 
     return output_dir / (
         f"{prefix}_{start_date.strftime('%Y-%m-%d')}_to_"
-        f"{end_date.strftime('%Y-%m-%d')}_{sort_method}_{mosaic_method}_"
+        f"{end_date.strftime('%Y-%m-%d')}_{sort_method}_{method_str}_"
         f"{bands_str}.tif"
+    )
+
+
+def resolve_export_path(
+    output_dir: Optional[Union[Path, str]],
+    output_path: Optional[Union[Path, str]],
+    start_date: date,
+    end_date: date,
+    sort_method: str,
+    mosaic_method: str,
+    required_bands: List[str],
+    percentile_value: Optional[float] = None,
+    grid_id: Optional[str] = None,
+    bounds: Optional[Tuple[float, float, float, float]] = None,
+) -> Optional[Path]:
+    """Resolve explicit or auto-generated GeoTIFF export path."""
+    if output_dir is not None and output_path is not None:
+        raise ValueError("Only one of output_dir or output_path can be provided")
+    if output_path is not None:
+        path = Path(output_path)
+        if path.suffix.lower() not in {".tif", ".tiff"}:
+            raise ValueError("output_path must include a .tif or .tiff filename")
+        path.parent.mkdir(exist_ok=True, parents=True)
+        return path
+    if output_dir is None:
+        return None
+    return get_output_path(
+        output_dir=output_dir,
+        start_date=start_date,
+        end_date=end_date,
+        sort_method=sort_method,
+        mosaic_method=mosaic_method,
+        required_bands=required_bands,
+        percentile_value=percentile_value,
+        grid_id=grid_id,
+        bounds=bounds,
     )
 
 

@@ -12,8 +12,8 @@ from .helpers import (
     define_dates,
     finalize_output,
     get_extent_from_grid_id,
-    get_output_path,
     normalize_mosaic_inputs,
+    resolve_export_path,
     validate_inputs,
 )
 from .mosaic_core import stream_mosaic_pipeline
@@ -24,96 +24,132 @@ logger = logging.getLogger(__name__)
 
 @overload
 def mosaic(
-    grid_id: Optional[str] = ...,
     *,
+    grid_id: Optional[str] = ...,
+    bounds: Optional[Bbox] = ...,
+    bounds_crs: int = ...,
     start_year: int,
     start_month: int = ...,
     start_day: int = ...,
-    output_dir: None = None,
-    sort_method: str = ...,
-    sort_function: Optional[Callable[..., Any]] = ...,
-    mosaic_method: str = ...,
     duration_years: int = ...,
     duration_months: int = ...,
     duration_days: int = ...,
     required_bands: Optional[List[str]] = ...,
-    no_data_threshold: Union[float, None] = ...,
-    overwrite: bool = ...,
-    ocm_batch_size: int = ...,
-    ocm_inference_dtype: str = ...,
-    additional_query: Optional[Dict[str, Any]] = ...,
+    mosaic_method: str = ...,
     percentile_value: Optional[float] = ...,
-    ignore_duplicate_items: bool = ...,
-    bounds: Optional[Bbox] = ...,
-    bounds_crs: int = ...,
+    output_dir: None = None,
+    output_path: None = None,
+    overwrite: bool = ...,
     target_crs: Optional[int] = ...,
     resolution: int = ...,
-    coverage_threshold_pct: Optional[float] = ...,
     resampling_method: str = ...,
+    additional_query: Optional[Dict[str, Any]] = ...,
+    no_data_threshold: Union[float, None] = ...,
+    coverage_threshold_pct: Optional[float] = ...,
+    ignore_duplicate_items: bool = ...,
+    sort_method: str = ...,
+    sort_function: Optional[Callable[..., Any]] = ...,
     cloud_mask: str = ...,
+    ocm_batch_size: int = ...,
+    ocm_inference_dtype: str = ...,
 ) -> Tuple[npt.NDArray[Any], Dict[str, Any]]: ...
 
 
 @overload
 def mosaic(
-    grid_id: Optional[str] = ...,
     *,
+    grid_id: Optional[str] = ...,
+    bounds: Optional[Bbox] = ...,
+    bounds_crs: int = ...,
     start_year: int,
     start_month: int = ...,
     start_day: int = ...,
-    output_dir: Union[Path, str],
-    sort_method: str = ...,
-    sort_function: Optional[Callable[..., Any]] = ...,
-    mosaic_method: str = ...,
     duration_years: int = ...,
     duration_months: int = ...,
     duration_days: int = ...,
     required_bands: Optional[List[str]] = ...,
-    no_data_threshold: Union[float, None] = ...,
-    overwrite: bool = ...,
-    ocm_batch_size: int = ...,
-    ocm_inference_dtype: str = ...,
-    additional_query: Optional[Dict[str, Any]] = ...,
+    mosaic_method: str = ...,
     percentile_value: Optional[float] = ...,
-    ignore_duplicate_items: bool = ...,
-    bounds: Optional[Bbox] = ...,
-    bounds_crs: int = ...,
+    output_dir: Union[Path, str],
+    output_path: None = None,
+    overwrite: bool = ...,
     target_crs: Optional[int] = ...,
     resolution: int = ...,
-    coverage_threshold_pct: Optional[float] = ...,
     resampling_method: str = ...,
+    additional_query: Optional[Dict[str, Any]] = ...,
+    no_data_threshold: Union[float, None] = ...,
+    coverage_threshold_pct: Optional[float] = ...,
+    ignore_duplicate_items: bool = ...,
+    sort_method: str = ...,
+    sort_function: Optional[Callable[..., Any]] = ...,
     cloud_mask: str = ...,
+    ocm_batch_size: int = ...,
+    ocm_inference_dtype: str = ...,
+) -> Path: ...
+
+
+@overload
+def mosaic(
+    *,
+    grid_id: Optional[str] = ...,
+    bounds: Optional[Bbox] = ...,
+    bounds_crs: int = ...,
+    start_year: int,
+    start_month: int = ...,
+    start_day: int = ...,
+    duration_years: int = ...,
+    duration_months: int = ...,
+    duration_days: int = ...,
+    required_bands: Optional[List[str]] = ...,
+    mosaic_method: str = ...,
+    percentile_value: Optional[float] = ...,
+    output_dir: None = None,
+    output_path: Union[Path, str],
+    overwrite: bool = ...,
+    target_crs: Optional[int] = ...,
+    resolution: int = ...,
+    resampling_method: str = ...,
+    additional_query: Optional[Dict[str, Any]] = ...,
+    no_data_threshold: Union[float, None] = ...,
+    coverage_threshold_pct: Optional[float] = ...,
+    ignore_duplicate_items: bool = ...,
+    sort_method: str = ...,
+    sort_function: Optional[Callable[..., Any]] = ...,
+    cloud_mask: str = ...,
+    ocm_batch_size: int = ...,
+    ocm_inference_dtype: str = ...,
 ) -> Path: ...
 
 
 def mosaic(
-    grid_id: Optional[str] = None,
     *,
+    grid_id: Optional[str] = None,
+    bounds: Optional[Bbox] = None,
+    bounds_crs: int = 4326,
     start_year: int,
     start_month: int = 1,
     start_day: int = 1,
-    output_dir: Optional[Union[Path, str]] = None,
-    sort_method: str = "valid_data",
-    sort_function: Optional[Callable[..., Any]] = None,
-    mosaic_method: str = "mean",
     duration_years: int = 0,
     duration_months: int = 0,
     duration_days: int = 0,
     required_bands: Optional[List[str]] = None,
-    no_data_threshold: Union[float, None] = 0.01,
-    overwrite: bool = True,
-    ocm_batch_size: int = 1,
-    ocm_inference_dtype: str = "bf16",
-    additional_query: Optional[Dict[str, Any]] = None,
+    mosaic_method: str = "mean",
     percentile_value: Optional[float] = None,
-    ignore_duplicate_items: bool = True,
-    bounds: Optional[Bbox] = None,
-    bounds_crs: int = 4326,
+    output_dir: Optional[Union[Path, str]] = None,
+    output_path: Optional[Union[Path, str]] = None,
+    overwrite: bool = True,
     target_crs: Optional[int] = None,
     resolution: int = 10,
-    coverage_threshold_pct: Optional[float] = 0.1,
     resampling_method: str = "nearest",
+    additional_query: Optional[Dict[str, Any]] = None,
+    no_data_threshold: Union[float, None] = 0.01,
+    coverage_threshold_pct: Optional[float] = 0.1,
+    ignore_duplicate_items: bool = True,
+    sort_method: str = "valid_data",
+    sort_function: Optional[Callable[..., Any]] = None,
     cloud_mask: str = "OCM",
+    ocm_batch_size: int = 1,
+    ocm_inference_dtype: str = "bf16",
 ) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
     """
     Create a Sentinel-2 mosaic.
@@ -134,47 +170,52 @@ def mosaic(
             Mutually exclusive with ``grid_id``.
         bounds_crs (int, optional): EPSG code of ``bounds``. Defaults to 4326.
             Only used in bounds mode.
-        target_crs (int, optional): EPSG code for the output grid. In bounds
-            mode, defaults to the UTM zone containing the AOI centroid. Ignored
-            in grid mode.
         start_year (int): The start year of the time range.
         start_month (int, optional): The start month of the time range. Defaults to 1 (January).
         start_day (int, optional): The start day of the time range. Defaults to 1.
-        output_dir (Optional[Union[Path, str]], optional): Directory to save the output GeoTIFF.
-            If None, the mosaic is not saved to disk and is returned instead. Defaults to None.
-        sort_method (str, optional): Method to sort scenes. Options are "valid_data", "oldest", or "newest". Defaults to "valid_data".
-        sort_function (Callable, optional): Custom sorting function. If provided, overrides sort_method.
-        mosaic_method (str, optional): Method to create the mosaic. Options are "mean", "first", "median" or "percentile". Defaults to "mean".
         duration_years (int, optional): Duration in years to add to the start date. Defaults to 0.
         duration_months (int, optional): Duration in months to add to the start date. Defaults to 0.
         duration_days (int, optional): Duration in days to add to the start date. Defaults to 0.
         required_bands (List[str], optional): List of required spectral bands.
             Defaults to ["B04", "B03", "B02", "B08"] (Red, Green, Blue, NIR).
-        no_data_threshold (float, optional): Threshold for no data values. Defaults to 0.01.
+        mosaic_method (str, optional): Method to create the mosaic. Options are "mean", "first", "median" or "percentile". Defaults to "mean".
+        percentile_value (Optional[float], optional): Percentile to calculate
+            when using ``mosaic_method="percentile"``. Must be between 0 and 100.
+        output_dir (Optional[Union[Path, str]], optional): Directory to save
+            the output GeoTIFF using an auto-generated filename. Mutually
+            exclusive with ``output_path``. If neither is provided, the mosaic
+            is returned instead. Defaults to None.
+        output_path (Optional[Union[Path, str]], optional): Full GeoTIFF path
+            to write, including the filename. Mutually exclusive with
+            ``output_dir``. Defaults to None.
         overwrite (bool, optional): Whether to overwrite existing output files. Defaults to True.
-        ocm_batch_size (int, optional): Batch size for OCM inference. Defaults to 1.
-        ocm_inference_dtype (str, optional): Data type for OCM inference. Defaults to "bf16".
-        additional_query (Dict[str, Any], optional): Additional query parameters for STAC API.
-            Defaults to {"eo:cloud_cover": {"lt": 100}}.
-        percentile_value (Optional[float], optional): If provided, calculates the specified percentile mosaic.
-            must be used with `mosaic_method='percentile'`. Defaults to None, can be a value between 0 and 100.
-        ignore_duplicate_items (bool, optional): Whether to remove duplicate scenes based on their IDs. Defaults to True.
+        target_crs (int, optional): EPSG code for the output grid. In bounds
+            mode, defaults to the UTM zone containing the AOI centroid. Ignored
+            in grid mode.
         resolution (int, optional): Output pixel size in metres. Defaults to 10.
-        coverage_threshold_pct (float, optional): Drop pixels covered by fewer
-            than this fraction of overlapping scenes. Set to None to disable.
-            Defaults to 0.1.
         resampling_method (str, optional): Rasterio resampling method used when
             reading source COGs onto the output grid. Options include "nearest",
             "bilinear", "cubic", "average", and "lanczos". Defaults to "nearest".
+        additional_query (Dict[str, Any], optional): Additional query parameters for STAC API.
+            Defaults to {"eo:cloud_cover": {"lt": 100}}.
+        no_data_threshold (float, optional): Threshold for no data values. Defaults to 0.01.
+        coverage_threshold_pct (float, optional): Drop pixels covered by fewer
+            than this fraction of overlapping scenes. Set to None to disable.
+            Defaults to 0.1.
+        ignore_duplicate_items (bool, optional): Whether to remove duplicate scenes based on their IDs. Defaults to True.
+        sort_method (str, optional): Method to sort scenes. Options are "valid_data", "oldest", or "newest". Defaults to "valid_data".
+        sort_function (Callable, optional): Custom sorting function. If provided, overrides sort_method.
         cloud_mask (str, optional): Cloud-mask provider. ``"OCM"`` (default) runs the
             OmniCloudMask deep-learning model on R+G+NIR; ``"SCL"`` reads the L2A
             Scene Classification Layer published with the scene. SCL is much cheaper
             (one COG read, no inference) but lower accuracy.
+        ocm_batch_size (int, optional): Batch size for OCM inference. Defaults to 1.
+        ocm_inference_dtype (str, optional): Data type for OCM inference. Defaults to "bf16".
 
     Returns:
-        Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]: If output_dir is None, returns a tuple
-        containing the mosaic array and metadata dictionary. If output_dir is provided,
-        returns the path to the saved GeoTIFF file.
+        Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]: If no export path
+        is requested, returns the mosaic array and metadata dictionary.
+        Otherwise returns the path to the saved GeoTIFF file.
 
     Raises:
         ValueError: If inputs fail validation, or if no scenes are found for the
@@ -193,30 +234,31 @@ def mosaic(
     if bounds is not None:
         return run_bounds_pipeline(
             bounds=bounds,
-            start_year=start_year,
             bounds_crs=bounds_crs,
-            target_crs=target_crs,
-            resolution=resolution,
+            start_year=start_year,
             start_month=start_month,
             start_day=start_day,
-            output_dir=output_dir,
-            sort_method=sort_method,
-            sort_function=sort_function,
-            mosaic_method=mosaic_method,
             duration_years=duration_years,
             duration_months=duration_months,
             duration_days=duration_days,
             required_bands=required_bands,
-            no_data_threshold=no_data_threshold,
+            mosaic_method=mosaic_method,
+            percentile_value=percentile_value,
+            output_dir=output_dir,
+            output_path=output_path,
             overwrite=overwrite,
+            target_crs=target_crs,
+            resolution=resolution,
+            resampling_method=resampling_method,
+            additional_query=additional_query,
+            no_data_threshold=no_data_threshold,
+            coverage_threshold_pct=coverage_threshold_pct,
+            ignore_duplicate_items=ignore_duplicate_items,
+            sort_method=sort_method,
+            sort_function=sort_function,
+            cloud_mask=cloud_mask,
             ocm_batch_size=ocm_batch_size,
             ocm_inference_dtype=ocm_inference_dtype,
-            additional_query=additional_query,
-            percentile_value=percentile_value,
-            ignore_duplicate_items=ignore_duplicate_items,
-            coverage_threshold_pct=coverage_threshold_pct,
-            resampling_method=resampling_method,
-            cloud_mask=cloud_mask,
         )
 
     (
@@ -261,18 +303,18 @@ def mosaic(
         duration_months,
         duration_days,
     )
-    if output_dir:
-        export_path = get_output_path(
-            grid_id=grid_id,
-            start_date=start_date,
-            end_date=end_date,
-            sort_method=sort_method,
-            mosaic_method=mosaic_method,
-            required_bands=required_bands,
-            output_dir=output_dir,
-        )
-
-    if output_dir:
+    export_path = resolve_export_path(
+        output_dir=output_dir,
+        output_path=output_path,
+        grid_id=grid_id,
+        start_date=start_date,
+        end_date=end_date,
+        sort_method=sort_method,
+        mosaic_method=mosaic_method,
+        required_bands=required_bands,
+        percentile_value=percentile_value,
+    )
+    if export_path is not None:
         if export_path.exists() and not overwrite:
             return export_path
 
@@ -301,6 +343,7 @@ def mosaic(
     target_size = int(round(MGRS_TILE_SIZE_M / resolution))
 
     # for scenes with only partial S2 coverage work out which pixels are covered
+    coverage_mask: npt.NDArray[np.bool_]
     if coverage_threshold_pct is None:
         coverage_mask = np.ones((target_size, target_size), dtype=bool)
     else:
@@ -339,5 +382,5 @@ def mosaic(
         profile=profile,
         required_bands=required_bands,
         coverage_mask=coverage_mask if coverage_threshold_pct is not None else None,
-        export_path=export_path if output_dir else None,
+        export_path=export_path,
     )
