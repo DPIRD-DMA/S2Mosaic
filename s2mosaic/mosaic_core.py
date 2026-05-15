@@ -350,7 +350,9 @@ def _empty_tile(
     return np.zeros((bands_count, h, w), dtype=out_dtype)
 
 
-def _finalise_tile(arr: npt.NDArray[Any], out_dtype: "np.dtype[Any]") -> npt.NDArray[Any]:
+def _finalise_tile(
+    arr: npt.NDArray[Any], out_dtype: "np.dtype[Any]"
+) -> npt.NDArray[Any]:
     """Clip + cast a tile result so workers return the pipeline's output dtype.
 
     Doing the cast per tile lets ``run_tile_aggregation`` allocate ``out`` as

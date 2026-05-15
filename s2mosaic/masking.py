@@ -33,7 +33,9 @@ def _dilate_no_data(no_data: npt.NDArray[Any], dilation_count: int) -> npt.NDArr
     return cv2.dilate(no_data, kernel, iterations=dilation_count)
 
 
-def get_valid_mask(bands: npt.NDArray[Any], dilation_count: int = 4) -> npt.NDArray[Any]:
+def get_valid_mask(
+    bands: npt.NDArray[Any], dilation_count: int = 4
+) -> npt.NDArray[Any]:
     # create mask to remove pixels with no data, add dilation to remove edge pixels
     no_data = (bands.sum(axis=0) == 0).astype(np.uint8)
     no_data = _dilate_no_data(no_data, dilation_count)
