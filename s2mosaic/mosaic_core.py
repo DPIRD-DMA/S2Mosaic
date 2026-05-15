@@ -205,8 +205,10 @@ def _materialise_grid_band(
                 "BIGTIFF": "IF_SAFER",
             }
 
+            window_cls: Any = Window
+
             def source_window_for(dst_window: Window) -> Window:
-                return Window(
+                return window_cls(
                     dst_window.col_off * scale_x,
                     dst_window.row_off * scale_y,
                     dst_window.width * scale_x,
@@ -300,11 +302,12 @@ def _read_tile_window(
     r, c, h, w = spec
     scale_x = src.width / s2_scene_size
     scale_y = src.height / s2_scene_size
-    src_window = Window(
-        col_off=c * scale_x,
-        row_off=r * scale_y,
-        width=w * scale_x,
-        height=h * scale_y,
+    window_cls: Any = Window
+    src_window = window_cls(
+        c * scale_x,
+        r * scale_y,
+        w * scale_x,
+        h * scale_y,
     )
     return src.read(  # type: ignore[no-any-return, unused-ignore]
         raster_band_idx,

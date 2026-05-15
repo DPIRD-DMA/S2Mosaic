@@ -128,6 +128,7 @@ def get_frequent_coverage_for_bbox(
         transform=Affine(resolution, 0, minx, 0, -resolution, maxy),
         merge_alg=MergeAlg.add,
     )
+    assert raster is not None
 
     max_count = raster.max()
     if max_count == 0:

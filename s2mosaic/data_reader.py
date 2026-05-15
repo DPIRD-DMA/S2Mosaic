@@ -29,7 +29,8 @@ def get_full_band(
         # overviews. Single-band reads must use a scalar index rather than
         # a 1-element list — the latter triggers a slow path that reads at
         # native resolution.
-        full_window = Window(0, 0, src.width, src.height)
+        window_cls: Any = Window
+        full_window = window_cls(0, 0, src.width, src.height)
         if is_tci:
             array = src.read(
                 [1, 2, 3],
