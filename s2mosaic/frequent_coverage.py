@@ -4,6 +4,7 @@ from typing import List, Tuple
 import cv2
 import geopandas as gpd
 import numpy as np
+import numpy.typing as npt
 from geopandas import GeoDataFrame
 from pystac.item import Item
 from pystac.item_collection import ItemCollection
@@ -32,7 +33,7 @@ def get_raster_coverage(
     coverage_gdf: GeoDataFrame,
     local_crs: int,
     resolution: int = 10,
-):
+) -> npt.NDArray[np.int16]:
     scene_gdf = gpd.GeoDataFrame(
         [scene_bounds], geometry=[scene_bounds], crs="EPSG:4326"
     ).to_crs(f"EPSG:{local_crs}")
@@ -55,7 +56,7 @@ def get_raster_coverage(
         transform=Affine(resolution, 0, x_min, 0, -resolution, y_max),
         merge_alg=MergeAlg.add,
     )
-    return raster
+    return raster  # type: ignore[no-any-return]
 
 
 def get_frequent_coverage(
@@ -63,7 +64,7 @@ def get_frequent_coverage(
     scenes: ItemCollection,
     coverage_threshold_pct: float = 0.1,
     resolution: int = 10,
-) -> np.ndarray:
+) -> npt.NDArray[np.bool_]:
     scenes_list = list(scenes)
     logger.info(f"Calculating total coverage for {len(scenes_list)} scenes")
 
@@ -94,7 +95,7 @@ def get_frequent_coverage(
     # Expand the mask to include nearby pixels, this grows the no data areas by 4 pixels
     kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
     dilated = cv2.dilate((~frequent_data_mask).astype(np.uint8), kernel, iterations=4)
-    return dilated == 0
+    return dilated == 0  # type: ignore[no-any-return]
 
 
 def get_frequent_coverage_for_bbox(
@@ -105,7 +106,7 @@ def get_frequent_coverage_for_bbox(
     height: int,
     resolution: int,
     coverage_threshold_pct: float = 0.1,
-) -> np.ndarray:
+) -> npt.NDArray[np.bool_]:
     """Frequent-coverage mask for an arbitrary bbox in `target_crs`.
 
     Variant of get_frequent_coverage() that doesn't assume a single MGRS
@@ -137,4 +138,4 @@ def get_frequent_coverage_for_bbox(
 
     kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
     dilated = cv2.dilate((~frequent_data_mask).astype(np.uint8), kernel, iterations=4)
-    return dilated == 0
+    return dilated == 0  # type: ignore[no-any-return]

@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 import planetary_computer
 import rasterio as rio
@@ -132,12 +133,12 @@ def _read_with_retry(
     out_shape: Tuple[int, int, int],
     resampling: Resampling,
     attempts: int = REMOTE_READ_ATTEMPTS,
-) -> np.ndarray:
+) -> npt.NDArray[Any]:
     """Read one source window, retrying transient remote COG tile failures."""
     last_error: RasterioIOError | None = None
     for attempt in range(attempts):
         try:
-            return src.read(window=window, out_shape=out_shape, resampling=resampling)
+            return src.read(window=window, out_shape=out_shape, resampling=resampling)  # type: ignore[no-any-return]
         except RasterioIOError as exc:
             last_error = exc
             if attempt == attempts - 1:
@@ -226,7 +227,7 @@ def _compute_one_scene_mask(
     max_dl_workers: int,
     s2_scene_size: int,
     resolution: int,
-) -> Optional[np.ndarray]:
+) -> Optional[npt.NDArray[Any]]:
     """Phase-1 worker: return the per-scene combo mask or None on fetch error."""
     try:
         if cloud_mask == CLOUD_MASK_SCL:
@@ -243,7 +244,7 @@ def _compute_one_scene_mask(
     except SceneFetchError as e:
         logger.warning("Mask fetch failed for %s, skipping (%s)", item.id, e)
         return None
-    combo = (clear & valid).astype(np.bool_)
+    combo: npt.NDArray[Any] = (clear & valid).astype(np.bool_)
     return combo
 
 
@@ -258,7 +259,7 @@ def _build_output_profile(
         profile["transform"] = src.transform * rio.Affine.scale(scale_x, scale_y)
         profile["width"] = s2_scene_size
         profile["height"] = s2_scene_size
-    return profile
+    return profile  # type: ignore[no-any-return]
 
 
 class _HandleCache:
@@ -294,7 +295,7 @@ def _read_tile_window(
     spec: Tuple[int, int, int, int],
     s2_scene_size: int,
     rio_resampling: Resampling,
-) -> np.ndarray:
+) -> npt.NDArray[Any]:
     """Read one tile window from a COG, resampling to the target 10m grid."""
     r, c, h, w = spec
     scale_x = src.width / s2_scene_size
@@ -305,7 +306,7 @@ def _read_tile_window(
         width=w * scale_x,
         height=h * scale_y,
     )
-    return src.read(
+    return src.read(  # type: ignore[no-any-return]
         raster_band_idx,
         window=src_window,
         out_shape=(h, w),
@@ -314,8 +315,8 @@ def _read_tile_window(
 
 
 def _tile_threshold_met(
-    tile_filled: np.ndarray,
-    tile_coverage: np.ndarray,
+    tile_filled: npt.NDArray[Any],
+    tile_coverage: npt.NDArray[Any],
     no_data_threshold: Optional[float],
 ) -> bool:
     """Per-tile coverage short-circuit, mirroring the old global threshold.
@@ -339,17 +340,17 @@ def _tile_threshold_met(
 # Signature: read_fn(scene_idx, band_idx, spec) -> ndarray of shape (h, w).
 # Implementations close over their own source-handle cache (HandleCache for
 # grid_id COG reads, a WarpedVRT cache for bounds).
-ReaderFn = Callable[[int, int, Tuple[int, int, int, int]], np.ndarray]
+ReaderFn = Callable[[int, int, Tuple[int, int, int, int]], npt.NDArray[Any]]
 
 
 def _empty_tile(
-    spec: Tuple[int, int, int, int], bands_count: int, out_dtype: np.dtype
-) -> np.ndarray:
+    spec: Tuple[int, int, int, int], bands_count: int, out_dtype: "np.dtype[Any]"
+) -> npt.NDArray[Any]:
     _, _, h, w = spec
     return np.zeros((bands_count, h, w), dtype=out_dtype)
 
 
-def _finalise_tile(arr: np.ndarray, out_dtype: np.dtype) -> np.ndarray:
+def _finalise_tile(arr: npt.NDArray[Any], out_dtype: "np.dtype[Any]") -> npt.NDArray[Any]:
     """Clip + cast a tile result so workers return the pipeline's output dtype.
 
     Doing the cast per tile lets ``run_tile_aggregation`` allocate ``out`` as
@@ -363,8 +364,8 @@ def _finalise_tile(arr: np.ndarray, out_dtype: np.dtype) -> np.ndarray:
     return arr.astype(out_dtype, copy=False)
 
 
-@njit(parallel=True, cache=True)
-def _nanquantile_axis0(stack: np.ndarray, q: float) -> np.ndarray:
+@njit(parallel=True, cache=True)  # type: ignore[untyped-decorator]
+def _nanquantile_axis0(stack: npt.NDArray[Any], q: float) -> npt.NDArray[Any]:
     """NaN-skipping quantile over stack axis 0.
 
     ``stack`` shape is ``(scene, band, height, width)``. This is intentionally
@@ -431,12 +432,12 @@ def _warm_nanquantile_axis0() -> None:
 
 def _copy_single_scene_tile(
     spec: Tuple[int, int, int, int],
-    mask_tile: np.ndarray,
+    mask_tile: npt.NDArray[Any],
     read_fn: ReaderFn,
     scene_idx: int,
     bands_count: int,
-    out_dtype: np.dtype,
-) -> np.ndarray:
+    out_dtype: "np.dtype[Any]",
+) -> npt.NDArray[Any]:
     """Copy one contributing scene into an output tile, zeroing masked pixels."""
     _, _, h, w = spec
     out = np.zeros((bands_count, h, w), dtype=out_dtype)
@@ -448,14 +449,14 @@ def _copy_single_scene_tile(
 
 def tile_percentile(
     spec: Tuple[int, int, int, int],
-    masks: List[Optional[np.ndarray]],
+    masks: List[Optional[npt.NDArray[Any]]],
     read_fn: ReaderFn,
     bands_count: int,
     percentile_value: float,
-    coverage_mask: np.ndarray,
+    coverage_mask: npt.NDArray[Any],
     no_data_threshold: Optional[float],
-    out_dtype: np.dtype,
-) -> Tuple[Tuple[int, int, int, int], np.ndarray]:
+    out_dtype: "np.dtype[Any]",
+) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
     r, c, h, w = spec
     tile_coverage = coverage_mask[r : r + h, c : c + w]
     if not tile_coverage.any():
@@ -507,13 +508,13 @@ def tile_percentile(
 
 def tile_mean(
     spec: Tuple[int, int, int, int],
-    masks: List[Optional[np.ndarray]],
+    masks: List[Optional[npt.NDArray[Any]]],
     read_fn: ReaderFn,
     bands_count: int,
-    coverage_mask: np.ndarray,
+    coverage_mask: npt.NDArray[Any],
     no_data_threshold: Optional[float],
-    out_dtype: np.dtype,
-) -> Tuple[Tuple[int, int, int, int], np.ndarray]:
+    out_dtype: "np.dtype[Any]",
+) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
     r, c, h, w = spec
     tile_coverage = coverage_mask[r : r + h, c : c + w]
     if not tile_coverage.any():
@@ -560,13 +561,13 @@ def tile_mean(
 
 def tile_first(
     spec: Tuple[int, int, int, int],
-    masks: List[Optional[np.ndarray]],
+    masks: List[Optional[npt.NDArray[Any]]],
     read_fn: ReaderFn,
     bands_count: int,
-    coverage_mask: np.ndarray,
+    coverage_mask: npt.NDArray[Any],
     no_data_threshold: Optional[float],
-    out_dtype: np.dtype,
-) -> Tuple[Tuple[int, int, int, int], np.ndarray]:
+    out_dtype: "np.dtype[Any]",
+) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
     r, c, h, w = spec
     tile_coverage = coverage_mask[r : r + h, c : c + w]
     if not tile_coverage.any():
@@ -606,19 +607,19 @@ def tile_specs_for(
 
 
 def run_tile_aggregation(
-    masks: List[Optional[np.ndarray]],
+    masks: List[Optional[npt.NDArray[Any]]],
     read_fn: ReaderFn,
     bands_count: int,
     height: int,
     width: int,
-    coverage_mask: np.ndarray,
+    coverage_mask: npt.NDArray[Any],
     no_data_threshold: Optional[float],
     mosaic_method: str,
     percentile_value: Optional[float],
     tile_size: int,
     tile_workers: Optional[int],
-    out_dtype: np.dtype = DEFAULT_OUTPUT_DTYPE,
-) -> np.ndarray:
+    out_dtype: "np.dtype[Any]" = DEFAULT_OUTPUT_DTYPE,
+) -> npt.NDArray[Any]:
     """Generic streaming aggregation. Called by both grid_id and bounds modes.
 
     ``out_dtype`` is the pipeline's final output dtype (``uint16`` for
@@ -636,7 +637,7 @@ def run_tile_aggregation(
 
         def worker_fn(
             s: Tuple[int, int, int, int],
-        ) -> Tuple[Tuple[int, int, int, int], np.ndarray]:
+        ) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
             return tile_percentile(
                 s,
                 masks,
@@ -653,7 +654,7 @@ def run_tile_aggregation(
 
         def worker_fn(
             s: Tuple[int, int, int, int],
-        ) -> Tuple[Tuple[int, int, int, int], np.ndarray]:
+        ) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
             return tile_mean(
                 s,
                 masks,
@@ -669,7 +670,7 @@ def run_tile_aggregation(
 
         def worker_fn(
             s: Tuple[int, int, int, int],
-        ) -> Tuple[Tuple[int, int, int, int], np.ndarray]:
+        ) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
             return tile_first(
                 s,
                 masks,
@@ -685,7 +686,7 @@ def run_tile_aggregation(
 
     completed = 0
     log_every = max(1, len(specs) // 10)
-    tile_iter: Iterator[Tuple[Tuple[int, int, int, int], np.ndarray]]
+    tile_iter: Iterator[Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]]
     if n_workers <= 1:
         tile_iter = map(worker_fn, specs)
     else:
@@ -762,7 +763,7 @@ def make_grid_tile_reader(
 
     def read_fn(
         scene_idx: int, band_idx: int, spec: Tuple[int, int, int, int]
-    ) -> np.ndarray:
+    ) -> npt.NDArray[Any]:
         src = cache.get(scene_idx, band_idx)
         return _read_tile_window(
             src, href_band_indices[band_idx], spec, s2_scene_size, rio_resampling
@@ -809,7 +810,7 @@ def should_prewarm_sources(
 def stream_mosaic_pipeline(
     sorted_scenes: pd.DataFrame,
     required_bands: List[str],
-    coverage_mask: np.ndarray,
+    coverage_mask: npt.NDArray[Any],
     no_data_threshold: Union[float, None],
     mosaic_method: str = "mean",
     ocm_batch_size: int = 6,
@@ -822,7 +823,7 @@ def stream_mosaic_pipeline(
     cloud_mask: str = CLOUD_MASK_OCM,
     tile_size: int = 2048,
     tile_workers: Optional[int] = None,
-) -> Tuple[np.ndarray, Dict[str, Any]]:
+) -> Tuple[npt.NDArray[Any], Dict[str, Any]]:
     """Tile-streamed mosaic for grid_id mode.
 
     Replaces the old in-memory ``download_bands_pool`` path. Peak working
@@ -858,9 +859,9 @@ def stream_mosaic_pipeline(
         cloud_mask,
         mask_workers,
     )
-    masks: List[Optional[np.ndarray]] = [None] * n_scenes
+    masks: List[Optional[npt.NDArray[Any]]] = [None] * n_scenes
 
-    def _worker(idx_item: Tuple[int, Any]) -> Tuple[int, Optional[np.ndarray]]:
+    def _worker(idx_item: Tuple[int, Any]) -> Tuple[int, Optional[npt.NDArray[Any]]]:
         idx, item = idx_item
         combo = _compute_one_scene_mask(
             item=item,

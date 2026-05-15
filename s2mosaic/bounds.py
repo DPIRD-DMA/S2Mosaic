@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
+import numpy.typing as npt
 import planetary_computer
 import pystac_client
 import rasterio as rio
@@ -199,7 +200,7 @@ def make_bounds_tile_reader(
     resolution: int,
     resampling_method: str,
     prewarm: bool = True,
-):
+) -> Callable[[int, int, Tuple[int, int, int, int]], "npt.NDArray[Any]"]:
     """Build a tile-reader for bounds mode (WarpedVRT-backed reads).
 
     Builds lazy source resolvers for every (scene, asset). Workers open
@@ -258,7 +259,7 @@ def make_bounds_tile_reader(
 
     vrt_local = threading.local()
 
-    def _get_source(scene_idx: int, asset_idx: int):
+    def _get_source(scene_idx: int, asset_idx: int) -> Any:
         per_thread = getattr(vrt_local, "handles", None)
         if per_thread is None:
             per_thread = {}
@@ -285,10 +286,10 @@ def make_bounds_tile_reader(
 
     def read_fn(
         scene_idx: int, band_idx: int, spec: Tuple[int, int, int, int]
-    ) -> np.ndarray:
+    ) -> npt.NDArray[Any]:
         r, c, th, tw = spec
         src = _get_source(scene_idx, band_idx)
-        return src.read(href_band_indices[band_idx], window=Window(c, r, tw, th))
+        return src.read(href_band_indices[band_idx], window=Window(c, r, tw, th))  # type: ignore[no-any-return]
 
     return read_fn
 
@@ -301,7 +302,7 @@ def _read_warpvrt(
     height: int,
     target_crs_obj: CRS,
     rio_resampling: Any,
-) -> np.ndarray:
+) -> npt.NDArray[Any]:
     """Open ``href`` and read ``indices`` through a WarpedVRT snapped to the grid."""
     with rio.open(href) as src:
         with WarpedVRT(
@@ -312,7 +313,7 @@ def _read_warpvrt(
             height=height,
             resampling=rio_resampling,
         ) as vrt:
-            return vrt.read(indices)
+            return vrt.read(indices)  # type: ignore[no-any-return]
 
 
 def _fetch_one_scl_key(
@@ -331,7 +332,7 @@ def _fetch_one_scl(
     bounds_target: Bbox,
     target_crs: int,
     mask_resolution: int,
-) -> np.ndarray:
+) -> npt.NDArray[Any]:
     """Fetch one scene's SCL band as (h, w) uint8 at ``mask_resolution``.
 
     Analog of :func:`_fetch_one_ocm` for the SCL cloud-mask provider — a
@@ -365,7 +366,7 @@ def _fetch_one_ocm(
     bounds_target: Bbox,
     target_crs: int,
     ocm_resolution: int,
-) -> np.ndarray:
+) -> npt.NDArray[Any]:
     """Fetch one scene's OCM bands (B04, B03, B8A) as (3, h, w) uint16.
 
     Reads via rasterio + WarpedVRT so the mask loop can stream one scene at a
@@ -377,7 +378,7 @@ def _fetch_one_ocm(
     )
     rio_resampling = get_rasterio_resampling("nearest")
 
-    def _read_band(band_name: str) -> np.ndarray:
+    def _read_band(band_name: str) -> npt.NDArray[Any]:
         href = planetary_computer.sign(item.assets[band_name].href)
         return _read_warpvrt(
             href, 1, transform, width, height, target_crs_obj, rio_resampling
@@ -385,7 +386,7 @@ def _fetch_one_ocm(
 
     with ThreadPoolExecutor(max_workers=len(_OCM_BANDS)) as executor:
         bands = list(executor.map(_read_band, _OCM_BANDS))
-    return np.stack(bands, axis=0).astype(np.uint16)
+    return np.stack(bands, axis=0).astype(np.uint16)  # type: ignore[no-any-return]
 
 
 def run_bounds_pipeline(
@@ -398,7 +399,7 @@ def run_bounds_pipeline(
     start_day: int = 1,
     output_dir: Optional[Union[Path, str]] = None,
     sort_method: str = "valid_data",
-    sort_function: Optional[Callable] = None,
+    sort_function: Optional[Callable[..., Any]] = None,
     mosaic_method: str = "mean",
     duration_years: int = 0,
     duration_months: int = 0,
@@ -414,7 +415,7 @@ def run_bounds_pipeline(
     coverage_threshold_pct: Optional[float] = 0.1,
     resampling_method: str = "nearest",
     cloud_mask: str = CLOUD_MASK_OCM,
-) -> Union[Tuple[np.ndarray, Dict[str, Any]], Path]:
+) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
     """Bounds-mode pipeline. Called from mosaic() when bounds is set.
 
     Searches the Planetary Computer STAC for Sentinel-2 L2A scenes intersecting
@@ -603,7 +604,7 @@ def run_bounds_pipeline(
         f"Streaming cloud mask over up to {n_time} scenes "
         f"(per-scene fetch at {mask_resolution}m, EPSG:{target_crs})"
     )
-    kept_combo_masks_ocm: Dict[int, np.ndarray] = {}
+    kept_combo_masks_ocm: Dict[int, npt.NDArray[Any]] = {}
     good_pixel_tracker = np.zeros((mask_h, mask_w), dtype=bool)
     n_mask_fetch_failed = 0
     for i in range(n_time):
@@ -701,7 +702,7 @@ def run_bounds_pipeline(
     user_transform, w, h, _ = _target_grid(bounds_target, resolution, target_crs)
     n_bands = 3 if is_visual else len(required_bands)
 
-    def _to_user_shape(mask: np.ndarray) -> np.ndarray:
+    def _to_user_shape(mask: npt.NDArray[Any]) -> npt.NDArray[Any]:
         if mask.shape == (h, w):
             return mask
         return cv2.resize(
@@ -735,7 +736,7 @@ def run_bounds_pipeline(
         prewarm=should_prewarm_sources(mosaic_method, no_data_threshold),
     )
 
-    masks_in_order: List[Optional[np.ndarray]] = [
+    masks_in_order: List[Optional[npt.NDArray[Any]]] = [
         combo_masks_user[scene_idx] for scene_idx in kept_indices
     ]
     # Tile small AOIs as a single tile; cap large AOIs at 2048 so each

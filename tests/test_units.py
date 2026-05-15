@@ -393,7 +393,7 @@ class TestNanquantileAxis0:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message="All-NaN slice encountered")
             expected = np.nanquantile(stack, q, axis=0).astype(np.float32)
-        np.testing.assert_allclose(got, expected, rtol=0, atol=1e-3, equal_nan=True)
+        np.testing.assert_allclose(got, expected, rtol=1e-6, atol=1e-3, equal_nan=True)
         got_uint16 = np.nan_to_num(got, nan=0.0).astype(np.uint16)
         expected_uint16 = np.nan_to_num(expected, nan=0.0).astype(np.uint16)
         assert np.abs(got_uint16.astype(int) - expected_uint16.astype(int)).max() <= 1

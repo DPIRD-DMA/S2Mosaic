@@ -8,13 +8,27 @@ from datetime import date, datetime
 from functools import lru_cache
 from importlib import resources
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    TypeVar,
+    Union,
+)
 
 import geopandas as gpd
 import numpy as np
+import numpy.typing as npt
 import rasterio as rio
 from dateutil.relativedelta import relativedelta
 from shapely.geometry.polygon import Polygon
+
+if TYPE_CHECKING:
+    from rasterio.enums import Resampling
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +58,7 @@ def pickle_cache(prefix: str, key: str, compute: Callable[[], T]) -> T:
     path = DEBUG_CACHE_DIR / f"{prefix}_{digest}.pkl"
     if path.exists():
         with open(path, "rb") as f:
-            return pickle.load(f)
+            return pickle.load(f)  # type: ignore[no-any-return]
     result = compute()
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:
@@ -180,7 +194,7 @@ def get_band_template(
     return href_template, bands_count, href_band_indices
 
 
-def get_rasterio_resampling(method: str):
+def get_rasterio_resampling(method: str) -> "Resampling":
     """Map a string resampling method to a rasterio.enums.Resampling value."""
     from rasterio.enums import Resampling
 
@@ -451,7 +465,7 @@ def get_output_path(
     mosaic_method: str,
     required_bands: List[str],
     grid_id: Optional[str] = None,
-    bounds: Optional[tuple] = None,
+    bounds: Optional[Tuple[float, float, float, float]] = None,
 ) -> Path:
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
@@ -474,7 +488,7 @@ def get_output_path(
 
 
 def _export_tif(
-    array: np.ndarray,
+    array: npt.NDArray[Any],
     profile: Dict[str, Any],
     export_path: Path,
     required_bands: List[str],
@@ -489,12 +503,12 @@ def _export_tif(
 
 
 def finalize_output(
-    array: np.ndarray,
+    array: npt.NDArray[Any],
     profile: Dict[str, Any],
     required_bands: List[str],
-    coverage_mask: Optional[np.ndarray],
+    coverage_mask: Optional[npt.NDArray[Any]],
     export_path: Optional[Path],
-) -> Union[Tuple[np.ndarray, Dict[str, Any]], Path]:
+) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
     """Apply coverage mask, set band names + nodata, export or return.
 
     Used at the end of both the grid_id and bounds pipelines so the

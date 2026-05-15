@@ -1,6 +1,7 @@
 from typing import Any, Dict, Tuple
 
 import numpy as np
+import numpy.typing as npt
 import planetary_computer
 import rasterio as rio
 from rasterio.windows import Window
@@ -15,7 +16,9 @@ def _full_band_key(href: str, res: int = 10) -> str:
 
 @disk_cache("full_band", key_fn=_full_band_key)
 @with_scene_retry()
-def get_full_band(href: str, res: int = 10) -> Tuple[np.ndarray, Dict[str, Any]]:
+def get_full_band(
+    href: str, res: int = 10
+) -> Tuple[npt.NDArray[np.uint16], Dict[str, Any]]:
     spatial_ratio = res / 10
 
     singed_href = planetary_computer.sign(href)
@@ -26,7 +29,7 @@ def get_full_band(href: str, res: int = 10) -> Tuple[np.ndarray, Dict[str, Any]]
         # overviews. Single-band reads must use a scalar index rather than
         # a 1-element list — the latter triggers a slow path that reads at
         # native resolution.
-        full_window = Window(0, 0, src.width, src.height)  # type: ignore
+        full_window = Window(0, 0, src.width, src.height)
         if is_tci:
             array = src.read(
                 [1, 2, 3],

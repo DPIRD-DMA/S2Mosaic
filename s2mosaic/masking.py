@@ -1,10 +1,11 @@
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from typing import Tuple
+from typing import Any, Tuple
 
 import cv2
 import numpy as np
+import numpy.typing as npt
 import pystac
 from multiclean import clean_array
 from omnicloudmask import predict_from_array
@@ -24,7 +25,7 @@ SCL_CLOUDY_CLASSES: Tuple[int, ...] = (1, 3, 8, 9, 10)
 SCL_NO_DATA: int = 0
 
 
-def _dilate_no_data(no_data: np.ndarray, dilation_count: int) -> np.ndarray:
+def _dilate_no_data(no_data: npt.NDArray[Any], dilation_count: int) -> npt.NDArray[Any]:
     """Dilate a no-data mask (1=no_data) by `dilation_count` cross-3x3 iterations."""
     if dilation_count <= 0:
         return no_data
@@ -32,16 +33,16 @@ def _dilate_no_data(no_data: np.ndarray, dilation_count: int) -> np.ndarray:
     return cv2.dilate(no_data, kernel, iterations=dilation_count)
 
 
-def get_valid_mask(bands: np.ndarray, dilation_count: int = 4) -> np.ndarray:
+def get_valid_mask(bands: npt.NDArray[Any], dilation_count: int = 4) -> npt.NDArray[Any]:
     # create mask to remove pixels with no data, add dilation to remove edge pixels
     no_data = (bands.sum(axis=0) == 0).astype(np.uint8)
     no_data = _dilate_no_data(no_data, dilation_count)
-    return no_data == 0
+    return no_data == 0  # type: ignore[no-any-return]
 
 
 def compute_masks_from_scl(
-    scl: np.ndarray, dilation_count: int = 4
-) -> Tuple[np.ndarray, np.ndarray]:
+    scl: npt.NDArray[Any], dilation_count: int = 4
+) -> Tuple[npt.NDArray[Any], npt.NDArray[Any]]:
     """Build (clear, valid) masks from an SCL band.
 
     Mirrors :func:`compute_masks_from_array` so OCM and SCL providers are
@@ -59,10 +60,10 @@ def compute_masks_from_scl(
 
 
 def compute_masks_from_array(
-    rgb_nir: np.ndarray,
+    rgb_nir: npt.NDArray[Any],
     batch_size: int = 6,
     inference_dtype: str = "bf16",
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[npt.NDArray[Any], npt.NDArray[Any]]:
     """Run cloud + valid masking on an in-memory (3, H, W) R+G+NIR uint16 array.
 
     Returns (clear_mask, valid_mask) at the same resolution as the input."""
@@ -89,7 +90,7 @@ def compute_masks_from_array(
 def get_scl_masks(
     item: pystac.Item,
     user_resolution: int = 10,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[npt.NDArray[Any], npt.NDArray[Any]]:
     """SCL-based clear+valid masks at the user's output resolution.
 
     Cheaper than :func:`get_masks` (one COG read, no DL inference) but less
@@ -108,7 +109,7 @@ def get_masks(
     max_dl_workers: int = 4,
     target_size: int = 10980,
     ocm_resolution: int = 20,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[npt.NDArray[Any], npt.NDArray[Any]]:
     # download RG+NIR bands at OCM resolution for cloud masking
     required_bands = ["B04", "B03", "B8A"]
     get_band_at_ocm_res = partial(get_full_band, res=ocm_resolution)

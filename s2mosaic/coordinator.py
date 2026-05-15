@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, overload
 
 import numpy as np
+import numpy.typing as npt
 
 from .bounds import Bbox, run_bounds_pipeline
 from .frequent_coverage import get_frequent_coverage
@@ -30,7 +31,7 @@ def mosaic(
     start_day: int = ...,
     output_dir: None = None,
     sort_method: str = ...,
-    sort_function: Optional[Callable] = ...,
+    sort_function: Optional[Callable[..., Any]] = ...,
     mosaic_method: str = ...,
     duration_years: int = ...,
     duration_months: int = ...,
@@ -50,7 +51,7 @@ def mosaic(
     coverage_threshold_pct: Optional[float] = ...,
     resampling_method: str = ...,
     cloud_mask: str = ...,
-) -> Tuple[np.ndarray, Dict[str, Any]]: ...
+) -> Tuple[npt.NDArray[Any], Dict[str, Any]]: ...
 
 
 @overload
@@ -62,7 +63,7 @@ def mosaic(
     start_day: int = ...,
     output_dir: Union[Path, str],
     sort_method: str = ...,
-    sort_function: Optional[Callable] = ...,
+    sort_function: Optional[Callable[..., Any]] = ...,
     mosaic_method: str = ...,
     duration_years: int = ...,
     duration_months: int = ...,
@@ -93,7 +94,7 @@ def mosaic(
     start_day: int = 1,
     output_dir: Optional[Union[Path, str]] = None,
     sort_method: str = "valid_data",
-    sort_function: Optional[Callable] = None,
+    sort_function: Optional[Callable[..., Any]] = None,
     mosaic_method: str = "mean",
     duration_years: int = 0,
     duration_months: int = 0,
@@ -113,7 +114,7 @@ def mosaic(
     coverage_threshold_pct: Optional[float] = 0.1,
     resampling_method: str = "nearest",
     cloud_mask: str = "OCM",
-) -> Union[Tuple[np.ndarray, Dict[str, Any]], Path]:
+) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
     """
     Create a Sentinel-2 mosaic.
 
@@ -171,7 +172,7 @@ def mosaic(
             (one COG read, no inference) but lower accuracy.
 
     Returns:
-        Union[Tuple[np.ndarray, Dict[str, Any]], Path]: If output_dir is None, returns a tuple
+        Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]: If output_dir is None, returns a tuple
         containing the mosaic array and metadata dictionary. If output_dir is provided,
         returns the path to the saved GeoTIFF file.
 
