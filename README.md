@@ -8,9 +8,6 @@
 
 S2Mosaic is a Python package for creating cloud-free mosaics from Sentinel-2 satellite imagery. It allows users to generate composite images for specified grid areas and time ranges, with various options for scene selection and mosaic creation.
 
-[S2Mosaic blog post here](https://dpird-dma.github.io/blog/S2Mosaic-Creating-Cloud-Free-Sentinel-2-Mosaics/)
-
-
 ## Features
 
 - Mosaic by MGRS grid tile (`grid_id`) **or** an arbitrary lon/lat bounding box (`bounds`) — bounds can cross MGRS tile boundaries and are reprojected onto a common UTM grid in one step.
