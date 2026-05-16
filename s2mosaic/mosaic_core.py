@@ -44,6 +44,7 @@ from numba import njit, prange
 from rasterio.errors import RasterioIOError
 from rasterio.enums import Resampling
 from rasterio.windows import Window
+from tqdm.auto import tqdm
 
 from .helpers import (
     CLOUD_MASK_OCM,
@@ -599,6 +600,31 @@ def tile_specs_for(
     return specs
 
 
+def _expected_reads_upper_bound(
+    masks: List[Optional[npt.NDArray[Any]]],
+    specs: List[Tuple[int, int, int, int]],
+    bands_count: int,
+) -> int:
+    """Upper bound on Phase 2 ``read_fn`` calls.
+
+    Counts, for each tile spec, the scenes whose mask intersects that tile,
+    times the number of user bands. ``first`` and ``tile_observation_target``
+    can stop reading mid-tile, so the actual count may be lower — that's
+    fine for the progress bar; we just won't naturally hit 100% in those
+    cases and fast-forward at the end.
+    """
+    total = 0
+    for r, c, h, w in specs:
+        n_contrib = 0
+        for m in masks:
+            if m is None:
+                continue
+            if m[r : r + h, c : c + w].any():
+                n_contrib += 1
+        total += n_contrib * bands_count
+    return total
+
+
 def run_tile_aggregation(
     masks: List[Optional[npt.NDArray[Any]]],
     read_fn: ReaderFn,
@@ -613,6 +639,7 @@ def run_tile_aggregation(
     tile_workers: Optional[int],
     out_dtype: "np.dtype[Any]" = DEFAULT_OUTPUT_DTYPE,
     tile_observation_target: Optional[int] = None,
+    show_progress: bool = False,
 ) -> npt.NDArray[Any]:
     """Generic streaming aggregation. Called by both grid_id and bounds modes.
 
@@ -623,6 +650,34 @@ def run_tile_aggregation(
     """
     out = np.zeros((bands_count, height, width), dtype=out_dtype)
     specs = tile_specs_for(height, width, tile_size)
+
+    # Phase 2 progress is per band-read rather than per tile so the bar
+    # advances smoothly. Total is the upper bound — each (scene, band) read
+    # that *would* happen if no early-stop kicks in. ``first`` / observation
+    # target modes may finish below 100%, which we fast-forward at the end.
+    progress_bar: Optional["tqdm[Any]"] = None
+    effective_read_fn = read_fn
+    if show_progress:
+        total_reads = _expected_reads_upper_bound(masks, specs, bands_count)
+        if total_reads > 0:
+            progress_bar = tqdm(
+                total=total_reads,
+                desc=f"Phase 2: aggregating tiles ({mosaic_method})",
+                unit="read",
+            )
+            base_read_fn = read_fn
+            _pb = progress_bar
+
+            def _counting_read_fn(
+                scene_idx: int,
+                band_idx: int,
+                spec: Tuple[int, int, int, int],
+            ) -> npt.NDArray[Any]:
+                result = base_read_fn(scene_idx, band_idx, spec)
+                _pb.update(1)
+                return result
+
+            effective_read_fn = _counting_read_fn
 
     if mosaic_method == MOSAIC_PERCENTILE:
         _warm_nanquantile_axis0()
@@ -635,7 +690,7 @@ def run_tile_aggregation(
             return tile_percentile(
                 s,
                 masks,
-                read_fn,
+                effective_read_fn,
                 bands_count,
                 pv,
                 coverage_mask,
@@ -652,7 +707,7 @@ def run_tile_aggregation(
             return tile_mean(
                 s,
                 masks,
-                read_fn,
+                effective_read_fn,
                 bands_count,
                 coverage_mask,
                 tile_observation_target,
@@ -668,7 +723,7 @@ def run_tile_aggregation(
             return tile_first(
                 s,
                 masks,
-                read_fn,
+                effective_read_fn,
                 bands_count,
                 coverage_mask,
                 no_data_threshold,
@@ -694,6 +749,13 @@ def run_tile_aggregation(
             if completed % log_every == 0 or completed == len(specs):
                 logger.info("Phase 2: %d/%d tiles done", completed, len(specs))
     finally:
+        if progress_bar is not None:
+            # Early-stop modes (first, observation target) skip reads, so the
+            # bar may not have reached total. Snap to total so it shows done.
+            remaining = progress_bar.total - progress_bar.n
+            if remaining > 0:
+                progress_bar.update(remaining)
+            progress_bar.close()
         if n_workers > 1:
             ex.shutdown(wait=True)
     return out
@@ -824,6 +886,7 @@ def stream_mosaic_pipeline(
     cloud_mask: str = CLOUD_MASK_OCM,
     tile_size: int = 2048,
     tile_workers: Optional[int] = None,
+    show_progress: bool = False,
 ) -> Tuple[npt.NDArray[Any], Dict[str, Any]]:
     """Tile-streamed mosaic for grid_id mode.
 
@@ -883,7 +946,17 @@ def stream_mosaic_pipeline(
         return idx, combo
 
     with ThreadPoolExecutor(max_workers=mask_workers) as ex:
-        for idx, combo in ex.map(_worker, enumerate(items)):
+        mask_iter: Iterator[Tuple[int, Optional[npt.NDArray[Any]]]] = ex.map(
+            _worker, enumerate(items)
+        )
+        if show_progress:
+            mask_iter = tqdm(
+                mask_iter,
+                total=n_scenes,
+                desc=f"Phase 1: computing cloud masks ({cloud_mask})",
+                unit="scene",
+            )
+        for idx, combo in mask_iter:
             masks[idx] = combo
 
     n_succeeded = sum(1 for m in masks if m is not None)
@@ -932,5 +1005,6 @@ def stream_mosaic_pipeline(
         tile_size=tile_size,
         tile_workers=tile_workers,
         out_dtype=np.dtype(np.uint8) if is_visual else np.dtype(np.uint16),
+        show_progress=show_progress,
     )
     return out, last_profile

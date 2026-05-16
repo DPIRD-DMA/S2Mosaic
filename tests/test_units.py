@@ -12,6 +12,7 @@ import rasterio as rio
 from rasterio.enums import Resampling
 from rasterio.errors import RasterioIOError
 from rasterio.transform import from_origin
+from shapely.geometry import MultiPolygon, Polygon
 
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
@@ -19,6 +20,7 @@ sys.path.insert(0, str(project_root))
 from s2mosaic import mosaic
 from s2mosaic.bounds import (
     _expand_bounds_for_ocm_context,
+    _rasterize_aoi_mask,
     make_bounds_tile_reader,
     pick_utm_epsg,
     reproject_bbox,
@@ -639,6 +641,18 @@ class TestMosaicBoundsValidation:
         with pytest.raises(ValueError, match="Exactly one"):
             mosaic(grid_id="50HMH", start_year=2023, bounds=self.VALID_BOUNDS)
 
+    def test_bounds_and_aoi_mutually_exclusive(self):
+        aoi = Polygon(
+            [
+                (115.83, -31.97),
+                (115.91, -31.97),
+                (115.91, -31.94),
+                (115.83, -31.94),
+            ]
+        )
+        with pytest.raises(ValueError, match="Exactly one"):
+            mosaic(start_year=2023, bounds=self.VALID_BOUNDS, aoi=aoi)
+
     def test_neither_grid_id_nor_bounds_rejected(self):
         with pytest.raises(ValueError, match="Exactly one"):
             mosaic(start_year=2023)
@@ -661,7 +675,7 @@ class TestMosaicBoundsValidation:
         with pytest.raises(ValueError, match="latitude must be in"):
             self._call((-31.97, 115.83, -31.94, 115.91))
 
-    def test_lon_range_not_checked_when_bounds_crs_not_4326(self):
+    def test_lon_range_not_checked_when_input_crs_not_4326(self):
         # Bounds in UTM zone 50S (metres) — values larger than 180 are valid.
         # validate_inputs must accept this without raising on range.
         utm_bounds = (390_000.0, 6_460_000.0, 400_000.0, 6_470_000.0)
@@ -673,7 +687,7 @@ class TestMosaicBoundsValidation:
             grid_id=None,
             percentile_value=None,
             bounds=utm_bounds,
-            bounds_crs=32750,
+            input_crs=32750,
             resolution=10,
         )
 
@@ -687,13 +701,13 @@ class TestMosaicBoundsValidation:
     def test_bounds_too_small_utm_rejected(self):
         with pytest.raises(ValueError, match="at least 10m"):
             self._call(
-                (390_000.0, 6_460_000.0, 390_005.0, 6_460_005.0), bounds_crs=32750
+                (390_000.0, 6_460_000.0, 390_005.0, 6_460_005.0), input_crs=32750
             )
 
     def test_bounds_too_skinny_rejected_even_when_area_is_large_enough(self):
         with pytest.raises(ValueError, match="at least 10m"):
             self._call(
-                (390_000.0, 6_460_000.0, 390_001.0, 6_460_200.0), bounds_crs=32750
+                (390_000.0, 6_460_000.0, 390_001.0, 6_460_200.0), input_crs=32750
             )
 
     def test_bounds_large_4326_warns_but_is_accepted(self, caplog):
@@ -707,7 +721,7 @@ class TestMosaicBoundsValidation:
                 grid_id=None,
                 percentile_value=None,
                 bounds=(110.0, -35.0, 115.0, -30.0),
-                bounds_crs=4326,
+                input_crs=4326,
                 resolution=10,
             )
         assert "larger than 200km x 200km" in caplog.text
@@ -723,7 +737,7 @@ class TestMosaicBoundsValidation:
                 grid_id=None,
                 percentile_value=None,
                 bounds=(300_000.0, 6_300_000.0, 600_000.0, 6_600_000.0),
-                bounds_crs=32750,
+                input_crs=32750,
                 resolution=10,
             )
         assert "larger than 200km x 200km" in caplog.text
@@ -739,9 +753,74 @@ class TestMosaicBoundsValidation:
             grid_id=None,
             percentile_value=None,
             bounds=(119.0, -29.0, 119.8, -28.2),
-            bounds_crs=4326,
+            input_crs=4326,
             resolution=10,
         )
+
+    def test_single_polygon_aoi_accepted(self):
+        aoi = Polygon(
+            [
+                (115.83, -31.97),
+                (115.91, -31.97),
+                (115.91, -31.94),
+                (115.83, -31.94),
+            ]
+        )
+        validate_inputs(
+            sort_method="valid_data",
+            mosaic_method="mean",
+            no_data_threshold=0.01,
+            required_bands=["B04"],
+            grid_id=None,
+            percentile_value=None,
+            aoi=aoi,
+            input_crs=4326,
+            resolution=10,
+        )
+
+    def test_multipolygon_aoi_rejected(self):
+        poly = Polygon(
+            [
+                (115.83, -31.97),
+                (115.91, -31.97),
+                (115.91, -31.94),
+                (115.83, -31.94),
+            ]
+        )
+        with pytest.raises(ValueError, match="single shapely Polygon"):
+            validate_inputs(
+                sort_method="valid_data",
+                mosaic_method="mean",
+                no_data_threshold=0.01,
+                required_bands=["B04"],
+                grid_id=None,
+                percentile_value=None,
+                aoi=MultiPolygon([poly]),
+                input_crs=4326,
+                resolution=10,
+            )
+
+    def test_invalid_polygon_aoi_rejected(self):
+        bowtie = Polygon(
+            [
+                (115.83, -31.97),
+                (115.91, -31.94),
+                (115.91, -31.97),
+                (115.83, -31.94),
+            ]
+        )
+        with pytest.raises(ValueError, match="valid Polygon"):
+            validate_inputs(
+                sort_method="valid_data",
+                mosaic_method="mean",
+                no_data_threshold=0.01,
+                required_bands=["B04"],
+                grid_id=None,
+                percentile_value=None,
+                aoi=bowtie,
+                input_crs=4326,
+                resolution=10,
+            )
 
 
 class TestExportPaths:
@@ -829,6 +908,16 @@ class TestExportPaths:
 
 
 class TestBoundsOcmContext:
+    class FakeItem:
+        id = "fake-scene"
+        datetime = datetime(2023, 6, 1, tzinfo=timezone.utc)
+        properties = {
+            "s2:nodata_pixel_percentage": 0.0,
+            "s2:high_proba_clouds_percentage": 0.0,
+            "s2:cloud_shadow_percentage": 0.0,
+            "sat:relative_orbit": 1,
+        }
+
     def test_small_bounds_expand_to_minimum_ocm_context(self):
         expanded, crop = _expand_bounds_for_ocm_context(
             (390_000.0, 6_460_000.0, 390_200.0, 6_460_100.0),
@@ -855,16 +944,6 @@ class TestBoundsOcmContext:
     ):
         import s2mosaic.bounds as bounds_mod
 
-        class FakeItem:
-            id = "fake-scene"
-            datetime = datetime(2023, 6, 1, tzinfo=timezone.utc)
-            properties = {
-                "s2:nodata_pixel_percentage": 0.0,
-                "s2:high_proba_clouds_percentage": 0.0,
-                "s2:cloud_shadow_percentage": 0.0,
-                "sat:relative_orbit": 1,
-            }
-
         requested_bounds = (390_000.0, 6_460_000.0, 390_200.0, 6_460_100.0)
         expected_expanded = (
             389_100.0,
@@ -889,7 +968,7 @@ class TestBoundsOcmContext:
         monkeypatch.setattr(
             bounds_mod,
             "_search_for_items_by_bbox",
-            lambda **_: [FakeItem()],
+            lambda **_: [self.FakeItem()],
         )
         monkeypatch.setattr(
             bounds_mod,
@@ -933,8 +1012,8 @@ class TestBoundsOcmContext:
 
         arr, profile = bounds_mod.run_bounds_pipeline(
             bounds=requested_bounds,
-            bounds_crs=32750,
-            target_crs=32750,
+            input_crs=32750,
+            output_crs=32750,
             resolution=20,
             start_year=2023,
             duration_days=1,
@@ -951,6 +1030,223 @@ class TestBoundsOcmContext:
         mask = aggregation_calls[0]["masks"][0]
         np.testing.assert_array_equal(mask, expected_cropped_mask)
         assert aggregation_calls[0]["coverage_mask"].shape == (5, 10)
+
+    def test_rasterize_aoi_mask_uses_polygon_shape(self):
+        aoi = Polygon([(0.0, 0.0), (40.0, 0.0), (40.0, 40.0)])
+
+        mask = _rasterize_aoi_mask(
+            aoi_target=aoi,
+            bounds_target=(0.0, 0.0, 40.0, 40.0),
+            resolution=10,
+            width=4,
+            height=4,
+        )
+
+        assert mask.shape == (4, 4)
+        assert mask.dtype == bool
+        assert 0 < mask.sum() < mask.size
+
+    def test_aoi_pipeline_uses_polygon_search(self, monkeypatch):
+        import s2mosaic.bounds as bounds_mod
+
+        aoi = Polygon([(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)])
+        search_calls = []
+
+        def fake_search_by_aoi(**kwargs):
+            search_calls.append(kwargs["aoi_4326"])
+            return [self.FakeItem()]
+
+        def fake_search_by_bbox(**_):
+            raise AssertionError("bbox search should not be used for polygon AOIs")
+
+        monkeypatch.setattr(bounds_mod, "_search_for_items_by_aoi", fake_search_by_aoi)
+        monkeypatch.setattr(
+            bounds_mod, "_search_for_items_by_bbox", fake_search_by_bbox
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "_fetch_one_scl",
+            lambda item, bounds_target, target_crs, mask_resolution: np.ones(
+                (4, 4), dtype=np.uint8
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "compute_masks_from_scl",
+            lambda scl: (
+                np.ones_like(scl, dtype=bool),
+                np.ones_like(scl, dtype=bool),
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "make_bounds_tile_reader",
+            lambda **_: (
+                lambda scene_idx, band_idx, window: np.ones(
+                    (window[2], window[3]), dtype=np.uint16
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "run_tile_aggregation",
+            lambda **kwargs: np.ones(
+                (kwargs["bands_count"], kwargs["height"], kwargs["width"]),
+                dtype=np.uint16,
+            ),
+        )
+
+        arr, profile = bounds_mod.run_bounds_pipeline(
+            aoi=aoi,
+            input_crs=32750,
+            output_crs=32750,
+            start_year=2023,
+            duration_days=1,
+            required_bands=["B04"],
+            cloud_mask="SCL",
+            coverage_threshold_pct=None,
+        )
+
+        assert len(search_calls) == 1
+        assert search_calls[0].geom_type == "Polygon"
+        assert not search_calls[0].is_empty
+        assert arr.shape == (1, 4, 4)
+        assert profile["width"] == 4
+        assert profile["height"] == 4
+
+    def test_aoi_mask_is_applied_to_aggregation_inputs(self, monkeypatch):
+        import s2mosaic.bounds as bounds_mod
+
+        aoi = Polygon([(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)])
+        aoi_mask = np.array(
+            [
+                [1, 0, 0, 0],
+                [1, 1, 0, 0],
+                [1, 1, 1, 0],
+                [1, 1, 1, 1],
+            ],
+            dtype=bool,
+        )
+        aggregation_calls = []
+
+        monkeypatch.setattr(
+            bounds_mod, "_search_for_items_by_aoi", lambda **_: [self.FakeItem()]
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "_rasterize_aoi_mask",
+            lambda **_: aoi_mask.copy(),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "_fetch_one_scl",
+            lambda item, bounds_target, target_crs, mask_resolution: np.ones(
+                (4, 4), dtype=np.uint8
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "compute_masks_from_scl",
+            lambda scl: (
+                np.ones_like(scl, dtype=bool),
+                np.ones_like(scl, dtype=bool),
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "make_bounds_tile_reader",
+            lambda **_: (
+                lambda scene_idx, band_idx, window: np.ones(
+                    (window[2], window[3]), dtype=np.uint16
+                )
+            ),
+        )
+
+        def fake_run_tile_aggregation(**kwargs):
+            aggregation_calls.append(kwargs)
+            return np.ones(
+                (kwargs["bands_count"], kwargs["height"], kwargs["width"]),
+                dtype=np.uint16,
+            )
+
+        monkeypatch.setattr(
+            bounds_mod, "run_tile_aggregation", fake_run_tile_aggregation
+        )
+
+        bounds_mod.run_bounds_pipeline(
+            aoi=aoi,
+            input_crs=32750,
+            output_crs=32750,
+            start_year=2023,
+            duration_days=1,
+            required_bands=["B04"],
+            cloud_mask="SCL",
+            coverage_threshold_pct=None,
+        )
+
+        assert len(aggregation_calls) == 1
+        np.testing.assert_array_equal(aggregation_calls[0]["coverage_mask"], aoi_mask)
+        np.testing.assert_array_equal(aggregation_calls[0]["masks"][0], aoi_mask)
+
+    def test_bounds_pipeline_passes_show_progress_to_tile_aggregation(
+        self, monkeypatch
+    ):
+        import s2mosaic.bounds as bounds_mod
+
+        aggregation_calls = []
+
+        monkeypatch.setattr(
+            bounds_mod, "_search_for_items_by_bbox", lambda **_: [self.FakeItem()]
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "_fetch_one_scl",
+            lambda item, bounds_target, target_crs, mask_resolution: np.ones(
+                (4, 4), dtype=np.uint8
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "compute_masks_from_scl",
+            lambda scl: (
+                np.ones_like(scl, dtype=bool),
+                np.ones_like(scl, dtype=bool),
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "make_bounds_tile_reader",
+            lambda **_: (
+                lambda scene_idx, band_idx, window: np.ones(
+                    (window[2], window[3]), dtype=np.uint16
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "run_tile_aggregation",
+            lambda **kwargs: (
+                aggregation_calls.append(kwargs)
+                or np.ones(
+                    (kwargs["bands_count"], kwargs["height"], kwargs["width"]),
+                    dtype=np.uint16,
+                )
+            ),
+        )
+
+        bounds_mod.run_bounds_pipeline(
+            bounds=(0.0, 0.0, 40.0, 40.0),
+            input_crs=32750,
+            output_crs=32750,
+            start_year=2023,
+            duration_days=1,
+            required_bands=["B04"],
+            cloud_mask="SCL",
+            coverage_threshold_pct=None,
+            show_progress=True,
+        )
+
+        assert aggregation_calls[0]["show_progress"] is True
 
 
 class _FakeItem:

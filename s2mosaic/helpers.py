@@ -336,28 +336,40 @@ def validate_inputs(
     percentile_value: Optional[float],
     resampling_method: str = "nearest",
     bounds: Optional[Tuple[float, float, float, float]] = None,
-    bounds_crs: Optional[int] = None,
+    input_crs: Optional[int] = None,
     resolution: Optional[int] = None,
     cloud_mask: str = CLOUD_MASK_OCM,
     tile_observation_target: Optional[int] = None,
+    aoi: Optional[Polygon] = None,
 ) -> None:
     if grid_id is not None and (not grid_id.isalnum() or not grid_id.isupper()):
         raise ValueError(
             f"""Grid {grid_id} is invalid. It should be in the format '50HMH'.
             For more info on the S2 grid system visit https://sentiwiki.copernicus.eu/web/s2-products"""
         )
-    if bounds is not None:
-        if len(bounds) != 4:
+    if aoi is not None:
+        if not isinstance(aoi, Polygon):
+            raise ValueError("aoi must be a single shapely Polygon")
+        if aoi.is_empty:
+            raise ValueError("aoi must not be empty")
+        if not aoi.is_valid:
+            raise ValueError("aoi must be a valid Polygon")
+        if aoi.area <= 0:
+            raise ValueError("aoi must have a positive area")
+
+    bounds_to_validate = bounds if bounds is not None else aoi.bounds if aoi else None
+    if bounds_to_validate is not None:
+        if len(bounds_to_validate) != 4:
             raise ValueError("bounds must be (minx, miny, maxx, maxy)")
-        minx, miny, maxx, maxy = bounds
+        minx, miny, maxx, maxy = bounds_to_validate
         if minx >= maxx or miny >= maxy:
-            raise ValueError(f"Invalid bounds: {bounds}")
+            raise ValueError(f"Invalid bounds: {bounds_to_validate}")
 
         # Range check for EPSG:4326 (lon/lat). A swapped (lat, lon, lat, lon)
         # tuple is caught here whenever a longitude > 90 lands in the latitude
         # slots; ambiguous near (0, 0), which we can't disambiguate without
         # more context.
-        if bounds_crs == 4326:
+        if input_crs == 4326:
             if not (-180 <= minx <= 180 and -180 <= maxx <= 180):
                 raise ValueError(
                     f"Invalid bounds: longitude must be in [-180, 180] for "
@@ -373,7 +385,7 @@ def validate_inputs(
         # Size check. For EPSG:4326, convert degrees to approximate metres
         # using the bbox-centre latitude; otherwise treat bounds units as
         # metres (true for UTM and most projected CRSes).
-        if bounds_crs == 4326:
+        if input_crs == 4326:
             center_lat = (miny + maxy) / 2
             width_m = (maxx - minx) * 111_111 * np.cos(np.radians(center_lat))
             height_m = (maxy - miny) * 111_111

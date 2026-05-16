@@ -794,8 +794,8 @@ class TestMosaicBoundsEndToEnd:
         )
         self._assert_basic_geotiff(arr, profile, expect_bands=1)
 
-    # --- Custom target_crs ---
-    def test_custom_target_crs(self):
+    # --- Custom output_crs ---
+    def test_custom_output_crs(self):
         # Force WGS84 / Web Mercator output for a UTM-zone area
         arr, profile = mosaic(
             bounds=self.AOI_SMALL,
@@ -803,20 +803,20 @@ class TestMosaicBoundsEndToEnd:
             required_bands=["B04"],
             mosaic_method="percentile",
             percentile_value=50,
-            target_crs=3857,
+            output_crs=3857,
             resolution=10,
             additional_query=self.QUERY,
         )
         self._assert_basic_geotiff(arr, profile, expect_bands=1)
         assert profile["crs"].to_epsg() == 3857
 
-    # --- bounds_crs override (UTM bounds instead of lon/lat) ---
+    # --- input_crs override (UTM bounds instead of lon/lat) ---
     def test_utm_bounds_input(self):
         # Convert AOI_SMALL to UTM 50S manually: rough bbox in EPSG:32750
         utm_bounds = (390000.0, 6463500.0, 397500.0, 6466500.0)
         arr, profile = mosaic(
             bounds=utm_bounds,
-            bounds_crs=32750,
+            input_crs=32750,
             **self.DATE_KW,
             required_bands=["B04"],
             mosaic_method="percentile",

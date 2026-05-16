@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union, overload
 import numpy as np
 import numpy.typing as npt
 
-from .bounds import Bbox, run_bounds_pipeline
+from .bounds import Aoi, Bbox, run_bounds_pipeline
 from .frequent_coverage import get_frequent_coverage
 from .helpers import (
     MGRS_TILE_SIZE_M,
@@ -27,7 +27,8 @@ def mosaic(
     *,
     grid_id: Optional[str] = ...,
     bounds: Optional[Bbox] = ...,
-    bounds_crs: int = ...,
+    aoi: Optional[Aoi] = ...,
+    input_crs: int = ...,
     start_year: int,
     start_month: int = ...,
     start_day: int = ...,
@@ -40,7 +41,7 @@ def mosaic(
     output_dir: None = None,
     output_path: None = None,
     overwrite: bool = ...,
-    target_crs: Optional[int] = ...,
+    output_crs: Optional[int] = ...,
     resolution: int = ...,
     resampling_method: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
@@ -53,6 +54,7 @@ def mosaic(
     cloud_mask: str = ...,
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
+    show_progress: bool = ...,
 ) -> Tuple[npt.NDArray[Any], Dict[str, Any]]: ...
 
 
@@ -61,7 +63,8 @@ def mosaic(
     *,
     grid_id: Optional[str] = ...,
     bounds: Optional[Bbox] = ...,
-    bounds_crs: int = ...,
+    aoi: Optional[Aoi] = ...,
+    input_crs: int = ...,
     start_year: int,
     start_month: int = ...,
     start_day: int = ...,
@@ -74,7 +77,7 @@ def mosaic(
     output_dir: Union[Path, str],
     output_path: None = None,
     overwrite: bool = ...,
-    target_crs: Optional[int] = ...,
+    output_crs: Optional[int] = ...,
     resolution: int = ...,
     resampling_method: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
@@ -87,6 +90,7 @@ def mosaic(
     cloud_mask: str = ...,
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
+    show_progress: bool = ...,
 ) -> Path: ...
 
 
@@ -95,7 +99,8 @@ def mosaic(
     *,
     grid_id: Optional[str] = ...,
     bounds: Optional[Bbox] = ...,
-    bounds_crs: int = ...,
+    aoi: Optional[Aoi] = ...,
+    input_crs: int = ...,
     start_year: int,
     start_month: int = ...,
     start_day: int = ...,
@@ -108,7 +113,7 @@ def mosaic(
     output_dir: None = None,
     output_path: Union[Path, str],
     overwrite: bool = ...,
-    target_crs: Optional[int] = ...,
+    output_crs: Optional[int] = ...,
     resolution: int = ...,
     resampling_method: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
@@ -121,6 +126,7 @@ def mosaic(
     cloud_mask: str = ...,
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
+    show_progress: bool = ...,
 ) -> Path: ...
 
 
@@ -128,7 +134,8 @@ def mosaic(
     *,
     grid_id: Optional[str] = None,
     bounds: Optional[Bbox] = None,
-    bounds_crs: int = 4326,
+    aoi: Optional[Aoi] = None,
+    input_crs: int = 4326,
     start_year: int,
     start_month: int = 1,
     start_day: int = 1,
@@ -141,7 +148,7 @@ def mosaic(
     output_dir: Optional[Union[Path, str]] = None,
     output_path: Optional[Union[Path, str]] = None,
     overwrite: bool = True,
-    target_crs: Optional[int] = None,
+    output_crs: Optional[int] = None,
     resolution: int = 10,
     resampling_method: str = "nearest",
     additional_query: Optional[Dict[str, Any]] = None,
@@ -154,26 +161,31 @@ def mosaic(
     cloud_mask: str = "OCM",
     ocm_batch_size: int = 1,
     ocm_inference_dtype: str = "bf16",
+    show_progress: bool = False,
 ) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
     """
     Create a Sentinel-2 mosaic.
 
-    Two modes — pass exactly one of:
+    Three modes — pass exactly one of:
         * ``grid_id`` (e.g. "50HMH"): mosaic an entire MGRS tile.
         * ``bounds`` (minx, miny, maxx, maxy): mosaic an arbitrary bounding
           box. Scenes from any intersecting MGRS tiles are streamed through
           per-scene rasterio WarpedVRT reads and aggregated on a common UTM
-          grid in ``target_crs``.
+          grid in ``output_crs``.
+        * ``aoi``: mosaic a single polygon AOI. The output raster uses the
+          polygon bounds, with pixels outside the polygon written as nodata.
 
-    ``bounds_crs`` and ``target_crs`` only apply when ``bounds`` is set.
+    ``input_crs`` and ``output_crs`` only apply when ``bounds`` or ``aoi`` is set.
 
     Args:
         grid_id (str, optional): MGRS tile ID (e.g. "50HMH"). Mutually exclusive with bounds.
         bounds (Tuple[float, float, float, float], optional): Arbitrary AOI
-            rectangle as ``(minx, miny, maxx, maxy)`` in ``bounds_crs``.
+            rectangle as ``(minx, miny, maxx, maxy)`` in ``input_crs``.
             Mutually exclusive with ``grid_id``.
-        bounds_crs (int, optional): EPSG code of ``bounds``. Defaults to 4326.
-            Only used in bounds mode.
+        aoi (Polygon, optional): Single polygon AOI in ``input_crs``.
+            Mutually exclusive with ``grid_id`` and ``bounds``.
+        input_crs (int, optional): EPSG code of ``bounds`` or ``aoi``.
+            Defaults to 4326. Only used in bounds/AOI mode.
         start_year (int): The start year of the time range.
         start_month (int, optional): The start month of the time range. Defaults to 1 (January).
         start_day (int, optional): The start day of the time range. Defaults to 1.
@@ -193,7 +205,7 @@ def mosaic(
             to write, including the filename. Mutually exclusive with
             ``output_dir``. Defaults to None.
         overwrite (bool, optional): Whether to overwrite existing output files. Defaults to True.
-        target_crs (int, optional): EPSG code for the output grid. In bounds
+        output_crs (int, optional): EPSG code for the output grid. In bounds
             mode, defaults to the UTM zone containing the AOI centroid. Ignored
             in grid mode.
         resolution (int, optional): Output pixel size in metres. Defaults to 10.
@@ -220,6 +232,8 @@ def mosaic(
             (one COG read, no inference) but lower accuracy.
         ocm_batch_size (int, optional): Batch size for OCM inference. Defaults to 1.
         ocm_inference_dtype (str, optional): Data type for OCM inference. Defaults to "bf16".
+        show_progress (bool, optional): Show tqdm progress bars for the
+            cloud-mask and tile-aggregation phases. Defaults to False.
 
     Returns:
         Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]: If no export path
@@ -237,13 +251,14 @@ def mosaic(
         - If 'visual' is included in required_bands, it will be replaced with 'Red', 'Green', 'Blue' in the output.
         - The time range for scene selection is inclusive of the start date and exclusive of the end date.
     """  # noqa: E501
-    if (grid_id is None) == (bounds is None):
-        raise ValueError("Exactly one of grid_id or bounds must be provided")
+    if sum(x is not None for x in (grid_id, bounds, aoi)) != 1:
+        raise ValueError("Exactly one of grid_id, bounds, or aoi must be provided")
 
-    if bounds is not None:
+    if bounds is not None or aoi is not None:
         return run_bounds_pipeline(
             bounds=bounds,
-            bounds_crs=bounds_crs,
+            aoi=aoi,
+            input_crs=input_crs,
             start_year=start_year,
             start_month=start_month,
             start_day=start_day,
@@ -256,7 +271,7 @@ def mosaic(
             output_dir=output_dir,
             output_path=output_path,
             overwrite=overwrite,
-            target_crs=target_crs,
+            output_crs=output_crs,
             resolution=resolution,
             resampling_method=resampling_method,
             additional_query=additional_query,
@@ -269,6 +284,7 @@ def mosaic(
             cloud_mask=cloud_mask,
             ocm_batch_size=ocm_batch_size,
             ocm_inference_dtype=ocm_inference_dtype,
+            show_progress=show_progress,
         )
 
     (
@@ -388,6 +404,7 @@ def mosaic(
         resampling_method=resampling_method,
         resolution=resolution,
         cloud_mask=cloud_mask,
+        show_progress=show_progress,
     )
     return finalize_output(
         array=mosaic,

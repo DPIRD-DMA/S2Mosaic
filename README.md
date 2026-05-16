@@ -10,7 +10,7 @@ S2Mosaic is a Python package for creating cloud-free mosaics from Sentinel-2 sat
 
 ## Features
 
-- Mosaic by MGRS grid tile (`grid_id`) **or** an arbitrary lon/lat bounding box (`bounds`) — bounds can cross MGRS tile boundaries and are reprojected onto a common UTM grid in one step.
+- Mosaic by MGRS grid tile (`grid_id`), rectangular bounds (`bounds`), or a single polygon (`aoi`) — bounds/AOIs can cross MGRS tile boundaries and are reprojected onto a common UTM grid in one step.
 - Flexible scene selection methods: by valid data percentage, oldest, or newest scenes.
 - Multiple mosaic creation methods: mean, arbitrary percentile, median or first valid pixel.
 - Support for different spectral bands, including visual (RGB) composites.
@@ -98,7 +98,7 @@ print(f"CRS:   {profile['crs']}")
 print(f"Pixel: {profile['transform'].a}m")
 ```
 
-`bounds_crs` (default `4326`) controls the input CRS; `target_crs` controls the output CRS (auto-picked from the AOI centroid if omitted). Use `resolution` (in metres) and `resampling_method` (`nearest`, `bilinear`, ...) to control the output grid. See [Example use - bounds.ipynb](https://github.com/DPIRD-DMA/S2Mosaic/blob/main/examples/Example%20use%20-%20bounds.ipynb) for cross-tile and lower-resolution examples.
+`input_crs` (default `4326`) controls the bounds/AOI CRS; `output_crs` controls the output CRS (auto-picked from the AOI centroid if omitted). Use `resolution` (in metres) and `resampling_method` (`nearest`, `bilinear`, ...) to control the output grid. See [Example use - bounds.ipynb](https://github.com/DPIRD-DMA/S2Mosaic/blob/main/examples/Example%20use%20-%20bounds.ipynb) for cross-tile and lower-resolution examples, and [Example use - aoi.ipynb](https://github.com/DPIRD-DMA/S2Mosaic/blob/main/examples/Example%20use%20-%20aoi.ipynb) for polygon AOIs.
 
 ## Advanced Usage
 
@@ -108,6 +108,7 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 
 - `grid_id` (`None`): Sentinel-2 MGRS tile ID, e.g. `"50HMH"`. Mosaics the entire tile.
 - `bounds` (`None`): `(minx, miny, maxx, maxy)` rectangle. Mosaics an arbitrary AOI, including ones that cross MGRS tile boundaries. See the bounds-mode-specific options below.
+- `aoi` (`None`): single shapely `Polygon`. Mosaics the polygon bounds while skipping and masking pixels outside the polygon. Mutually exclusive with `grid_id` and `bounds`.
 
 **Time window**
 
@@ -129,7 +130,7 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 
 **Output grid**
 
-- `target_crs` (`None`): EPSG of the output. In bounds mode, auto-picked from the AOI centroid (UTM zone) if omitted. Ignored in grid mode.
+- `output_crs` (`None`): EPSG of the output. In bounds mode, auto-picked from the AOI centroid (UTM zone) if omitted. Ignored in grid mode.
 - `resolution` (`10`): output pixel size in metres. At lower resolutions rasterio reads from COG overviews — much less data over the wire.
 - `resampling_method` (`"nearest"`): how the source is resampled to the output grid. Also accepts `"bilinear"`, `"cubic"`, `"average"`, `"lanczos"`.
 
@@ -151,9 +152,9 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 - `ocm_batch_size` (`1`): OCM inference batch size. Only used with `cloud_mask="OCM"`.
 - `ocm_inference_dtype` (`"bf16"`): OCM inference dtype. Only used with `cloud_mask="OCM"`.
 
-**Bounds-mode-specific options**
+**Bounds/AOI-mode-specific options**
 
-- `bounds_crs` (`4326`): EPSG of `bounds`.
+- `input_crs` (`4326`): EPSG of `bounds` or `aoi`.
 
 For more detailed information on these options and additional functionality, please refer to the function docstring in the source code.
 

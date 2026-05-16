@@ -12,7 +12,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeAlias, Union, cast
 
 import cv2
 import numpy as np
@@ -24,9 +24,13 @@ from pyproj import Transformer
 from pystac.item_collection import ItemCollection
 from pystac_client.stac_api_io import StacApiIO
 from rasterio.crs import CRS
+from rasterio.features import rasterize
 from rasterio.transform import Affine
 from rasterio.vrt import WarpedVRT
 from rasterio.windows import Window
+from shapely.geometry import Polygon, mapping
+from shapely.ops import transform as shapely_transform
+from tqdm.auto import tqdm
 from urllib3 import Retry
 
 from .frequent_coverage import get_frequent_coverage_for_bbox
@@ -65,6 +69,7 @@ from .stac_utils import (
 logger = logging.getLogger(__name__)
 
 Bbox = Tuple[float, float, float, float]
+Aoi: TypeAlias = Polygon
 
 
 def pick_utm_epsg(lon: float, lat: float) -> int:
@@ -81,6 +86,17 @@ def reproject_bbox(bbox: Bbox, src_epsg: int, dst_epsg: int) -> Bbox:
     minx, miny, maxx, maxy = bbox
     xs, ys = transformer.transform([minx, maxx, minx, maxx], [miny, miny, maxy, maxy])
     return (min(xs), min(ys), max(xs), max(ys))
+
+
+def reproject_aoi(aoi: Aoi, src_epsg: int, dst_epsg: int) -> Aoi:
+    """Reproject a polygon AOI between CRSes."""
+    if src_epsg == dst_epsg:
+        return aoi
+    transformer = Transformer.from_crs(src_epsg, dst_epsg, always_xy=True)
+    reprojected = shapely_transform(transformer.transform, aoi)
+    if not isinstance(reprojected, Polygon):
+        raise ValueError("aoi must reproject to a single Polygon")
+    return cast(Aoi, reprojected)
 
 
 def _search_for_items_by_bbox(
@@ -120,6 +136,43 @@ def _search_for_items_by_bbox(
     return items
 
 
+def _search_for_items_by_aoi(
+    aoi_4326: Aoi,
+    start_date: date,
+    end_date: date,
+    additional_query: Optional[Dict[str, Any]] = None,
+    ignore_duplicate_items: bool = True,
+) -> ItemCollection:
+    """Search Sentinel-2 L2A items intersecting a polygon in EPSG:4326."""
+    query: Dict[str, Any] = {
+        "collections": ["sentinel-2-l2a"],
+        "intersects": mapping(aoi_4326),
+        "datetime": f"{start_date.isoformat()}Z/{end_date.isoformat()}Z",
+    }
+    if additional_query:
+        query["query"] = additional_query
+
+    retry = Retry(
+        total=5,
+        backoff_factor=1,
+        status_forcelist=[502, 503, 504],
+        allowed_methods=None,
+    )
+    stac_api_io = StacApiIO(max_retries=retry)
+    catalog = pystac_client.Client.open(
+        "https://planetarycomputer.microsoft.com/api/stac/v1",
+        modifier=planetary_computer.sign_inplace,
+        stac_io=stac_api_io,
+    )
+    items = catalog.search(**query).item_collection()
+    logger.info(f"Found {len(items)} items for AOI")
+
+    if ignore_duplicate_items:
+        items = filter_latest_processing_baselines(items)
+        logger.info(f"After dedupe, {len(items)} items remain")
+    return items
+
+
 _OCM_BANDS: Tuple[str, str, str] = ("B04", "B03", "B8A")
 _OCM_MIN_CONTEXT_PIXELS = 100
 
@@ -134,6 +187,27 @@ def _target_grid(
     transform = Affine(resolution, 0, minx, 0, -resolution, maxy)
     target_crs_obj = CRS.from_epsg(target_crs)
     return transform, width, height, target_crs_obj
+
+
+def _rasterize_aoi_mask(
+    aoi_target: Aoi,
+    bounds_target: Bbox,
+    resolution: int,
+    width: int,
+    height: int,
+) -> npt.NDArray[np.bool_]:
+    """Rasterize a polygon AOI onto a target grid."""
+    minx, _, _, maxy = bounds_target
+    transform = Affine(resolution, 0, minx, 0, -resolution, maxy)
+    mask = rasterize(
+        [(aoi_target, 1)],
+        out_shape=(height, width),
+        fill=0,
+        dtype=np.uint8,
+        transform=transform,
+        all_touched=True,
+    )
+    return mask.astype(bool)  # type: ignore[no-any-return]
 
 
 def _grid_shape_for_bounds(bounds_target: Bbox, resolution: int) -> Tuple[int, int]:
@@ -430,8 +504,9 @@ def _fetch_one_ocm(
 
 def run_bounds_pipeline(
     *,
-    bounds: Bbox,
-    bounds_crs: int = 4326,
+    bounds: Optional[Bbox] = None,
+    aoi: Optional[Aoi] = None,
+    input_crs: int = 4326,
     start_year: int,
     start_month: int = 1,
     start_day: int = 1,
@@ -444,7 +519,7 @@ def run_bounds_pipeline(
     output_dir: Optional[Union[Path, str]] = None,
     output_path: Optional[Union[Path, str]] = None,
     overwrite: bool = True,
-    target_crs: Optional[int] = None,
+    output_crs: Optional[int] = None,
     resolution: int = 10,
     resampling_method: str = "nearest",
     additional_query: Optional[Dict[str, Any]] = None,
@@ -457,24 +532,28 @@ def run_bounds_pipeline(
     cloud_mask: str = CLOUD_MASK_OCM,
     ocm_batch_size: int = 1,
     ocm_inference_dtype: str = "bf16",
+    show_progress: bool = False,
 ) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
-    """Bounds-mode pipeline. Called from mosaic() when bounds is set.
+    """Bounds/AOI-mode pipeline. Called from mosaic() for non-grid AOIs.
 
     Searches the Planetary Computer STAC for Sentinel-2 L2A scenes intersecting
-    ``bounds`` over the date window, streams per-scene cloud masks (skipping
+    ``bounds`` or ``aoi`` over the date window, streams per-scene cloud masks (skipping
     scenes that contribute no new pixels), then fetches user bands only for the
     kept scenes and aggregates them into a single mosaic on a UTM grid.
 
     Differs from the grid-mode pipeline in that the AOI is an arbitrary bbox
     (possibly spanning multiple MGRS tiles, possibly intersecting tiles in
     different UTM-zone projections), so each per-scene read goes through a
-    rasterio WarpedVRT to land on one common grid in ``target_crs``.
+    rasterio WarpedVRT to land on one common grid in ``output_crs``.
 
     Args:
-        bounds: ``(minx, miny, maxx, maxy)`` in ``bounds_crs`` units. Validated
+        bounds: ``(minx, miny, maxx, maxy)`` in ``input_crs`` units. Validated
             for orientation, minimum area, and (for EPSG:4326) lon/lat range;
             very large AOIs emit a warning but are not rejected.
-        bounds_crs: EPSG code of ``bounds``. Defaults to 4326 (lon/lat).
+        aoi: Single polygon AOI in ``input_crs`` units. The output raster uses
+            the polygon bounds, and pixels outside the polygon are skipped and
+            written as nodata.
+        input_crs: EPSG code of ``bounds``. Defaults to 4326 (lon/lat).
         start_year, start_month, start_day, duration_years, duration_months,
             duration_days: Date window for the STAC search (start inclusive,
             end exclusive).
@@ -488,11 +567,11 @@ def run_bounds_pipeline(
             Mutually exclusive with ``output_dir``.
         overwrite: If ``False`` and the output file already exists, skip the
             mosaic and return the existing path.
-        target_crs: EPSG code of the output grid. If ``None``, auto-picked as
+        output_crs: EPSG code of the output grid. If ``None``, auto-picked as
             the UTM zone containing the bbox centroid.
         resolution: Output pixel size in metres. Reads come from the nearest
             COG overview for non-native resolutions.
-        resampling_method: How source COGs are resampled to ``target_crs``
+        resampling_method: How source COGs are resampled to ``output_crs``
             / ``resolution`` during the WarpedVRT read.
         additional_query: Extra STAC query filters
             (e.g. ``{"eo:cloud_cover": {"lt": 50}}``).
@@ -510,6 +589,8 @@ def run_bounds_pipeline(
         cloud_mask: ``"OCM"`` (deep-learning, default) or ``"SCL"`` (L2A scene
             classification layer — cheaper, less accurate).
         ocm_batch_size, ocm_inference_dtype: Only used when ``cloud_mask="OCM"``.
+        show_progress: Show tqdm progress bars for the cloud-mask streaming
+            and tile-aggregation phases. Defaults to False.
 
     Returns:
         ``(array, profile)`` if no export path is requested, otherwise the
@@ -535,9 +616,13 @@ def run_bounds_pipeline(
         mosaic_method=mosaic_method,
         percentile_value=percentile_value,
     )
+    if bounds is None and aoi is not None:
+        bounds = aoi.bounds
+    if bounds is None:
+        raise ValueError("bounds or aoi must be provided")
 
     logger.info(
-        f"Creating mosaic for bounds {bounds} (EPSG:{bounds_crs}) "
+        f"Creating mosaic for bounds {bounds} (EPSG:{input_crs}) "
         f"from {start_year}-{start_month:02d}-{start_day:02d} "
         f"+ {duration_years}y {duration_months}m {duration_days}d "
         f"using {mosaic_method} method with bands {required_bands}"
@@ -555,19 +640,31 @@ def run_bounds_pipeline(
         percentile_value=percentile_value,
         resampling_method=resampling_method,
         bounds=bounds,
-        bounds_crs=bounds_crs,
+        aoi=aoi,
+        input_crs=input_crs,
         resolution=resolution,
         cloud_mask=cloud_mask,
     )
 
-    bounds_4326 = reproject_bbox(bounds, bounds_crs, 4326)
+    aoi_4326 = reproject_aoi(aoi, input_crs, 4326) if aoi is not None else None
+    bounds_4326 = (
+        aoi_4326.bounds
+        if aoi_4326 is not None
+        else reproject_bbox(bounds, input_crs, 4326)
+    )
+    target_crs = output_crs
     if target_crs is None:
         cx = (bounds_4326[0] + bounds_4326[2]) / 2
         cy = (bounds_4326[1] + bounds_4326[3]) / 2
         target_crs = pick_utm_epsg(cx, cy)
         logger.info(f"Auto-picked target CRS: EPSG:{target_crs}")
 
-    bounds_target = reproject_bbox(bounds, bounds_crs, target_crs)
+    aoi_target = reproject_aoi(aoi, input_crs, target_crs) if aoi is not None else None
+    bounds_target = (
+        aoi_target.bounds
+        if aoi_target is not None
+        else reproject_bbox(bounds, input_crs, target_crs)
+    )
 
     start_date, end_date = define_dates(
         start_year,
@@ -593,13 +690,22 @@ def run_bounds_pipeline(
         if export_path.exists() and not overwrite:
             return export_path
 
-    items = _search_for_items_by_bbox(
-        bbox_4326=bounds_4326,
-        start_date=start_date,
-        end_date=end_date,
-        additional_query=additional_query,
-        ignore_duplicate_items=ignore_duplicate_items,
-    )
+    if aoi_4326 is not None:
+        items = _search_for_items_by_aoi(
+            aoi_4326=aoi_4326,
+            start_date=start_date,
+            end_date=end_date,
+            additional_query=additional_query,
+            ignore_duplicate_items=ignore_duplicate_items,
+        )
+    else:
+        items = _search_for_items_by_bbox(
+            bbox_4326=bounds_4326,
+            start_date=start_date,
+            end_date=end_date,
+            additional_query=additional_query,
+            ignore_duplicate_items=ignore_duplicate_items,
+        )
     if len(items) == 0:
         raise ValueError(
             f"No scenes found for bounds {bounds} between "
@@ -651,6 +757,14 @@ def run_bounds_pipeline(
         )
     else:
         coverage_mask_ocm = np.ones((mask_h, mask_w), dtype=bool)
+    if aoi_target is not None:
+        coverage_mask_ocm &= _rasterize_aoi_mask(
+            aoi_target=aoi_target,
+            bounds_target=bounds_target,
+            resolution=mask_resolution,
+            width=mask_w,
+            height=mask_h,
+        )
     possible_pixel_count = int(coverage_mask_ocm.sum())
 
     # Phase 1+2: stream cloud-mask fetch + classification. One scene's mask
@@ -663,7 +777,16 @@ def run_bounds_pipeline(
     kept_combo_masks_ocm: Dict[int, npt.NDArray[Any]] = {}
     good_pixel_tracker = np.zeros((mask_h, mask_w), dtype=bool)
     n_mask_fetch_failed = 0
+    mask_progress: Optional["tqdm[Any]"] = None
+    if show_progress:
+        mask_progress = tqdm(
+            total=n_time,
+            desc=f"Phase 1: streaming cloud masks ({cloud_mask})",
+            unit="scene",
+        )
     for i in range(n_time):
+        if mask_progress is not None:
+            mask_progress.update(1)
         # FIRST mode: stop scanning once everything in coverage is filled.
         if (
             mosaic_method == MOSAIC_FIRST
@@ -738,6 +861,9 @@ def run_bounds_pipeline(
                 )
                 break
 
+    if mask_progress is not None:
+        mask_progress.close()
+
     if n_mask_fetch_failed:
         logger.warning(
             f"Mask phase: {n_mask_fetch_failed}/{n_time} scenes failed to fetch "
@@ -768,10 +894,18 @@ def run_bounds_pipeline(
             mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST
         ).astype(bool)
 
-    combo_masks_user = {
-        i: _to_user_shape(kept_combo_masks_ocm[i]) for i in kept_indices
-    }
     coverage_mask = _to_user_shape(coverage_mask_ocm)
+    if aoi_target is not None:
+        coverage_mask &= _rasterize_aoi_mask(
+            aoi_target=aoi_target,
+            bounds_target=bounds_target,
+            resolution=resolution,
+            width=w,
+            height=h,
+        )
+    combo_masks_user = {
+        i: _to_user_shape(kept_combo_masks_ocm[i]) & coverage_mask for i in kept_indices
+    }
     # OCM-resolution mask dict can be released once the user-resolution copies exist.
     del kept_combo_masks_ocm
 
@@ -827,6 +961,7 @@ def run_bounds_pipeline(
         tile_size=tile_size,
         tile_workers=None,
         out_dtype=np.dtype(np.uint8) if is_visual else np.dtype(np.uint16),
+        show_progress=show_progress,
     )
 
     profile: Dict[str, Any] = {
