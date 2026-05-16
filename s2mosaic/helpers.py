@@ -340,6 +340,7 @@ def validate_inputs(
     resolution: Optional[int] = None,
     cloud_mask: str = CLOUD_MASK_OCM,
     tile_observation_target: Optional[int] = None,
+    tile_workers: Optional[int] = None,
     aoi: Optional[Polygon] = None,
 ) -> None:
     if grid_id is not None and (not grid_id.isalnum() or not grid_id.isupper()):
@@ -448,6 +449,15 @@ def validate_inputs(
             raise ValueError(
                 "tile_observation_target must be a positive integer or None, "
                 f"got {tile_observation_target}"
+            )
+    if tile_workers is not None:
+        if (
+            isinstance(tile_workers, bool)
+            or not isinstance(tile_workers, int)
+            or tile_workers < 1
+        ):
+            raise ValueError(
+                f"tile_workers must be a positive integer or None, got {tile_workers}"
             )
     valid_bands = [
         "AOT",
@@ -577,6 +587,15 @@ def _export_tif(
         dst.descriptions = required_bands
 
 
+def output_band_metadata(
+    required_bands: List[str],
+) -> Tuple[List[str], Optional[int]]:
+    """Return output band descriptions and nodata value for requested bands."""
+    if "visual" in required_bands:
+        return ["Red", "Green", "Blue"], None
+    return list(required_bands), 0
+
+
 def finalize_output(
     array: npt.NDArray[Any],
     profile: Dict[str, Any],
@@ -593,12 +612,7 @@ def finalize_output(
     if coverage_mask is not None:
         np.multiply(array, coverage_mask[None, :, :], out=array, casting="unsafe")
 
-    if "visual" in required_bands:
-        band_descriptions = ["Red", "Green", "Blue"]
-        nodata_value: Optional[int] = None
-    else:
-        band_descriptions = list(required_bands)
-        nodata_value = 0
+    band_descriptions, nodata_value = output_band_metadata(required_bands)
 
     if export_path is not None:
         logger.info(f"Writing GeoTIFF to {export_path}")

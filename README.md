@@ -121,6 +121,7 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 - `mosaic_method` (`"mean"`): `"mean"`, `"first"`, `"percentile"` (with `percentile_value`), or `"median"` (shortcut for percentile 50).
 - `percentile_value` (`None`): percentile to compute when `mosaic_method="percentile"` (0–100).
 - `tile_observation_target` (`None`): optional per-tile early-stop target for `"mean"` and `"percentile"`. When set, aggregation stops reading later scenes for a tile once every coverable pixel has at least this many valid observations. This is not an output quality filter; pixels that cannot reach the target use whatever observations are available.
+- `tile_workers` (`min(4, os.cpu_count() or 1)`): number of output tiles to aggregate concurrently. Higher values can improve throughput for network-bound reads, but increase memory use and simultaneous source reads.
 
 **Output destination**
 

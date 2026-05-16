@@ -31,16 +31,16 @@ import logging
 import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar, Union
 
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
 import planetary_computer
 import rasterio as rio
-from numba import njit, prange
+from numba import njit
 from rasterio.errors import RasterioIOError
 from rasterio.enums import Resampling
 from rasterio.windows import Window
@@ -57,6 +57,7 @@ from .helpers import (
     debug_cache_enabled,
     get_band_template,
     get_rasterio_resampling,
+    output_band_metadata,
     pick_ocm_resolution,
 )
 from .masking import get_masks, get_scl_masks
@@ -65,6 +66,8 @@ from .stac_utils import ITEM_COL
 logger = logging.getLogger(__name__)
 REMOTE_READ_ATTEMPTS = 3
 DEFAULT_OUTPUT_DTYPE = np.dtype(np.uint16)
+DEFAULT_TILE_WORKERS = min(4, os.cpu_count() or 1)
+T = TypeVar("T")
 
 
 def _tiled_gtiff_cache_path(cache_key: str) -> Path:
@@ -87,6 +90,69 @@ def _get_materialise_lock(cache_key: str) -> threading.Lock:
             lock = threading.Lock()
             _materialise_locks[cache_key] = lock
         return lock
+
+
+def iter_ordered_fetches(
+    items: List[Any],
+    fetch_fn: Callable[[int, Any], T],
+    max_workers: int,
+    on_complete: Optional[Callable[[int], None]] = None,
+) -> Iterator[Tuple[int, Union[T, Exception]]]:
+    """Fetch items concurrently while yielding results in input order.
+
+    The next fetch is submitted before yielding each completed result so
+    caller-side processing, such as OCM inference, can overlap with downloads
+    for later scenes. Exceptions are yielded in-order for the caller to handle.
+
+    ``on_complete`` fires once per item as soon as that item's fetch finishes,
+    regardless of yield order. Use it to drive a progress bar so it ticks per
+    completion instead of jumping when the in-order yields catch up — the
+    slowest in-flight fetch otherwise blocks all earlier-completed yields.
+    """
+    n_items = len(items)
+    n_workers = min(max(1, max_workers), n_items)
+
+    def _do_fetch(i: int, item: Any) -> T:
+        try:
+            return fetch_fn(i, item)
+        finally:
+            if on_complete is not None:
+                on_complete(i)
+
+    if n_workers <= 1:
+        for i, item in enumerate(items):
+            try:
+                yield i, _do_fetch(i, item)
+            except Exception as e:
+                yield i, e
+        return
+
+    executor = ThreadPoolExecutor(max_workers=n_workers)
+    futures: Dict[int, Future[T]] = {}
+    next_submit = 0
+
+    def _submit_next() -> None:
+        nonlocal next_submit
+        i = next_submit
+        futures[i] = executor.submit(_do_fetch, i, items[i])
+        next_submit += 1
+
+    try:
+        for _ in range(n_workers):
+            _submit_next()
+        for next_yield in range(n_items):
+            future = futures.pop(next_yield)
+            try:
+                result: Union[T, Exception] = future.result()
+            except Exception as e:
+                result = e
+            if next_submit < n_items:
+                _submit_next()
+            yield next_yield, result
+    finally:
+        for future in futures.values():
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def materialise_tiled_band(
@@ -348,20 +414,25 @@ def _finalise_tile(
     return arr.astype(out_dtype, copy=False)  # type: ignore[no-any-return, unused-ignore]
 
 
-@njit(parallel=True, cache=True)  # type: ignore[untyped-decorator]
+@njit(cache=True)  # type: ignore[untyped-decorator]
 def _nanquantile_axis0(stack: npt.NDArray[Any], q: float) -> npt.NDArray[Any]:
-    """NaN-skipping quantile over stack axis 0.
+    """Serial NaN-skipping quantile over stack axis 0.
 
     ``stack`` shape is ``(scene, band, height, width)``. This is intentionally
     specialised to the tile aggregation hot path: scene counts are small, so a
     per-pixel insertion sort avoids allocations and is faster than a generic
     quantile implementation.
+
+    This kernel deliberately avoids Numba's parallel mode. Numba's default
+    ``workqueue`` threading layer is not safe to enter concurrently from
+    several Python threads, and users may also call ``mosaic`` from their own
+    thread pools. Tile-level concurrency supplies the parallelism instead.
     """
     n_scenes, n_bands, height, width = stack.shape
     out = np.empty((n_bands, height, width), dtype=np.float32)
     total = n_bands * height * width
 
-    for idx in prange(total):
+    for idx in range(total):
         values = np.empty(n_scenes, dtype=np.float32)
         band = idx // (height * width)
         rem = idx - band * height * width
@@ -404,11 +475,10 @@ def _nanquantile_axis0(stack: npt.NDArray[Any], q: float) -> npt.NDArray[Any]:
 def _warm_nanquantile_axis0() -> None:
     """Compile the Numba percentile kernel on the main thread.
 
-    The tile workers call this kernel concurrently. Letting the first call
-    happen inside the worker pool can make multiple threads enter Numba's
-    compilation path at once, which is fragile on macOS. A tiny warm call here
-    pays the compile cost before the pool starts and keeps workers on the
-    already-compiled execution path.
+    Letting the first call happen inside the worker pool can make multiple
+    threads enter Numba's compilation path at once, which is fragile on macOS.
+    A tiny warm call here pays the compile cost before the pool starts and keeps
+    workers on the already-compiled execution path.
     """
     sample = np.array([[[[0.0]]], [[[1.0]]]], dtype=np.float32)
     _nanquantile_axis0(sample, 0.5)
@@ -649,6 +719,44 @@ def run_tile_aggregation(
     no intermediate float32 array the size of the whole mosaic.
     """
     out = np.zeros((bands_count, height, width), dtype=out_dtype)
+    for spec, tile_data in iter_tile_aggregation(
+        masks=masks,
+        read_fn=read_fn,
+        bands_count=bands_count,
+        height=height,
+        width=width,
+        coverage_mask=coverage_mask,
+        no_data_threshold=no_data_threshold,
+        mosaic_method=mosaic_method,
+        percentile_value=percentile_value,
+        tile_size=tile_size,
+        tile_workers=tile_workers,
+        out_dtype=out_dtype,
+        tile_observation_target=tile_observation_target,
+        show_progress=show_progress,
+    ):
+        r, c, h, w = spec
+        out[:, r : r + h, c : c + w] = tile_data
+    return out
+
+
+def iter_tile_aggregation(
+    masks: List[Optional[npt.NDArray[Any]]],
+    read_fn: ReaderFn,
+    bands_count: int,
+    height: int,
+    width: int,
+    coverage_mask: npt.NDArray[Any],
+    no_data_threshold: Optional[float],
+    mosaic_method: str,
+    percentile_value: Optional[float],
+    tile_size: int,
+    tile_workers: Optional[int],
+    out_dtype: "np.dtype[Any]" = DEFAULT_OUTPUT_DTYPE,
+    tile_observation_target: Optional[int] = None,
+    show_progress: bool = False,
+) -> Iterator[Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]]:
+    """Yield aggregated output tiles without allocating the full mosaic."""
     specs = tile_specs_for(height, width, tile_size)
 
     # Phase 2 progress is per band-read rather than per tile so the bar
@@ -682,7 +790,7 @@ def run_tile_aggregation(
     if mosaic_method == MOSAIC_PERCENTILE:
         _warm_nanquantile_axis0()
         pv = percentile_value if percentile_value is not None else 50.0
-        n_workers = tile_workers if tile_workers is not None else 1
+        n_workers = tile_workers if tile_workers is not None else DEFAULT_TILE_WORKERS
 
         def worker_fn(
             s: Tuple[int, int, int, int],
@@ -699,7 +807,7 @@ def run_tile_aggregation(
             )
 
     elif mosaic_method == MOSAIC_MEAN:
-        n_workers = tile_workers or os.cpu_count() or 8
+        n_workers = tile_workers if tile_workers is not None else DEFAULT_TILE_WORKERS
 
         def worker_fn(
             s: Tuple[int, int, int, int],
@@ -715,7 +823,7 @@ def run_tile_aggregation(
             )
 
     elif mosaic_method == MOSAIC_FIRST:
-        n_workers = tile_workers or os.cpu_count() or 8
+        n_workers = tile_workers if tile_workers is not None else DEFAULT_TILE_WORKERS
 
         def worker_fn(
             s: Tuple[int, int, int, int],
@@ -743,11 +851,10 @@ def run_tile_aggregation(
         tile_iter = ex.map(worker_fn, specs)
     try:
         for spec, tile_data in tile_iter:
-            r, c, h, w = spec
-            out[:, r : r + h, c : c + w] = tile_data
             completed += 1
             if completed % log_every == 0 or completed == len(specs):
                 logger.info("Phase 2: %d/%d tiles done", completed, len(specs))
+            yield spec, tile_data
     finally:
         if progress_bar is not None:
             # Early-stop modes (first, observation target) skip reads, so the
@@ -758,7 +865,70 @@ def run_tile_aggregation(
             progress_bar.close()
         if n_workers > 1:
             ex.shutdown(wait=True)
-    return out
+
+
+def write_tile_aggregation_geotiff(
+    export_path: Path,
+    profile: Dict[str, Any],
+    required_bands: List[str],
+    masks: List[Optional[npt.NDArray[Any]]],
+    read_fn: ReaderFn,
+    bands_count: int,
+    height: int,
+    width: int,
+    coverage_mask: npt.NDArray[Any],
+    output_coverage_mask: Optional[npt.NDArray[Any]],
+    no_data_threshold: Optional[float],
+    mosaic_method: str,
+    percentile_value: Optional[float],
+    tile_size: int,
+    tile_workers: Optional[int],
+    out_dtype: "np.dtype[Any]" = DEFAULT_OUTPUT_DTYPE,
+    tile_observation_target: Optional[int] = None,
+    show_progress: bool = False,
+) -> Path:
+    """Aggregate tiles and write them directly into a GeoTIFF."""
+    band_descriptions, nodata_value = output_band_metadata(required_bands)
+    write_profile = profile.copy()
+    write_profile.update(
+        driver="GTiff",
+        width=width,
+        height=height,
+        count=bands_count,
+        dtype=out_dtype,
+        nodata=nodata_value,
+        compress="lzw",
+    )
+    logger.info("Writing streamed GeoTIFF to %s", export_path)
+    with rio.open(export_path, "w", **write_profile) as dst:
+        dst.descriptions = band_descriptions
+        for spec, tile_data in iter_tile_aggregation(
+            masks=masks,
+            read_fn=read_fn,
+            bands_count=bands_count,
+            height=height,
+            width=width,
+            coverage_mask=coverage_mask,
+            no_data_threshold=no_data_threshold,
+            mosaic_method=mosaic_method,
+            percentile_value=percentile_value,
+            tile_size=tile_size,
+            tile_workers=tile_workers,
+            out_dtype=out_dtype,
+            tile_observation_target=tile_observation_target,
+            show_progress=show_progress,
+        ):
+            r, c, h, w = spec
+            if output_coverage_mask is not None:
+                coverage_tile = output_coverage_mask[r : r + h, c : c + w]
+                np.multiply(
+                    tile_data,
+                    coverage_tile[None, :, :],
+                    out=tile_data,
+                    casting="unsafe",
+                )
+            dst.write(tile_data, window=Window(c, r, w, h))
+    return export_path
 
 
 def make_grid_tile_reader(
@@ -875,6 +1045,8 @@ def stream_mosaic_pipeline(
     coverage_mask: npt.NDArray[Any],
     no_data_threshold: Union[float, None],
     tile_observation_target: Optional[int] = None,
+    export_path: Optional[Path] = None,
+    output_coverage_mask: Optional[npt.NDArray[Any]] = None,
     mosaic_method: str = "mean",
     ocm_batch_size: int = 6,
     ocm_inference_dtype: str = "bf16",
@@ -887,7 +1059,7 @@ def stream_mosaic_pipeline(
     tile_size: int = 2048,
     tile_workers: Optional[int] = None,
     show_progress: bool = False,
-) -> Tuple[npt.NDArray[Any], Dict[str, Any]]:
+) -> Tuple[Optional[npt.NDArray[Any]], Dict[str, Any]]:
     """Tile-streamed mosaic for grid_id mode.
 
     Replaces the old in-memory ``download_bands_pool`` path. Peak working
@@ -909,24 +1081,23 @@ def stream_mosaic_pipeline(
     is_visual = "visual" in required_bands
     href_template, bands_count, _ = get_band_template(required_bands)
 
-    # Phase 1: compute per-scene combo masks.
-    # OCM runs the deep-learning cloud detector per scene — keep its
-    # download concurrency limited so we don't blow GPU/CPU. SCL is just
-    # a band read so we can fan out wider.
-    mask_workers = (
-        max_dl_workers if cloud_mask == CLOUD_MASK_OCM else max(4, max_dl_workers)
-    )
+    # Phase 1: compute per-scene combo masks in sorted order with bounded
+    # prefetch. This keeps early-stop decisions deterministic while allowing
+    # downloads for later masks to overlap current-scene processing.
+    phase1_workers = tile_workers if tile_workers is not None else DEFAULT_TILE_WORKERS
+    mask_workers = max_dl_workers if cloud_mask == CLOUD_MASK_OCM else phase1_workers
     logger.info(
-        "Phase 1: computing masks for %d scenes (%s, workers=%d)",
+        "Phase 1: streaming masks for %d scenes (%s, workers=%d)",
         n_scenes,
         cloud_mask,
         mask_workers,
     )
     masks: List[Optional[npt.NDArray[Any]]] = [None] * n_scenes
+    good_pixel_tracker = np.zeros_like(coverage_mask, dtype=bool)
+    n_mask_fetch_failed = 0
 
-    def _worker(idx_item: Tuple[int, Any]) -> Tuple[int, Optional[npt.NDArray[Any]]]:
-        idx, item = idx_item
-        combo = _compute_one_scene_mask(
+    def _fetch_mask(idx: int, item: Any) -> Optional[npt.NDArray[Any]]:
+        return _compute_one_scene_mask(
             item=item,
             cloud_mask=cloud_mask,
             ocm_batch_size=ocm_batch_size,
@@ -936,33 +1107,103 @@ def stream_mosaic_pipeline(
             s2_scene_size=s2_scene_size,
             resolution=resolution,
         )
-        logger.info(
-            "Phase 1: scene %d/%d (%s): %s",
-            idx + 1,
-            n_scenes,
-            item.id,
-            "ok" if combo is not None else "skipped",
-        )
-        return idx, combo
 
-    with ThreadPoolExecutor(max_workers=mask_workers) as ex:
-        mask_iter: Iterator[Tuple[int, Optional[npt.NDArray[Any]]]] = ex.map(
-            _worker, enumerate(items)
+    mask_progress: Optional["tqdm[Any]"] = None
+    if show_progress:
+        mask_progress = tqdm(
+            total=n_scenes,
+            desc=f"Phase 1: streaming cloud masks ({cloud_mask})",
+            unit="scene",
         )
-        if show_progress:
-            mask_iter = tqdm(
-                mask_iter,
-                total=n_scenes,
-                desc=f"Phase 1: computing cloud masks ({cloud_mask})",
-                unit="scene",
+    _pb = mask_progress
+
+    def _on_mask_complete(_i: int) -> None:
+        if _pb is not None:
+            _pb.update(1)
+
+    mask_iter: Iterator[Tuple[int, Union[Optional[npt.NDArray[Any]], Exception]]]
+    mask_iter = iter_ordered_fetches(
+        items=items,
+        fetch_fn=_fetch_mask,
+        max_workers=mask_workers,
+        on_complete=_on_mask_complete,
+    )
+
+    try:
+        for fallback_idx in range(n_scenes):
+            if (
+                mosaic_method == MOSAIC_FIRST
+                and (good_pixel_tracker | ~coverage_mask).all()
+            ):
+                logger.info(
+                    "All in-coverage pixels filled after %d/%d scenes — "
+                    "skipping remaining cloud-mask fetches",
+                    fallback_idx,
+                    n_scenes,
+                )
+                break
+            try:
+                idx, combo_result = next(mask_iter)
+            except StopIteration:
+                break
+            if isinstance(combo_result, Exception):
+                n_mask_fetch_failed += 1
+                logger.warning(
+                    "Mask fetch failed for %s, skipping (%s)",
+                    items[idx].id,
+                    combo_result,
+                )
+                continue
+            combo = combo_result
+            logger.info(
+                "Phase 1: scene %d/%d (%s): %s",
+                idx + 1,
+                n_scenes,
+                items[idx].id,
+                "ok" if combo is not None else "skipped",
             )
-        for idx, combo in mask_iter:
+            if combo is None:
+                n_mask_fetch_failed += 1
+                continue
+            if mosaic_method == MOSAIC_FIRST:
+                new_pixels = combo & ~good_pixel_tracker
+                if not new_pixels.any():
+                    continue
+                combo = new_pixels
+            elif not combo.any():
+                continue
             masks[idx] = combo
+            good_pixel_tracker |= combo
+
+            if (
+                no_data_threshold is not None
+                and mosaic_method != MOSAIC_PERCENTILE
+                and possible_pixel_count > 0
+            ):
+                completed = int((coverage_mask & good_pixel_tracker).sum())
+                no_data_sum = int(possible_pixel_count) - completed
+                if no_data_sum < possible_pixel_count * no_data_threshold:
+                    logger.info(
+                        "no_data_threshold met after %d kept scenes (%d/%d examined)",
+                        sum(1 for m in masks if m is not None),
+                        idx + 1,
+                        n_scenes,
+                    )
+                    break
+    finally:
+        if mask_progress is not None:
+            remaining = mask_progress.total - mask_progress.n
+            if remaining > 0:
+                mask_progress.update(remaining)
+            mask_progress.close()
 
     n_succeeded = sum(1 for m in masks if m is not None)
-    n_failed = n_scenes - n_succeeded
-    if n_failed:
-        logger.warning(f"Phase 1: {n_failed}/{n_scenes} scenes failed mask compute")
+    if n_mask_fetch_failed:
+        logger.warning(
+            "Phase 1: %d/%d scenes failed mask compute",
+            n_mask_fetch_failed,
+            n_scenes,
+        )
     if n_succeeded == 0:
         raise RuntimeError(
             f"All {n_scenes} scenes failed to fetch masks — no data to mosaic"
@@ -991,6 +1232,33 @@ def stream_mosaic_pipeline(
         mosaic_method,
         tile_size,
     )
+    out_dtype = np.dtype(np.uint8) if is_visual else np.dtype(np.uint16)
+    last_profile["dtype"] = out_dtype
+    last_profile["count"] = bands_count
+
+    if export_path is not None:
+        write_tile_aggregation_geotiff(
+            export_path=export_path,
+            profile=last_profile,
+            required_bands=required_bands,
+            masks=masks,
+            read_fn=read_fn,
+            bands_count=bands_count,
+            height=s2_scene_size,
+            width=s2_scene_size,
+            coverage_mask=coverage_mask,
+            output_coverage_mask=output_coverage_mask,
+            no_data_threshold=no_data_threshold,
+            tile_observation_target=tile_observation_target,
+            mosaic_method=mosaic_method,
+            percentile_value=percentile_value,
+            tile_size=tile_size,
+            tile_workers=tile_workers,
+            out_dtype=out_dtype,
+            show_progress=show_progress,
+        )
+        return None, last_profile
+
     out = run_tile_aggregation(
         masks=masks,
         read_fn=read_fn,
@@ -1004,7 +1272,7 @@ def stream_mosaic_pipeline(
         percentile_value=percentile_value,
         tile_size=tile_size,
         tile_workers=tile_workers,
-        out_dtype=np.dtype(np.uint8) if is_visual else np.dtype(np.uint16),
+        out_dtype=out_dtype,
         show_progress=show_progress,
     )
     return out, last_profile

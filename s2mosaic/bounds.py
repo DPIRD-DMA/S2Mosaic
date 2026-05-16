@@ -12,7 +12,18 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeAlias, Union, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+    TypeAlias,
+    Union,
+    cast,
+)
 
 import cv2
 import numpy as np
@@ -53,11 +64,14 @@ from .helpers import (
 )
 from .masking import compute_masks_from_array, compute_masks_from_scl
 from .mosaic_core import (
+    DEFAULT_TILE_WORKERS,
     _prewarm_sources,
     _write_tiled_copy,
+    iter_ordered_fetches,
     materialise_tiled_band,
     run_tile_aggregation,
     should_prewarm_sources,
+    write_tile_aggregation_geotiff,
 )
 from .stac_utils import (
     ITEM_COL,
@@ -532,6 +546,7 @@ def run_bounds_pipeline(
     cloud_mask: str = CLOUD_MASK_OCM,
     ocm_batch_size: int = 1,
     ocm_inference_dtype: str = "bf16",
+    tile_workers: Optional[int] = None,
     show_progress: bool = False,
 ) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
     """Bounds/AOI-mode pipeline. Called from mosaic() for non-grid AOIs.
@@ -589,6 +604,8 @@ def run_bounds_pipeline(
         cloud_mask: ``"OCM"`` (deep-learning, default) or ``"SCL"`` (L2A scene
             classification layer — cheaper, less accurate).
         ocm_batch_size, ocm_inference_dtype: Only used when ``cloud_mask="OCM"``.
+        tile_workers: Number of output tiles to aggregate concurrently.
+            Defaults to ``min(4, os.cpu_count() or 1)``.
         show_progress: Show tqdm progress bars for the cloud-mask streaming
             and tile-aggregation phases. Defaults to False.
 
@@ -644,6 +661,7 @@ def run_bounds_pipeline(
         input_crs=input_crs,
         resolution=resolution,
         cloud_mask=cloud_mask,
+        tile_workers=tile_workers,
     )
 
     aoi_4326 = reproject_aoi(aoi, input_crs, 4326) if aoi is not None else None
@@ -784,33 +802,57 @@ def run_bounds_pipeline(
             desc=f"Phase 1: streaming cloud masks ({cloud_mask})",
             unit="scene",
         )
-    for i in range(n_time):
-        if mask_progress is not None:
-            mask_progress.update(1)
+    mask_fetch_iter: Optional[
+        Iterator[Tuple[int, Union[npt.NDArray[Any], Exception]]]
+    ] = None
+    phase1_workers = tile_workers if tile_workers is not None else DEFAULT_TILE_WORKERS
+    if cloud_mask == CLOUD_MASK_SCL:
+        mask_fetch_iter = iter_ordered_fetches(
+            items=items_list,
+            fetch_fn=lambda _i, item: _fetch_one_scl(
+                item, bounds_target, target_crs, mask_resolution
+            ),
+            max_workers=phase1_workers,
+        )
+    elif cloud_mask == CLOUD_MASK_OCM:
+        # Each OCM fetch already reads R/G/NIR in parallel. Keep scene-level
+        # prefetch modest so download for the next scene overlaps inference
+        # without multiplying concurrent reads too aggressively.
+        mask_fetch_iter = iter_ordered_fetches(
+            items=items_list,
+            fetch_fn=lambda _i, item: _fetch_one_ocm(
+                item,
+                ocm_bounds_target,
+                target_crs,
+                mask_resolution,
+            ),
+            max_workers=min(2, phase1_workers),
+        )
+
+    for fallback_i in range(n_time):
         # FIRST mode: stop scanning once everything in coverage is filled.
         if (
             mosaic_method == MOSAIC_FIRST
             and (good_pixel_tracker | ~coverage_mask_ocm).all()
         ):
             logger.info(
-                f"All in-coverage pixels filled after {i}/{n_time} scenes — "
+                f"All in-coverage pixels filled after {fallback_i}/{n_time} scenes — "
                 "skipping remaining cloud-mask fetches"
             )
             break
 
         try:
-            if cloud_mask == CLOUD_MASK_SCL:
-                scl_scene = _fetch_one_scl(
-                    items_list[i], bounds_target, target_crs, mask_resolution
-                )
-            else:
-                ocm_scene = _fetch_one_ocm(
-                    items_list[i],
-                    ocm_bounds_target,
-                    target_crs,
-                    mask_resolution,
-                )
+            assert mask_fetch_iter is not None
+            i, mask_result = next(mask_fetch_iter)
+            if isinstance(mask_result, Exception):
+                raise mask_result
+            if mask_progress is not None:
+                mask_progress.update(1)
+        except StopIteration:
+            break
         except SceneFetchError as e:
+            if mask_progress is not None:
+                mask_progress.update(1)
             n_mask_fetch_failed += 1
             logger.warning(
                 f"Scene {i + 1}/{n_time} ({items_list[i].id}): mask fetch failed, "
@@ -819,15 +861,13 @@ def run_bounds_pipeline(
             continue
 
         if cloud_mask == CLOUD_MASK_SCL:
-            clear, valid = compute_masks_from_scl(scl_scene)
-            del scl_scene
+            clear, valid = compute_masks_from_scl(mask_result)
         else:
             clear, valid = compute_masks_from_array(
-                ocm_scene,
+                mask_result,
                 batch_size=ocm_batch_size,
                 inference_dtype=ocm_inference_dtype,
             )
-            del ocm_scene
             if ocm_crop is not None:
                 clear = clear[ocm_crop]
                 valid = valid[ocm_crop]
@@ -862,6 +902,11 @@ def run_bounds_pipeline(
                 break
 
     if mask_progress is not None:
+        # `first` mode and no_data_threshold can break the loop early. Snap
+        # the bar to total so tqdm renders it as complete rather than red.
+        remaining = mask_progress.total - mask_progress.n
+        if remaining > 0:
+            mask_progress.update(remaining)
         mask_progress.close()
 
     if n_mask_fetch_failed:
@@ -947,6 +992,39 @@ def run_bounds_pipeline(
         h,
         w,
     )
+    profile: Dict[str, Any] = {
+        "driver": "GTiff",
+        "dtype": np.dtype(np.uint8) if is_visual else np.dtype(np.uint16),
+        "width": w,
+        "height": h,
+        "count": n_bands,
+        "crs": CRS.from_epsg(target_crs),
+        "transform": user_transform,
+    }
+    output_coverage_mask = coverage_mask if coverage_threshold_pct is not None else None
+
+    if export_path is not None:
+        return write_tile_aggregation_geotiff(
+            export_path=export_path,
+            profile=profile,
+            required_bands=required_bands,
+            masks=masks_in_order,
+            read_fn=read_fn,
+            bands_count=n_bands,
+            height=h,
+            width=w,
+            coverage_mask=coverage_mask,
+            output_coverage_mask=output_coverage_mask,
+            no_data_threshold=no_data_threshold,
+            tile_observation_target=tile_observation_target,
+            mosaic_method=mosaic_method,
+            percentile_value=percentile_value,
+            tile_size=tile_size,
+            tile_workers=tile_workers,
+            out_dtype=np.dtype(np.uint8) if is_visual else np.dtype(np.uint16),
+            show_progress=show_progress,
+        )
+
     output_array = run_tile_aggregation(
         masks=masks_in_order,
         read_fn=read_fn,
@@ -959,25 +1037,15 @@ def run_bounds_pipeline(
         mosaic_method=mosaic_method,
         percentile_value=percentile_value,
         tile_size=tile_size,
-        tile_workers=None,
+        tile_workers=tile_workers,
         out_dtype=np.dtype(np.uint8) if is_visual else np.dtype(np.uint16),
         show_progress=show_progress,
     )
-
-    profile: Dict[str, Any] = {
-        "driver": "GTiff",
-        "dtype": output_array.dtype,
-        "width": w,
-        "height": h,
-        "count": output_array.shape[0],
-        "crs": CRS.from_epsg(target_crs),
-        "transform": user_transform,
-    }
 
     return finalize_output(
         array=output_array,
         profile=profile,
         required_bands=required_bands,
-        coverage_mask=coverage_mask if coverage_threshold_pct is not None else None,
+        coverage_mask=output_coverage_mask,
         export_path=export_path,
     )

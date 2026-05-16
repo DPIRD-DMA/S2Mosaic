@@ -54,6 +54,7 @@ def mosaic(
     cloud_mask: str = ...,
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
+    tile_workers: Optional[int] = ...,
     show_progress: bool = ...,
 ) -> Tuple[npt.NDArray[Any], Dict[str, Any]]: ...
 
@@ -90,6 +91,7 @@ def mosaic(
     cloud_mask: str = ...,
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
+    tile_workers: Optional[int] = ...,
     show_progress: bool = ...,
 ) -> Path: ...
 
@@ -126,6 +128,7 @@ def mosaic(
     cloud_mask: str = ...,
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
+    tile_workers: Optional[int] = ...,
     show_progress: bool = ...,
 ) -> Path: ...
 
@@ -161,6 +164,7 @@ def mosaic(
     cloud_mask: str = "OCM",
     ocm_batch_size: int = 1,
     ocm_inference_dtype: str = "bf16",
+    tile_workers: Optional[int] = None,
     show_progress: bool = False,
 ) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
     """
@@ -232,6 +236,10 @@ def mosaic(
             (one COG read, no inference) but lower accuracy.
         ocm_batch_size (int, optional): Batch size for OCM inference. Defaults to 1.
         ocm_inference_dtype (str, optional): Data type for OCM inference. Defaults to "bf16".
+        tile_workers (int, optional): Number of output tiles to aggregate
+            concurrently. Higher values can improve throughput for
+            network-bound reads, but increase memory use and simultaneous
+            source reads. Defaults to ``min(4, os.cpu_count() or 1)``.
         show_progress (bool, optional): Show tqdm progress bars for the
             cloud-mask and tile-aggregation phases. Defaults to False.
 
@@ -284,6 +292,7 @@ def mosaic(
             cloud_mask=cloud_mask,
             ocm_batch_size=ocm_batch_size,
             ocm_inference_dtype=ocm_inference_dtype,
+            tile_workers=tile_workers,
             show_progress=show_progress,
         )
 
@@ -314,6 +323,7 @@ def mosaic(
         mosaic_method=mosaic_method,
         no_data_threshold=no_data_threshold,
         tile_observation_target=tile_observation_target,
+        tile_workers=tile_workers,
         required_bands=required_bands,
         grid_id=grid_id,
         percentile_value=percentile_value,
@@ -390,11 +400,14 @@ def mosaic(
 
     logger.info(f"Sorted {len(sorted_items)} scenes using {sort_method} method.")
 
+    output_coverage_mask = coverage_mask if coverage_threshold_pct is not None else None
     mosaic, profile = stream_mosaic_pipeline(
         sorted_scenes=sorted_items,
         required_bands=required_bands,
         no_data_threshold=no_data_threshold,
         tile_observation_target=tile_observation_target,
+        export_path=export_path,
+        output_coverage_mask=output_coverage_mask,
         mosaic_method=mosaic_method,
         ocm_batch_size=ocm_batch_size,
         ocm_inference_dtype=ocm_inference_dtype,
@@ -404,12 +417,16 @@ def mosaic(
         resampling_method=resampling_method,
         resolution=resolution,
         cloud_mask=cloud_mask,
+        tile_workers=tile_workers,
         show_progress=show_progress,
     )
+    if export_path is not None:
+        return export_path
+    assert mosaic is not None
     return finalize_output(
         array=mosaic,
         profile=profile,
         required_bands=required_bands,
-        coverage_mask=coverage_mask if coverage_threshold_pct is not None else None,
+        coverage_mask=output_coverage_mask,
         export_path=export_path,
     )

@@ -1,12 +1,15 @@
 import logging
+import os
 import sys
 import threading
+import time
 import warnings
 from datetime import date, datetime, timezone
 from pathlib import Path
 
 import cv2
 import numpy as np
+import pandas as pd
 import pytest
 import rasterio as rio
 from rasterio.enums import Resampling
@@ -18,6 +21,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from s2mosaic import mosaic
+import s2mosaic.mosaic_core as mosaic_core
 from s2mosaic.bounds import (
     _expand_bounds_for_ocm_context,
     _rasterize_aoi_mask,
@@ -25,7 +29,12 @@ from s2mosaic.bounds import (
     pick_utm_epsg,
     reproject_bbox,
 )
-from s2mosaic.helpers import get_output_path, resolve_export_path, validate_inputs
+from s2mosaic.helpers import (
+    SceneFetchError,
+    get_output_path,
+    resolve_export_path,
+    validate_inputs,
+)
 from s2mosaic.frequent_coverage import (
     get_coverage,
     get_frequent_coverage_for_bbox,
@@ -37,14 +46,19 @@ from s2mosaic.masking import (
     get_valid_mask,
 )
 from s2mosaic.mosaic_core import (
+    DEFAULT_TILE_WORKERS,
     _HandleCache,
-    _nanquantile_axis0,
     _read_with_retry,
+    _nanquantile_axis0,
     _warm_nanquantile_axis0,
     _write_tiled_copy,
+    iter_ordered_fetches,
     run_tile_aggregation,
     should_prewarm_sources,
+    stream_mosaic_pipeline,
+    write_tile_aggregation_geotiff,
 )
+from s2mosaic.stac_utils import ITEM_COL
 
 
 class TestGetValidMask:
@@ -331,6 +345,79 @@ class TestRunTileAggregation:
             tile_workers=None,
         )
 
+        assert any(name != "MainThread" for name in thread_names)
+        np.testing.assert_allclose(out, 20.0)
+
+    @pytest.mark.parametrize("mosaic_method", ["mean", "first", "percentile"])
+    def test_default_tile_workers_are_shared_by_all_methods(
+        self, monkeypatch, mosaic_method
+    ):
+        captured_workers = []
+
+        class FakeExecutor:
+            def __init__(self, max_workers):
+                captured_workers.append(max_workers)
+
+            def map(self, fn, specs):
+                return map(fn, specs)
+
+            def shutdown(self, wait):
+                assert wait is True
+
+        monkeypatch.setattr(mosaic_core, "ThreadPoolExecutor", FakeExecutor)
+
+        scenes = np.full((1, 1, self.H, self.W), 10, dtype=np.uint16)
+        out = run_tile_aggregation(
+            masks=[np.ones((self.H, self.W), dtype=bool)],
+            read_fn=self._read_fn_for(scenes),
+            bands_count=1,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            no_data_threshold=None,
+            mosaic_method=mosaic_method,
+            percentile_value=50.0 if mosaic_method == "percentile" else None,
+            tile_size=2,
+            tile_workers=None,
+        )
+
+        expected_workers = [DEFAULT_TILE_WORKERS] if DEFAULT_TILE_WORKERS > 1 else []
+        assert captured_workers == expected_workers
+        np.testing.assert_array_equal(out, np.full((1, self.H, self.W), 10))
+
+    def test_percentile_single_worker_runs_reads_on_main_thread(self):
+        thread_names = []
+        scenes = np.stack(
+            [
+                np.full((1, self.H, self.W), 10, dtype=np.uint16),
+                np.full((1, self.H, self.W), 30, dtype=np.uint16),
+            ],
+            axis=0,
+        )
+        masks = [
+            np.ones((self.H, self.W), dtype=bool),
+            np.ones((self.H, self.W), dtype=bool),
+        ]
+
+        def read_fn(scene_idx, band_idx, spec):
+            thread_names.append(threading.current_thread().name)
+            r, c, h, w = spec
+            return scenes[scene_idx, band_idx, r : r + h, c : c + w]
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=read_fn,
+            bands_count=1,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            no_data_threshold=None,
+            mosaic_method="percentile",
+            percentile_value=50.0,
+            tile_size=3,
+            tile_workers=1,
+        )
+
         assert set(thread_names) == {"MainThread"}
         np.testing.assert_allclose(out, 20.0)
 
@@ -520,6 +607,150 @@ class TestRunTileAggregation:
         assert reads == [0, 1]
         np.testing.assert_array_equal(out, expected)
 
+    def test_write_tile_aggregation_geotiff_streams_tiles(self, tmp_path):
+        reads = []
+
+        def read_fn(scene_idx, band_idx, spec):
+            reads.append((scene_idx, band_idx, spec))
+            _, _, h, w = spec
+            return np.full((h, w), 10 + scene_idx * 20, dtype=np.uint16)
+
+        profile = {
+            "driver": "GTiff",
+            "dtype": np.dtype(np.uint16),
+            "width": self.W,
+            "height": self.H,
+            "count": 1,
+            "crs": None,
+            "transform": from_origin(0, self.H, 1, 1),
+        }
+        export_path = tmp_path / "streamed.tif"
+
+        result = write_tile_aggregation_geotiff(
+            export_path=export_path,
+            profile=profile,
+            required_bands=["B04"],
+            masks=[
+                np.ones((self.H, self.W), dtype=bool),
+                np.ones((self.H, self.W), dtype=bool),
+            ],
+            read_fn=read_fn,
+            bands_count=1,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            output_coverage_mask=None,
+            no_data_threshold=None,
+            mosaic_method="mean",
+            percentile_value=None,
+            tile_size=3,
+            tile_workers=1,
+            out_dtype=np.dtype(np.uint16),
+        )
+
+        assert result == export_path
+        assert reads
+        with rio.open(export_path) as src:
+            assert src.count == 1
+            assert src.nodata == 0
+            assert src.descriptions == ("B04",)
+            np.testing.assert_array_equal(
+                src.read(1), np.full((self.H, self.W), 20, dtype=np.uint16)
+            )
+
+    def test_write_tile_aggregation_geotiff_applies_output_coverage(self, tmp_path):
+        coverage = np.ones((self.H, self.W), dtype=bool)
+        coverage[0, 0] = False
+
+        def read_fn(scene_idx, band_idx, spec):
+            _, _, h, w = spec
+            return np.full((h, w), 10, dtype=np.uint16)
+
+        export_path = tmp_path / "covered.tif"
+        write_tile_aggregation_geotiff(
+            export_path=export_path,
+            profile={
+                "driver": "GTiff",
+                "dtype": np.dtype(np.uint16),
+                "width": self.W,
+                "height": self.H,
+                "count": 1,
+                "crs": None,
+                "transform": from_origin(0, self.H, 1, 1),
+            },
+            required_bands=["B04"],
+            masks=[np.ones((self.H, self.W), dtype=bool)],
+            read_fn=read_fn,
+            bands_count=1,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            output_coverage_mask=coverage,
+            no_data_threshold=None,
+            mosaic_method="mean",
+            percentile_value=None,
+            tile_size=3,
+            tile_workers=1,
+            out_dtype=np.dtype(np.uint16),
+        )
+
+        with rio.open(export_path) as src:
+            data = src.read(1)
+        assert data[0, 0] == 0
+        assert data[0, 1] == 10
+
+    def test_write_tile_aggregation_geotiff_does_not_allocate_full_output(
+        self, tmp_path, monkeypatch
+    ):
+        import s2mosaic.mosaic_core as mosaic_core
+
+        bands_count = 2
+        height = 9
+        width = 11
+        full_output_shape = (bands_count, height, width)
+        large_allocations = []
+        original_zeros = mosaic_core.np.zeros
+
+        def tracking_zeros(shape, *args, **kwargs):
+            if tuple(shape) == full_output_shape:
+                large_allocations.append(shape)
+            return original_zeros(shape, *args, **kwargs)
+
+        monkeypatch.setattr(mosaic_core.np, "zeros", tracking_zeros)
+
+        def read_fn(scene_idx, band_idx, spec):
+            _, _, h, w = spec
+            return np.full((h, w), scene_idx + band_idx + 1, dtype=np.uint16)
+
+        write_tile_aggregation_geotiff(
+            export_path=tmp_path / "no_full_alloc.tif",
+            profile={
+                "driver": "GTiff",
+                "dtype": np.dtype(np.uint16),
+                "width": width,
+                "height": height,
+                "count": bands_count,
+                "crs": None,
+                "transform": from_origin(0, height, 1, 1),
+            },
+            required_bands=["B04", "B03"],
+            masks=[np.ones((height, width), dtype=bool)],
+            read_fn=read_fn,
+            bands_count=bands_count,
+            height=height,
+            width=width,
+            coverage_mask=np.ones((height, width), dtype=bool),
+            output_coverage_mask=None,
+            no_data_threshold=None,
+            mosaic_method="mean",
+            percentile_value=None,
+            tile_size=4,
+            tile_workers=1,
+            out_dtype=np.dtype(np.uint16),
+        )
+
+        assert large_allocations == []
+
 
 class TestNanquantileAxis0:
     """Custom Numba percentile reducer must match NumPy nanquantile semantics."""
@@ -582,6 +813,12 @@ class TestNanquantileAxis0:
             dtype=np.float32,
         )
         self._assert_matches_numpy(stack, 0.5)
+
+    def test_default_tile_workers_uses_thread_safe_percentile_kernel(self):
+        _warm_nanquantile_axis0()
+
+        assert DEFAULT_TILE_WORKERS == min(4, os.cpu_count() or 1)
+        assert _nanquantile_axis0.signatures
 
 
 class TestReprojectBbox:
@@ -907,6 +1144,182 @@ class TestExportPaths:
             )
 
 
+class TestOrderedPrefetch:
+    class FakeItem:
+        def __init__(self, scene_id, delay):
+            self.id = scene_id
+            self.delay = delay
+
+    def test_yields_sorted_items_while_fetching_in_parallel(self):
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def fake_fetch(_idx, item):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                time.sleep(item.delay)
+                return np.full((1, 1), int(item.id), dtype=np.uint8)
+            finally:
+                with lock:
+                    active -= 1
+
+        items = [
+            self.FakeItem("0", 0.05),
+            self.FakeItem("1", 0.0),
+            self.FakeItem("2", 0.0),
+        ]
+
+        got = list(
+            iter_ordered_fetches(
+                items=items,
+                fetch_fn=fake_fetch,
+                max_workers=2,
+            )
+        )
+
+        assert [i for i, _ in got] == [0, 1, 2]
+        assert [int(arr[0, 0]) for _, arr in got] == [0, 1, 2]
+        assert max_active == 2
+
+    def test_reports_fetch_failures_in_item_order(self):
+        def fake_fetch(_idx, item):
+            if item.id == "1":
+                raise SceneFetchError("failed")
+            return np.full((1, 1), int(item.id), dtype=np.uint8)
+
+        items = [
+            self.FakeItem("0", 0.0),
+            self.FakeItem("1", 0.0),
+            self.FakeItem("2", 0.0),
+        ]
+
+        got = list(
+            iter_ordered_fetches(
+                items=items,
+                fetch_fn=fake_fetch,
+                max_workers=2,
+            )
+        )
+
+        assert [i for i, _ in got] == [0, 1, 2]
+        assert isinstance(got[1][1], SceneFetchError)
+
+
+class TestGridOrderedMaskStreaming:
+    class FakeAsset:
+        href = "sample.tif"
+
+    class FakeItem:
+        def __init__(self, scene_id):
+            self.id = scene_id
+            self.assets = {"B04": TestGridOrderedMaskStreaming.FakeAsset()}
+
+    def _sorted_scenes(self, n_scenes):
+        return pd.DataFrame(
+            {ITEM_COL: [self.FakeItem(f"scene-{i}") for i in range(n_scenes)]}
+        )
+
+    def _patch_grid_pipeline_io(self, monkeypatch):
+        import s2mosaic.mosaic_core as core_mod
+
+        monkeypatch.setattr(
+            core_mod,
+            "_build_output_profile",
+            lambda sample_href_signed, s2_scene_size: {
+                "driver": "GTiff",
+                "dtype": np.dtype(np.uint16),
+                "width": s2_scene_size,
+                "height": s2_scene_size,
+                "count": 1,
+                "crs": None,
+                "transform": from_origin(0, s2_scene_size, 1, 1),
+            },
+        )
+        monkeypatch.setattr(
+            core_mod,
+            "make_grid_tile_reader",
+            lambda **_: (
+                lambda scene_idx, band_idx, spec: np.ones(
+                    (spec[2], spec[3]), dtype=np.uint16
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            core_mod,
+            "run_tile_aggregation",
+            lambda **kwargs: np.ones(
+                (kwargs["bands_count"], kwargs["height"], kwargs["width"]),
+                dtype=np.uint16,
+            ),
+        )
+
+    def test_grid_first_stops_mask_stream_after_coverage_is_filled(self, monkeypatch):
+        import s2mosaic.mosaic_core as core_mod
+
+        self._patch_grid_pipeline_io(monkeypatch)
+        calls = []
+
+        def fake_compute_one_scene_mask(**kwargs):
+            calls.append(kwargs["item"].id)
+            return np.ones((4, 4), dtype=bool)
+
+        monkeypatch.setattr(
+            core_mod, "_compute_one_scene_mask", fake_compute_one_scene_mask
+        )
+
+        out, profile = stream_mosaic_pipeline(
+            sorted_scenes=self._sorted_scenes(4),
+            required_bands=["B04"],
+            coverage_mask=np.ones((4, 4), dtype=bool),
+            no_data_threshold=None,
+            mosaic_method="first",
+            cloud_mask="SCL",
+            s2_scene_size=4,
+            tile_size=4,
+            tile_workers=1,
+        )
+
+        assert calls == ["scene-0"]
+        assert out is not None
+        assert profile["width"] == 4
+
+    def test_grid_mean_stops_mask_stream_at_no_data_threshold(self, monkeypatch):
+        import s2mosaic.mosaic_core as core_mod
+
+        self._patch_grid_pipeline_io(monkeypatch)
+        calls = []
+
+        def fake_compute_one_scene_mask(**kwargs):
+            calls.append(kwargs["item"].id)
+            if kwargs["item"].id == "scene-0":
+                mask = np.zeros((4, 4), dtype=bool)
+                mask[:2, :] = True
+                return mask
+            return np.ones((4, 4), dtype=bool)
+
+        monkeypatch.setattr(
+            core_mod, "_compute_one_scene_mask", fake_compute_one_scene_mask
+        )
+
+        stream_mosaic_pipeline(
+            sorted_scenes=self._sorted_scenes(4),
+            required_bands=["B04"],
+            coverage_mask=np.ones((4, 4), dtype=bool),
+            no_data_threshold=0.01,
+            mosaic_method="mean",
+            cloud_mask="SCL",
+            s2_scene_size=4,
+            tile_size=4,
+            tile_workers=1,
+        )
+
+        assert calls == ["scene-0", "scene-1"]
+
+
 class TestBoundsOcmContext:
     class FakeItem:
         id = "fake-scene"
@@ -1030,6 +1443,72 @@ class TestBoundsOcmContext:
         mask = aggregation_calls[0]["masks"][0]
         np.testing.assert_array_equal(mask, expected_cropped_mask)
         assert aggregation_calls[0]["coverage_mask"].shape == (5, 10)
+
+    def test_bounds_ocm_prefetch_is_capped_below_tile_workers(self, monkeypatch):
+        import s2mosaic.bounds as bounds_mod
+
+        prefetch_workers = []
+        aggregation_calls = []
+
+        monkeypatch.setattr(
+            bounds_mod,
+            "_search_for_items_by_bbox",
+            lambda **_: [self.FakeItem(), self.FakeItem(), self.FakeItem()],
+        )
+
+        def fake_iter_ordered_fetches(items, fetch_fn, max_workers):
+            prefetch_workers.append(max_workers)
+            for i, _item in enumerate(items):
+                yield i, np.zeros((3, 150, 150), dtype=np.uint16)
+
+        monkeypatch.setattr(
+            bounds_mod, "iter_ordered_fetches", fake_iter_ordered_fetches
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "compute_masks_from_array",
+            lambda array, *, batch_size, inference_dtype: (
+                np.ones(array.shape[1:], dtype=bool),
+                np.ones(array.shape[1:], dtype=bool),
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "make_bounds_tile_reader",
+            lambda **_: (
+                lambda scene_idx, band_idx, window: np.ones(
+                    (window[2], window[3]), dtype=np.uint16
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "run_tile_aggregation",
+            lambda **kwargs: (
+                aggregation_calls.append(kwargs)
+                or np.ones(
+                    (kwargs["bands_count"], kwargs["height"], kwargs["width"]),
+                    dtype=np.uint16,
+                )
+            ),
+        )
+
+        bounds_mod.run_bounds_pipeline(
+            bounds=(0.0, 0.0, 3000.0, 3000.0),
+            input_crs=32750,
+            output_crs=32750,
+            resolution=20,
+            start_year=2023,
+            duration_days=1,
+            required_bands=["B04"],
+            cloud_mask="OCM",
+            no_data_threshold=None,
+            coverage_threshold_pct=None,
+            tile_workers=8,
+        )
+
+        assert prefetch_workers == [2]
+        assert len(aggregation_calls[0]["masks"]) == 3
 
     def test_rasterize_aoi_mask_uses_polygon_shape(self):
         aoi = Polygon([(0.0, 0.0), (40.0, 0.0), (40.0, 40.0)])
@@ -1243,10 +1722,74 @@ class TestBoundsOcmContext:
             required_bands=["B04"],
             cloud_mask="SCL",
             coverage_threshold_pct=None,
+            tile_workers=2,
             show_progress=True,
         )
 
         assert aggregation_calls[0]["show_progress"] is True
+        assert aggregation_calls[0]["tile_workers"] == 2
+
+    def test_bounds_export_uses_streaming_geotiff_writer(self, monkeypatch, tmp_path):
+        import s2mosaic.bounds as bounds_mod
+
+        writer_calls = []
+        export_path = tmp_path / "bounds.tif"
+
+        monkeypatch.setattr(
+            bounds_mod, "_search_for_items_by_bbox", lambda **_: [self.FakeItem()]
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "_fetch_one_scl",
+            lambda item, bounds_target, target_crs, mask_resolution: np.ones(
+                (4, 4), dtype=np.uint8
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "compute_masks_from_scl",
+            lambda scl: (
+                np.ones_like(scl, dtype=bool),
+                np.ones_like(scl, dtype=bool),
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "make_bounds_tile_reader",
+            lambda **_: (
+                lambda scene_idx, band_idx, window: np.ones(
+                    (window[2], window[3]), dtype=np.uint16
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "run_tile_aggregation",
+            lambda **_: pytest.fail("export should not build a full output array"),
+        )
+
+        def fake_writer(**kwargs):
+            writer_calls.append(kwargs)
+            kwargs["export_path"].write_bytes(b"fake")
+            return kwargs["export_path"]
+
+        monkeypatch.setattr(bounds_mod, "write_tile_aggregation_geotiff", fake_writer)
+
+        result = bounds_mod.run_bounds_pipeline(
+            bounds=(0.0, 0.0, 40.0, 40.0),
+            input_crs=32750,
+            output_crs=32750,
+            start_year=2023,
+            duration_days=1,
+            required_bands=["B04"],
+            cloud_mask="SCL",
+            coverage_threshold_pct=None,
+            output_path=export_path,
+        )
+
+        assert result == export_path
+        assert len(writer_calls) == 1
+        assert writer_calls[0]["export_path"] == export_path
 
 
 class _FakeItem:
@@ -1762,6 +2305,16 @@ class TestMosaicSharedParamsValidation:
     def test_bounds_mode_rejects_invalid_cloud_mask(self):
         with pytest.raises(ValueError, match="Invalid cloud_mask"):
             mosaic(start_year=2023, bounds=self.BOUNDS, cloud_mask="bogus")
+
+    @pytest.mark.parametrize("tile_workers", [0, -1, True])
+    def test_grid_mode_rejects_invalid_tile_workers(self, tile_workers):
+        with pytest.raises(ValueError, match="tile_workers must be"):
+            mosaic(grid_id="50HMH", start_year=2023, tile_workers=tile_workers)
+
+    @pytest.mark.parametrize("tile_workers", [0, -1, False])
+    def test_bounds_mode_rejects_invalid_tile_workers(self, tile_workers):
+        with pytest.raises(ValueError, match="tile_workers must be"):
+            mosaic(start_year=2023, bounds=self.BOUNDS, tile_workers=tile_workers)
 
 
 class TestPickOcmResolution:
