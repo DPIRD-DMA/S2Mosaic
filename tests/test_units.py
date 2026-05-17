@@ -50,6 +50,7 @@ from s2mosaic.mosaic_core import (
     _HandleCache,
     _read_with_retry,
     _nanquantile_axis0,
+    _split_tile_size_aligned,
     _warm_nanquantile_axis0,
     _write_tiled_copy,
     adaptive_tile_specs_for_masks,
@@ -332,6 +333,35 @@ class TestRunTileAggregation:
         assert (1024, 1024, 1024, 1024) in specs
         assert all(r < 1536 or c < 1536 for r, c, _, _ in specs)
         assert (0, 512, 512, 512) not in specs
+
+    @pytest.mark.parametrize(
+        "length, expected",
+        [
+            (256, [256]),
+            (512, [512]),
+            (738, [512, 226]),
+            (1024, [512, 512]),
+            (1536, [1024, 512]),
+            (2048, [1024, 1024]),
+        ],
+    )
+    def test_adaptive_tile_split_prefers_512_aligned_boundaries(self, length, expected):
+        assert _split_tile_size_aligned(length, 512) == expected
+
+    def test_adaptive_tile_specs_use_aligned_splits_for_uneven_tiles(self):
+        mask = np.zeros((738, 738), dtype=bool)
+        mask[0:32, 0:32] = True
+
+        specs = adaptive_tile_specs_for_masks(
+            masks=[mask],
+            height=738,
+            width=738,
+            max_tile_size=738,
+            min_tile_size=512,
+            dense_fraction=0.5,
+        )
+
+        assert specs == [(0, 0, 512, 512)]
 
     def test_fixed_tiling_opt_out_yields_empty_tiles(self):
         scenes = np.ones((1, 1, 4, 4), dtype=np.uint16)
@@ -1638,6 +1668,87 @@ class TestBoundsOcmContext:
         assert mask.shape == (4, 4)
         assert mask.dtype == bool
         assert 0 < mask.sum() < mask.size
+
+    def test_aoi_scl_uses_adaptive_tile_windows_for_sparse_masks(self, monkeypatch):
+        import s2mosaic.bounds as bounds_mod
+
+        aoi = Polygon(
+            [
+                (390_000.0, 6_460_000.0),
+                (410_480.0, 6_460_000.0),
+                (410_480.0, 6_480_480.0),
+                (390_000.0, 6_480_480.0),
+            ]
+        )
+        fetch_tile_specs = []
+
+        def fake_rasterize_aoi_mask(**kwargs):
+            mask = np.zeros((kwargs["height"], kwargs["width"]), dtype=bool)
+            mask[:64, :] = True
+            return mask
+
+        def fake_fetch_one_scl_tiled(
+            item,
+            bounds_target,
+            target_crs,
+            mask_resolution,
+            width,
+            height,
+            tile_specs,
+        ):
+            fetch_tile_specs.append(tile_specs)
+            return np.ones((height, width), dtype=np.uint8)
+
+        monkeypatch.setattr(
+            bounds_mod, "_search_for_items_by_aoi", lambda **_: [self.FakeItem()]
+        )
+        monkeypatch.setattr(bounds_mod, "_rasterize_aoi_mask", fake_rasterize_aoi_mask)
+        monkeypatch.setattr(
+            bounds_mod, "_fetch_one_scl_tiled", fake_fetch_one_scl_tiled
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "compute_masks_from_scl",
+            lambda scl: (
+                np.ones_like(scl, dtype=bool),
+                np.ones_like(scl, dtype=bool),
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "make_bounds_tile_reader",
+            lambda **_: (
+                lambda scene_idx, band_idx, window: np.ones(
+                    (window[2], window[3]), dtype=np.uint16
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "run_tile_aggregation",
+            lambda **kwargs: np.ones(
+                (kwargs["bands_count"], kwargs["height"], kwargs["width"]),
+                dtype=np.uint16,
+            ),
+        )
+
+        bounds_mod.run_bounds_pipeline(
+            aoi=aoi,
+            input_crs=32750,
+            output_crs=32750,
+            start_year=2023,
+            duration_days=1,
+            required_bands=["B04"],
+            cloud_mask="SCL",
+            coverage_threshold_pct=None,
+            no_data_threshold=None,
+            adaptive_tiling=True,
+        )
+
+        assert fetch_tile_specs
+        assert fetch_tile_specs[0] != [(0, 0, 2048, 2048)]
+        assert all(h <= 512 and w <= 512 for _, _, h, w in fetch_tile_specs[0])
+        assert len(fetch_tile_specs[0]) == 4
 
     def test_aoi_pipeline_uses_polygon_search(self, monkeypatch):
         import s2mosaic.bounds as bounds_mod

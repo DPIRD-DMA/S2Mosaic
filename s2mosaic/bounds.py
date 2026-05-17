@@ -67,6 +67,7 @@ from .mosaic_core import (
     DEFAULT_TILE_WORKERS,
     _prewarm_sources,
     _write_tiled_copy,
+    adaptive_tile_specs_for_masks,
     iter_ordered_fetches,
     materialise_tiled_band,
     run_tile_aggregation,
@@ -477,6 +478,46 @@ def _fetch_one_scl(
     return arr.astype(np.uint8)
 
 
+@with_scene_retry()
+def _fetch_one_scl_tiled(
+    item: Any,
+    bounds_target: Bbox,
+    target_crs: int,
+    mask_resolution: int,
+    width: int,
+    height: int,
+    tile_specs: List[Tuple[int, int, int, int]],
+) -> npt.NDArray[Any]:
+    """Fetch one scene's SCL band using sparse AOI tile windows."""
+    if tile_specs == [(0, 0, height, width)]:
+        return _fetch_one_scl(item, bounds_target, target_crs, mask_resolution)
+
+    transform, expected_width, expected_height, target_crs_obj = _target_grid(
+        bounds_target, mask_resolution, target_crs
+    )
+    if expected_width != width or expected_height != height:
+        raise ValueError(
+            "SCL tile grid does not match requested bounds grid: "
+            f"expected {(expected_width, expected_height)}, got {(width, height)}"
+        )
+
+    rio_resampling = get_rasterio_resampling("nearest")
+    href = planetary_computer.sign(item.assets["SCL"].href)
+    out = np.zeros((height, width), dtype=np.uint8)
+    with rio.open(href) as src:
+        with WarpedVRT(
+            src,
+            crs=target_crs_obj,
+            transform=transform,
+            width=width,
+            height=height,
+            resampling=rio_resampling,
+        ) as vrt:
+            for r, c, h, w in tile_specs:
+                out[r : r + h, c : c + w] = vrt.read(1, window=Window(c, r, w, h))
+    return out
+
+
 def _fetch_one_ocm_key(
     item: Any,
     bounds_target: Bbox,
@@ -788,6 +829,19 @@ def run_bounds_pipeline(
             height=mask_h,
         )
     possible_pixel_count = int(coverage_mask_ocm.sum())
+    scl_tile_specs: Optional[List[Tuple[int, int, int, int]]] = None
+    if (
+        cloud_mask == CLOUD_MASK_SCL
+        and aoi_target is not None
+        and adaptive_tiling
+        and possible_pixel_count > 0
+    ):
+        scl_tile_specs = adaptive_tile_specs_for_masks(
+            masks=[coverage_mask_ocm],
+            height=mask_h,
+            width=mask_w,
+            max_tile_size=min(2048, max(mask_h, mask_w)),
+        )
 
     # Phase 1+2: stream cloud-mask fetch + classification. One scene's mask
     # input is in memory at a time, and late scenes are skipped entirely once
@@ -813,8 +867,18 @@ def run_bounds_pipeline(
     if cloud_mask == CLOUD_MASK_SCL:
         mask_fetch_iter = iter_ordered_fetches(
             items=items_list,
-            fetch_fn=lambda _i, item: _fetch_one_scl(
-                item, bounds_target, target_crs, mask_resolution
+            fetch_fn=lambda _i, item: (
+                _fetch_one_scl_tiled(
+                    item,
+                    bounds_target,
+                    target_crs,
+                    mask_resolution,
+                    mask_w,
+                    mask_h,
+                    scl_tile_specs,
+                )
+                if scl_tile_specs is not None
+                else _fetch_one_scl(item, bounds_target, target_crs, mask_resolution)
             ),
             max_workers=phase1_workers,
         )

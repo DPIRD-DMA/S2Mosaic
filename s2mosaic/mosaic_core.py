@@ -68,7 +68,7 @@ REMOTE_READ_ATTEMPTS = 3
 DEFAULT_OUTPUT_DTYPE = np.dtype(np.uint16)
 DEFAULT_TILE_WORKERS = min(4, os.cpu_count() or 1)
 DEFAULT_ADAPTIVE_TILE_MIN_SIZE = 512
-DEFAULT_ADAPTIVE_TILE_DENSE_FRACTION = 0.5
+DEFAULT_ADAPTIVE_TILE_DENSE_FRACTION = 0.75
 T = TypeVar("T")
 
 
@@ -672,6 +672,19 @@ def tile_specs_for(
     return specs
 
 
+def _split_tile_size_aligned(length: int, min_tile_size: int) -> List[int]:
+    """Split a sparse tile dimension on a min-tile multiple where possible."""
+    if length <= min_tile_size:
+        return [length]
+
+    midpoint = length / 2
+    split = round(midpoint / min_tile_size) * min_tile_size
+    split = max(min_tile_size, min(split, length - min_tile_size))
+    if split <= 0 or split >= length:
+        return [length]
+    return [split, length - split]
+
+
 def adaptive_tile_specs_for_masks(
     masks: List[Optional[npt.NDArray[Any]]],
     height: int,
@@ -698,8 +711,8 @@ def adaptive_tile_specs_for_masks(
             specs.append((r, c, h, w))
             return
 
-        row_sizes = [h] if h <= min_tile_size else [h // 2, h - h // 2]
-        col_sizes = [w] if w <= min_tile_size else [w // 2, w - w // 2]
+        row_sizes = _split_tile_size_aligned(h, min_tile_size)
+        col_sizes = _split_tile_size_aligned(w, min_tile_size)
         rr = r
         for rh in row_sizes:
             cc = c
