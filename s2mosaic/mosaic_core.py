@@ -67,6 +67,8 @@ logger = logging.getLogger(__name__)
 REMOTE_READ_ATTEMPTS = 3
 DEFAULT_OUTPUT_DTYPE = np.dtype(np.uint16)
 DEFAULT_TILE_WORKERS = min(4, os.cpu_count() or 1)
+DEFAULT_ADAPTIVE_TILE_MIN_SIZE = 512
+DEFAULT_ADAPTIVE_TILE_DENSE_FRACTION = 0.5
 T = TypeVar("T")
 
 
@@ -670,6 +672,47 @@ def tile_specs_for(
     return specs
 
 
+def adaptive_tile_specs_for_masks(
+    masks: List[Optional[npt.NDArray[Any]]],
+    height: int,
+    width: int,
+    max_tile_size: int,
+    min_tile_size: int = DEFAULT_ADAPTIVE_TILE_MIN_SIZE,
+    dense_fraction: float = DEFAULT_ADAPTIVE_TILE_DENSE_FRACTION,
+) -> List[Tuple[int, int, int, int]]:
+    """Mixed-size tile specs based on where any scene can contribute pixels."""
+    specs: List[Tuple[int, int, int, int]] = []
+
+    def contribution_fraction(r: int, c: int, h: int, w: int) -> float:
+        combined = np.zeros((h, w), dtype=bool)
+        for mask in masks:
+            if mask is not None:
+                combined |= mask[r : r + h, c : c + w]
+        return float(combined.sum()) / float(h * w)
+
+    def add_tile(r: int, c: int, h: int, w: int) -> None:
+        fraction = contribution_fraction(r, c, h, w)
+        if fraction == 0.0:
+            return
+        if fraction >= dense_fraction or (h <= min_tile_size and w <= min_tile_size):
+            specs.append((r, c, h, w))
+            return
+
+        row_sizes = [h] if h <= min_tile_size else [h // 2, h - h // 2]
+        col_sizes = [w] if w <= min_tile_size else [w // 2, w - w // 2]
+        rr = r
+        for rh in row_sizes:
+            cc = c
+            for cw in col_sizes:
+                add_tile(rr, cc, rh, cw)
+                cc += cw
+            rr += rh
+
+    for spec in tile_specs_for(height, width, max_tile_size):
+        add_tile(*spec)
+    return specs
+
+
 def _expected_reads_upper_bound(
     masks: List[Optional[npt.NDArray[Any]]],
     specs: List[Tuple[int, int, int, int]],
@@ -709,6 +752,8 @@ def run_tile_aggregation(
     tile_workers: Optional[int],
     out_dtype: "np.dtype[Any]" = DEFAULT_OUTPUT_DTYPE,
     tile_observation_target: Optional[int] = None,
+    adaptive_tiling: bool = True,
+    tile_specs: Optional[List[Tuple[int, int, int, int]]] = None,
     show_progress: bool = False,
 ) -> npt.NDArray[Any]:
     """Generic streaming aggregation. Called by both grid_id and bounds modes.
@@ -733,6 +778,8 @@ def run_tile_aggregation(
         tile_workers=tile_workers,
         out_dtype=out_dtype,
         tile_observation_target=tile_observation_target,
+        adaptive_tiling=adaptive_tiling,
+        tile_specs=tile_specs,
         show_progress=show_progress,
     ):
         r, c, h, w = spec
@@ -754,10 +801,22 @@ def iter_tile_aggregation(
     tile_workers: Optional[int],
     out_dtype: "np.dtype[Any]" = DEFAULT_OUTPUT_DTYPE,
     tile_observation_target: Optional[int] = None,
+    adaptive_tiling: bool = True,
+    tile_specs: Optional[List[Tuple[int, int, int, int]]] = None,
     show_progress: bool = False,
 ) -> Iterator[Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]]:
     """Yield aggregated output tiles without allocating the full mosaic."""
-    specs = tile_specs_for(height, width, tile_size)
+    if tile_specs is not None:
+        specs = tile_specs
+    elif adaptive_tiling:
+        specs = adaptive_tile_specs_for_masks(
+            masks=masks,
+            height=height,
+            width=width,
+            max_tile_size=tile_size,
+        )
+    else:
+        specs = tile_specs_for(height, width, tile_size)
 
     # Phase 2 progress is per band-read rather than per tile so the bar
     # advances smoothly. Total is the upper bound — each (scene, band) read
@@ -885,6 +944,8 @@ def write_tile_aggregation_geotiff(
     tile_workers: Optional[int],
     out_dtype: "np.dtype[Any]" = DEFAULT_OUTPUT_DTYPE,
     tile_observation_target: Optional[int] = None,
+    adaptive_tiling: bool = True,
+    tile_specs: Optional[List[Tuple[int, int, int, int]]] = None,
     show_progress: bool = False,
 ) -> Path:
     """Aggregate tiles and write them directly into a GeoTIFF."""
@@ -916,6 +977,8 @@ def write_tile_aggregation_geotiff(
             tile_workers=tile_workers,
             out_dtype=out_dtype,
             tile_observation_target=tile_observation_target,
+            adaptive_tiling=adaptive_tiling,
+            tile_specs=tile_specs,
             show_progress=show_progress,
         ):
             r, c, h, w = spec
@@ -1058,6 +1121,7 @@ def stream_mosaic_pipeline(
     cloud_mask: str = CLOUD_MASK_OCM,
     tile_size: int = 2048,
     tile_workers: Optional[int] = None,
+    adaptive_tiling: bool = True,
     show_progress: bool = False,
 ) -> Tuple[Optional[npt.NDArray[Any]], Dict[str, Any]]:
     """Tile-streamed mosaic for grid_id mode.
@@ -1255,6 +1319,7 @@ def stream_mosaic_pipeline(
             tile_size=tile_size,
             tile_workers=tile_workers,
             out_dtype=out_dtype,
+            adaptive_tiling=adaptive_tiling,
             show_progress=show_progress,
         )
         return None, last_profile
@@ -1273,6 +1338,7 @@ def stream_mosaic_pipeline(
         tile_size=tile_size,
         tile_workers=tile_workers,
         out_dtype=out_dtype,
+        adaptive_tiling=adaptive_tiling,
         show_progress=show_progress,
     )
     return out, last_profile

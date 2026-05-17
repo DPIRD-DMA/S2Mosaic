@@ -55,6 +55,7 @@ def mosaic(
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
     tile_workers: Optional[int] = ...,
+    adaptive_tiling: bool = ...,
     show_progress: bool = ...,
 ) -> Tuple[npt.NDArray[Any], Dict[str, Any]]: ...
 
@@ -92,6 +93,7 @@ def mosaic(
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
     tile_workers: Optional[int] = ...,
+    adaptive_tiling: bool = ...,
     show_progress: bool = ...,
 ) -> Path: ...
 
@@ -129,6 +131,7 @@ def mosaic(
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
     tile_workers: Optional[int] = ...,
+    adaptive_tiling: bool = ...,
     show_progress: bool = ...,
 ) -> Path: ...
 
@@ -165,6 +168,7 @@ def mosaic(
     ocm_batch_size: int = 1,
     ocm_inference_dtype: str = "bf16",
     tile_workers: Optional[int] = None,
+    adaptive_tiling: bool = True,
     show_progress: bool = False,
 ) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
     """
@@ -240,6 +244,9 @@ def mosaic(
             concurrently. Higher values can improve throughput for
             network-bound reads, but increase memory use and simultaneous
             source reads. Defaults to ``min(4, os.cpu_count() or 1)``.
+        adaptive_tiling (bool, optional): Split sparse output tiles based on
+            the actual cloud-valid contribution masks. Reduces wasted reads for
+            irregular AOIs and sparse scene coverage. Defaults to True.
         show_progress (bool, optional): Show tqdm progress bars for the
             cloud-mask and tile-aggregation phases. Defaults to False.
 
@@ -293,6 +300,7 @@ def mosaic(
             ocm_batch_size=ocm_batch_size,
             ocm_inference_dtype=ocm_inference_dtype,
             tile_workers=tile_workers,
+            adaptive_tiling=adaptive_tiling,
             show_progress=show_progress,
         )
 
@@ -329,6 +337,7 @@ def mosaic(
         percentile_value=percentile_value,
         resampling_method=resampling_method,
         cloud_mask=cloud_mask,
+        adaptive_tiling=adaptive_tiling,
     )
     logger.info("All inputs validated successfully.")
 
@@ -418,6 +427,7 @@ def mosaic(
         resolution=resolution,
         cloud_mask=cloud_mask,
         tile_workers=tile_workers,
+        adaptive_tiling=adaptive_tiling,
         show_progress=show_progress,
     )
     if export_path is not None:

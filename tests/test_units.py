@@ -52,6 +52,8 @@ from s2mosaic.mosaic_core import (
     _nanquantile_axis0,
     _warm_nanquantile_axis0,
     _write_tiled_copy,
+    adaptive_tile_specs_for_masks,
+    iter_tile_aggregation,
     iter_ordered_fetches,
     run_tile_aggregation,
     should_prewarm_sources,
@@ -311,6 +313,118 @@ class TestRunTileAggregation:
         )
 
         np.testing.assert_allclose(out, 15.0)
+
+    def test_adaptive_tile_specs_skip_empty_and_split_sparse_tiles(self):
+        mask = np.zeros((2048, 2048), dtype=bool)
+        mask[0:32, 0:32] = True
+        mask[1024:2048, 1024:2048] = True
+
+        specs = adaptive_tile_specs_for_masks(
+            masks=[mask],
+            height=2048,
+            width=2048,
+            max_tile_size=2048,
+            min_tile_size=512,
+            dense_fraction=0.5,
+        )
+
+        assert (0, 0, 512, 512) in specs
+        assert (1024, 1024, 1024, 1024) in specs
+        assert all(r < 1536 or c < 1536 for r, c, _, _ in specs)
+        assert (0, 512, 512, 512) not in specs
+
+    def test_fixed_tiling_opt_out_yields_empty_tiles(self):
+        scenes = np.ones((1, 1, 4, 4), dtype=np.uint16)
+        mask = np.zeros((4, 4), dtype=bool)
+        mask[:2, :2] = True
+
+        def read_fn(scene_idx, band_idx, spec):
+            r, c, h, w = spec
+            return scenes[scene_idx, band_idx, r : r + h, c : c + w]
+
+        specs = [
+            spec
+            for spec, _ in iter_tile_aggregation(
+                masks=[mask],
+                read_fn=read_fn,
+                bands_count=1,
+                height=4,
+                width=4,
+                coverage_mask=np.ones((4, 4), dtype=bool),
+                no_data_threshold=None,
+                mosaic_method="mean",
+                percentile_value=None,
+                tile_size=2,
+                tile_workers=1,
+                adaptive_tiling=False,
+            )
+        ]
+
+        assert specs == [
+            (0, 0, 2, 2),
+            (0, 2, 2, 2),
+            (2, 0, 2, 2),
+            (2, 2, 2, 2),
+        ]
+
+    def test_adaptive_tiling_skips_empty_tiles(self):
+        scenes = np.ones((1, 1, 4, 4), dtype=np.uint16)
+        mask = np.zeros((4, 4), dtype=bool)
+        mask[:2, :2] = True
+
+        def read_fn(scene_idx, band_idx, spec):
+            r, c, h, w = spec
+            return scenes[scene_idx, band_idx, r : r + h, c : c + w]
+
+        specs = [
+            spec
+            for spec, _ in iter_tile_aggregation(
+                masks=[mask],
+                read_fn=read_fn,
+                bands_count=1,
+                height=4,
+                width=4,
+                coverage_mask=np.ones((4, 4), dtype=bool),
+                no_data_threshold=None,
+                mosaic_method="mean",
+                percentile_value=None,
+                tile_size=2,
+                tile_workers=1,
+                adaptive_tiling=True,
+            )
+        ]
+
+        assert specs == [(0, 0, 2, 2)]
+
+    def test_adaptive_tiling_preserves_output_values(self):
+        reads = []
+        scenes = np.ones((1, 1, 4, 4), dtype=np.uint16)
+        mask = np.zeros((4, 4), dtype=bool)
+        mask[:2, :2] = True
+
+        def read_fn(scene_idx, band_idx, spec):
+            reads.append(spec)
+            r, c, h, w = spec
+            return scenes[scene_idx, band_idx, r : r + h, c : c + w]
+
+        out = run_tile_aggregation(
+            masks=[mask],
+            read_fn=read_fn,
+            bands_count=1,
+            height=4,
+            width=4,
+            coverage_mask=np.ones((4, 4), dtype=bool),
+            no_data_threshold=None,
+            mosaic_method="mean",
+            percentile_value=None,
+            tile_size=2,
+            tile_workers=1,
+            adaptive_tiling=True,
+        )
+
+        np.testing.assert_array_equal(out[0, :2, :2], np.ones((2, 2)))
+        np.testing.assert_array_equal(out[0, 2:, :], np.zeros((2, 4)))
+        assert reads == [(0, 0, 2, 2)]
 
     def test_percentile_default_runs_reads_on_main_thread(self):
         thread_names = []
@@ -2315,6 +2429,24 @@ class TestMosaicSharedParamsValidation:
     def test_bounds_mode_rejects_invalid_tile_workers(self, tile_workers):
         with pytest.raises(ValueError, match="tile_workers must be"):
             mosaic(start_year=2023, bounds=self.BOUNDS, tile_workers=tile_workers)
+
+    @pytest.mark.parametrize("adaptive_tiling", [0, 1, "yes", None])
+    def test_grid_mode_rejects_invalid_adaptive_tiling(self, adaptive_tiling):
+        with pytest.raises(ValueError, match="adaptive_tiling must be"):
+            mosaic(
+                grid_id="50HMH",
+                start_year=2023,
+                adaptive_tiling=adaptive_tiling,
+            )
+
+    @pytest.mark.parametrize("adaptive_tiling", [0, 1, "yes", None])
+    def test_bounds_mode_rejects_invalid_adaptive_tiling(self, adaptive_tiling):
+        with pytest.raises(ValueError, match="adaptive_tiling must be"):
+            mosaic(
+                start_year=2023,
+                bounds=self.BOUNDS,
+                adaptive_tiling=adaptive_tiling,
+            )
 
 
 class TestPickOcmResolution:

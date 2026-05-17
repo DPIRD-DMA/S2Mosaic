@@ -547,6 +547,7 @@ def run_bounds_pipeline(
     ocm_batch_size: int = 1,
     ocm_inference_dtype: str = "bf16",
     tile_workers: Optional[int] = None,
+    adaptive_tiling: bool = True,
     show_progress: bool = False,
 ) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
     """Bounds/AOI-mode pipeline. Called from mosaic() for non-grid AOIs.
@@ -606,6 +607,8 @@ def run_bounds_pipeline(
         ocm_batch_size, ocm_inference_dtype: Only used when ``cloud_mask="OCM"``.
         tile_workers: Number of output tiles to aggregate concurrently.
             Defaults to ``min(4, os.cpu_count() or 1)``.
+        adaptive_tiling: Split sparse output tiles based on the actual
+            cloud-valid contribution masks. Defaults to True.
         show_progress: Show tqdm progress bars for the cloud-mask streaming
             and tile-aggregation phases. Defaults to False.
 
@@ -662,6 +665,7 @@ def run_bounds_pipeline(
         resolution=resolution,
         cloud_mask=cloud_mask,
         tile_workers=tile_workers,
+        adaptive_tiling=adaptive_tiling,
     )
 
     aoi_4326 = reproject_aoi(aoi, input_crs, 4326) if aoi is not None else None
@@ -1022,6 +1026,7 @@ def run_bounds_pipeline(
             tile_size=tile_size,
             tile_workers=tile_workers,
             out_dtype=np.dtype(np.uint8) if is_visual else np.dtype(np.uint16),
+            adaptive_tiling=adaptive_tiling,
             show_progress=show_progress,
         )
 
@@ -1039,6 +1044,7 @@ def run_bounds_pipeline(
         tile_size=tile_size,
         tile_workers=tile_workers,
         out_dtype=np.dtype(np.uint8) if is_visual else np.dtype(np.uint16),
+        adaptive_tiling=adaptive_tiling,
         show_progress=show_progress,
     )
 

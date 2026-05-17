@@ -341,6 +341,7 @@ def validate_inputs(
     cloud_mask: str = CLOUD_MASK_OCM,
     tile_observation_target: Optional[int] = None,
     tile_workers: Optional[int] = None,
+    adaptive_tiling: bool = True,
     aoi: Optional[Polygon] = None,
 ) -> None:
     if grid_id is not None and (not grid_id.isalnum() or not grid_id.isupper()):
@@ -459,6 +460,8 @@ def validate_inputs(
             raise ValueError(
                 f"tile_workers must be a positive integer or None, got {tile_workers}"
             )
+    if not isinstance(adaptive_tiling, bool):
+        raise ValueError(f"adaptive_tiling must be a bool, got {adaptive_tiling}")
     valid_bands = [
         "AOT",
         "SCL",
