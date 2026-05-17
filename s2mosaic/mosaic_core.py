@@ -1005,7 +1005,8 @@ def write_tile_aggregation_geotiff(
                     out=tile_data,
                     casting="unsafe",
                 )
-            dst.write(tile_data, window=Window(c, r, w, h))
+            window_cls: Any = Window
+            dst.write(tile_data, window=window_cls(c, r, w, h))
     return export_path
 
 

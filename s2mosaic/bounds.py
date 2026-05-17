@@ -431,7 +431,8 @@ def make_bounds_tile_reader(
     ) -> npt.NDArray[Any]:
         r, c, th, tw = spec
         src = _get_source(scene_idx, band_idx)
-        return src.read(href_band_indices[band_idx], window=Window(c, r, tw, th))  # type: ignore[no-any-return, unused-ignore]
+        window_cls: Any = Window
+        return src.read(href_band_indices[band_idx], window=window_cls(c, r, tw, th))  # type: ignore[no-any-return, unused-ignore]
 
     return read_fn
 
@@ -527,8 +528,9 @@ def _fetch_one_scl_tiled(
             height=height,
             resampling=rio_resampling,
         ) as vrt:
+            window_cls: Any = Window
             for r, c, h, w in tile_specs:
-                out[r : r + h, c : c + w] = vrt.read(1, window=Window(c, r, w, h))
+                out[r : r + h, c : c + w] = vrt.read(1, window=window_cls(c, r, w, h))
     return out
 
 
@@ -553,10 +555,11 @@ def _source_block_count_for_scl_tiles(
 
     href = planetary_computer.sign(item.assets["SCL"].href)
     blocks: set[Tuple[int, int]] = set()
+    window_cls: Any = Window
     with rio.open(href) as src:
         block_h, block_w = src.block_shapes[0]
         for r, c, h, w in tile_specs:
-            out_bounds = window_bounds(Window(c, r, w, h), transform)
+            out_bounds = window_bounds(window_cls(c, r, w, h), transform)
             src_bounds = transform_bounds(
                 target_crs_obj,
                 src.crs,
