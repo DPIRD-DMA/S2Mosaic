@@ -46,8 +46,8 @@ def mosaic(
     resampling_method: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
     no_data_threshold: Union[float, None] = ...,
-    tile_observation_target: Optional[int] = ...,
-    coverage_threshold_pct: Optional[float] = ...,
+    observation_target: Optional[int] = ...,
+    coverage_threshold: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
     sort_method: str = ...,
     sort_function: Optional[Callable[..., Any]] = ...,
@@ -84,8 +84,8 @@ def mosaic(
     resampling_method: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
     no_data_threshold: Union[float, None] = ...,
-    tile_observation_target: Optional[int] = ...,
-    coverage_threshold_pct: Optional[float] = ...,
+    observation_target: Optional[int] = ...,
+    coverage_threshold: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
     sort_method: str = ...,
     sort_function: Optional[Callable[..., Any]] = ...,
@@ -122,8 +122,8 @@ def mosaic(
     resampling_method: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
     no_data_threshold: Union[float, None] = ...,
-    tile_observation_target: Optional[int] = ...,
-    coverage_threshold_pct: Optional[float] = ...,
+    observation_target: Optional[int] = ...,
+    coverage_threshold: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
     sort_method: str = ...,
     sort_function: Optional[Callable[..., Any]] = ...,
@@ -159,8 +159,8 @@ def mosaic(
     resampling_method: str = "nearest",
     additional_query: Optional[Dict[str, Any]] = None,
     no_data_threshold: Union[float, None] = 0.01,
-    tile_observation_target: Optional[int] = None,
-    coverage_threshold_pct: Optional[float] = 0.1,
+    observation_target: Optional[int] = None,
+    coverage_threshold: Optional[float] = 0.1,
     ignore_duplicate_items: bool = True,
     sort_method: str = "valid_data",
     sort_function: Optional[Callable[..., Any]] = None,
@@ -223,12 +223,12 @@ def mosaic(
         additional_query (Dict[str, Any], optional): Additional query parameters for STAC API.
             Defaults to {"eo:cloud_cover": {"lt": 100}}.
         no_data_threshold (float, optional): Threshold for no data values. Defaults to 0.01.
-        tile_observation_target (int, optional): Per-tile early-stop target
+        observation_target (int, optional): Per-tile early-stop target
             for ``mean`` and ``percentile``. When set, aggregation stops
             reading later scenes for a tile once every coverable pixel has at
             least this many valid observations. This is not an output quality
             filter. Defaults to None.
-        coverage_threshold_pct (float, optional): Drop pixels covered by fewer
+        coverage_threshold (float, optional): Drop pixels covered by fewer
             than this fraction of overlapping scenes. Set to None to disable.
             Defaults to 0.1.
         ignore_duplicate_items (bool, optional): Whether to remove duplicate scenes based on their IDs. Defaults to True.
@@ -291,8 +291,8 @@ def mosaic(
             resampling_method=resampling_method,
             additional_query=additional_query,
             no_data_threshold=no_data_threshold,
-            tile_observation_target=tile_observation_target,
-            coverage_threshold_pct=coverage_threshold_pct,
+            observation_target=observation_target,
+            coverage_threshold=coverage_threshold,
             ignore_duplicate_items=ignore_duplicate_items,
             sort_method=sort_method,
             sort_function=sort_function,
@@ -330,7 +330,7 @@ def mosaic(
         sort_method=sort_method,
         mosaic_method=mosaic_method,
         no_data_threshold=no_data_threshold,
-        tile_observation_target=tile_observation_target,
+        observation_target=observation_target,
         tile_workers=tile_workers,
         required_bands=required_bands,
         grid_id=grid_id,
@@ -338,6 +338,7 @@ def mosaic(
         resampling_method=resampling_method,
         cloud_mask=cloud_mask,
         adaptive_tiling=adaptive_tiling,
+        coverage_threshold=coverage_threshold,
     )
     logger.info("All inputs validated successfully.")
 
@@ -390,13 +391,13 @@ def mosaic(
 
     # for scenes with only partial S2 coverage work out which pixels are covered
     coverage_mask: npt.NDArray[np.bool_]
-    if coverage_threshold_pct is None:
+    if coverage_threshold is None:
         coverage_mask = np.ones((target_size, target_size), dtype=bool)
     else:
         coverage_mask = get_frequent_coverage(
             scene_bounds=grid_polygon,
             scenes=items,
-            coverage_threshold_pct=coverage_threshold_pct,
+            coverage_threshold=coverage_threshold,
             resolution=resolution,
         )
 
@@ -409,12 +410,12 @@ def mosaic(
 
     logger.info(f"Sorted {len(sorted_items)} scenes using {sort_method} method.")
 
-    output_coverage_mask = coverage_mask if coverage_threshold_pct is not None else None
+    output_coverage_mask = coverage_mask if coverage_threshold is not None else None
     mosaic, profile = stream_mosaic_pipeline(
         sorted_scenes=sorted_items,
         required_bands=required_bands,
         no_data_threshold=no_data_threshold,
-        tile_observation_target=tile_observation_target,
+        observation_target=observation_target,
         export_path=export_path,
         output_coverage_mask=output_coverage_mask,
         mosaic_method=mosaic_method,

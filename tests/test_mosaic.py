@@ -185,7 +185,7 @@ class TestMosaicValidInputs:
         "sort_method": "valid_data",
         "mosaic_method": "mean",
         "no_data_threshold": 0.01,
-        "tile_observation_target": None,
+        "observation_target": None,
         "required_bands": ["B04", "B03", "B02", "B08"],
         "grid_id": "50HMH",
         "percentile_value": None,
@@ -213,13 +213,13 @@ class TestMosaicValidInputs:
         self._validate(no_data_threshold=threshold)
 
     @pytest.mark.parametrize("target", [1, 2, 10, None])
-    def test_valid_tile_observation_targets(self, target):
-        self._validate(tile_observation_target=target)
+    def test_valid_observation_targets(self, target):
+        self._validate(observation_target=target)
 
     @pytest.mark.parametrize("target", [0, -1, 1.5, "2", True])
-    def test_invalid_tile_observation_targets(self, target):
-        with pytest.raises(ValueError, match="tile_observation_target"):
-            self._validate(tile_observation_target=target)
+    def test_invalid_observation_targets(self, target):
+        with pytest.raises(ValueError, match="observation_target"):
+            self._validate(observation_target=target)
 
     @pytest.mark.parametrize(
         "bands",
@@ -774,7 +774,7 @@ class TestMosaicBoundsEndToEnd:
             required_bands=["B04"],
             mosaic_method="percentile",
             percentile_value=50,
-            coverage_threshold_pct=threshold,
+            coverage_threshold=threshold,
             additional_query=self.QUERY,
         )
         self._assert_basic_geotiff(arr, profile, expect_bands=1)

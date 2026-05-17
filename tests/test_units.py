@@ -682,7 +682,7 @@ class TestRunTileAggregation:
         assert reads == [0, 1]
         np.testing.assert_array_equal(out, np.full((1, self.H, self.W), 20))
 
-    def test_mean_stops_at_tile_observation_target(self):
+    def test_mean_stops_at_observation_target(self):
         reads = []
 
         def read_fn(scene_idx, band_idx, spec):
@@ -706,13 +706,13 @@ class TestRunTileAggregation:
             percentile_value=None,
             tile_size=10,
             tile_workers=1,
-            tile_observation_target=2,
+            observation_target=2,
         )
 
         assert reads == [0, 1]
         np.testing.assert_array_equal(out, np.full((1, self.H, self.W), 15))
 
-    def test_percentile_stops_at_tile_observation_target_per_pixel(self):
+    def test_percentile_stops_at_observation_target_per_pixel(self):
         reads = []
         masks = [
             np.ones((self.H, self.W), dtype=bool),
@@ -738,7 +738,7 @@ class TestRunTileAggregation:
             percentile_value=50.0,
             tile_size=10,
             tile_workers=1,
-            tile_observation_target=2,
+            observation_target=2,
         )
 
         expected = np.full((1, self.H, self.W), 10, dtype=np.uint16)
@@ -1771,7 +1771,7 @@ class TestBoundsOcmContext:
             required_bands=["B04"],
             cloud_mask="OCM",
             no_data_threshold=None,
-            coverage_threshold_pct=None,
+            coverage_threshold=None,
             tile_workers=8,
         )
 
@@ -1867,7 +1867,7 @@ class TestBoundsOcmContext:
             duration_days=1,
             required_bands=["B04"],
             cloud_mask="SCL",
-            coverage_threshold_pct=None,
+            coverage_threshold=None,
             no_data_threshold=None,
             adaptive_tiling=True,
         )
@@ -1946,7 +1946,7 @@ class TestBoundsOcmContext:
             duration_days=1,
             required_bands=["B04"],
             cloud_mask="SCL",
-            coverage_threshold_pct=None,
+            coverage_threshold=None,
             no_data_threshold=None,
             adaptive_tiling=True,
         )
@@ -2011,7 +2011,7 @@ class TestBoundsOcmContext:
             duration_days=1,
             required_bands=["B04"],
             cloud_mask="SCL",
-            coverage_threshold_pct=None,
+            coverage_threshold=None,
         )
 
         assert len(search_calls) == 1
@@ -2088,7 +2088,7 @@ class TestBoundsOcmContext:
             duration_days=1,
             required_bands=["B04"],
             cloud_mask="SCL",
-            coverage_threshold_pct=None,
+            coverage_threshold=None,
         )
 
         assert len(aggregation_calls) == 1
@@ -2149,7 +2149,7 @@ class TestBoundsOcmContext:
             duration_days=1,
             required_bands=["B04"],
             cloud_mask="SCL",
-            coverage_threshold_pct=None,
+            coverage_threshold=None,
             tile_workers=2,
             show_progress=True,
         )
@@ -2211,7 +2211,7 @@ class TestBoundsOcmContext:
             duration_days=1,
             required_bands=["B04"],
             cloud_mask="SCL",
-            coverage_threshold_pct=None,
+            coverage_threshold=None,
             output_path=export_path,
         )
 
@@ -2300,7 +2300,7 @@ class TestFrequentCoverageForBbox:
             width=100,
             height=100,
             resolution=100,
-            coverage_threshold_pct=0.5,
+            coverage_threshold=0.5,
         )
         # All pixels covered by 10/11 ≈ 91% of scenes → pass 50% threshold
         assert out.mean() > 0.8
@@ -2559,7 +2559,7 @@ class TestTiledBandMaterialisation:
     """Local tiled GeoTIFF materialisation helpers."""
 
     @pytest.mark.parametrize(
-        "mosaic_method,no_data_threshold,tile_observation_target,expected",
+        "mosaic_method,no_data_threshold,observation_target,expected",
         [
             ("mean", None, None, True),
             ("percentile", None, None, True),
@@ -2571,12 +2571,10 @@ class TestTiledBandMaterialisation:
         ],
     )
     def test_source_prewarm_policy(
-        self, mosaic_method, no_data_threshold, tile_observation_target, expected
+        self, mosaic_method, no_data_threshold, observation_target, expected
     ):
         assert (
-            should_prewarm_sources(
-                mosaic_method, no_data_threshold, tile_observation_target
-            )
+            should_prewarm_sources(mosaic_method, no_data_threshold, observation_target)
             is expected
         )
 

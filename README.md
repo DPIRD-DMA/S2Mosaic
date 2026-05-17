@@ -120,7 +120,7 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 - `required_bands` (`["B04", "B03", "B02", "B08"]`): bands to include. Use `["visual"]` for the 3-band uint8 TCI RGB composite (mutually exclusive with other bands).
 - `mosaic_method` (`"mean"`): `"mean"`, `"first"`, `"percentile"` (with `percentile_value`), or `"median"` (shortcut for percentile 50).
 - `percentile_value` (`None`): percentile to compute when `mosaic_method="percentile"` (0–100).
-- `tile_observation_target` (`None`): optional per-tile early-stop target for `"mean"` and `"percentile"`. When set, aggregation stops reading later scenes for a tile once every coverable pixel has at least this many valid observations. This is not an output quality filter; pixels that cannot reach the target use whatever observations are available.
+- `observation_target` (`None`): minimum valid observations per pixel for `"mean"` and `"percentile"`. When set, aggregation stops reading later scenes for a tile once every coverable pixel has reached the target. This is not an output quality filter; pixels that cannot reach the target use whatever observations are available.
 - `tile_workers` (`min(4, os.cpu_count() or 1)`): number of output tiles to aggregate concurrently. Higher values can improve throughput for network-bound reads, but increase memory use and simultaneous source reads.
 - `adaptive_tiling` (`True`): split sparse output tiles based on the actual cloud-valid contribution masks. This reduces wasted reads for irregular AOIs, sparse coverage, and heavily masked scenes. Set to `False` to use fixed-size output tiles.
 
@@ -140,7 +140,7 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 
 - `additional_query` (`{"eo:cloud_cover": {"lt": 100}}`): extra STAC query filters, e.g. `{"eo:cloud_cover": {"lt": 80}}`.
 - `no_data_threshold` (`0.01`): bounds-mode scene-selection early stop once the AOI no-data fraction is below this. Set to `None` to examine every scene.
-- `coverage_threshold_pct` (`0.1`): drop scene-edge pixels covered by fewer than this fraction of overlapping scenes. Set to `None` to keep everything.
+- `coverage_threshold` (`0.1`): drop scene-edge pixels covered by fewer than this fraction of overlapping scenes. Set to `None` to keep everything.
 - `ignore_duplicate_items` (`True`): drop duplicate acquisitions, keeping the latest processing baseline.
 
 **Scene ordering**
@@ -177,7 +177,7 @@ If your application already configures the `logging` module, the package logger 
 - `ocm_batch_size`: If using a GPU, setting this above the default value (1) will speed up cloud masking. In most cases, a value of 4 works well. If you encounter CUDA errors, try using a lower number.
 - `ocm_inference_dtype`: if the device supports it 'bf16' tends to be the fastest option, failing this try 'fp16' then 'fp32'.
 - `sort_method`: Using `"valid_data"` tends to work well with early stopping because clear scenes are considered first.
-- `tile_observation_target`: For large `"mean"` or `"percentile"` jobs, set this to the number of observations per pixel you actually need to avoid reading later scenes for already-satisfied tiles.
+- `observation_target`: For large `"mean"` or `"percentile"` jobs, set this to the number of observations per pixel you actually need to avoid reading later scenes for already-satisfied tiles.
 - `mosaic_method`: Using `"first"` can be a lot faster than `"mean"` as only valid, non-cloudy, new pixels are downloaded.
 
 ## Known limitations

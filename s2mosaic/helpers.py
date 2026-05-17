@@ -335,10 +335,11 @@ def validate_inputs(
     input_crs: Optional[int] = None,
     resolution: Optional[int] = None,
     cloud_mask: str = CLOUD_MASK_OCM,
-    tile_observation_target: Optional[int] = None,
+    observation_target: Optional[int] = None,
     tile_workers: Optional[int] = None,
     adaptive_tiling: bool = True,
     aoi: Optional[Polygon] = None,
+    coverage_threshold: Optional[float] = None,
 ) -> None:
     if grid_id is not None and (not grid_id.isalnum() or not grid_id.isupper()):
         raise ValueError(
@@ -434,18 +435,24 @@ def validate_inputs(
     if no_data_threshold is not None:
         if not (0.0 <= no_data_threshold <= 1.0):
             raise ValueError(
-                f"""No data threshold must be between 0 and 1 or None, 
+                f"""No data threshold must be between 0 and 1 or None,
                 got {no_data_threshold}"""
             )
-    if tile_observation_target is not None:
+    if coverage_threshold is not None:
+        if not (0.0 <= coverage_threshold <= 1.0):
+            raise ValueError(
+                f"coverage_threshold must be between 0 and 1 or None, "
+                f"got {coverage_threshold}"
+            )
+    if observation_target is not None:
         if (
-            isinstance(tile_observation_target, bool)
-            or not isinstance(tile_observation_target, int)
-            or tile_observation_target < 1
+            isinstance(observation_target, bool)
+            or not isinstance(observation_target, int)
+            or observation_target < 1
         ):
             raise ValueError(
-                "tile_observation_target must be a positive integer or None, "
-                f"got {tile_observation_target}"
+                "observation_target must be a positive integer or None, "
+                f"got {observation_target}"
             )
     if tile_workers is not None:
         if (

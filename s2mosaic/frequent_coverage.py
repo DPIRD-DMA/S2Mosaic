@@ -61,7 +61,7 @@ def get_raster_coverage(
 
 def _frequent_coverage_from_raster(
     raster: npt.NDArray[np.int16],
-    coverage_threshold_pct: float,
+    coverage_threshold: float,
 ) -> npt.NDArray[np.bool_]:
     """Threshold a coverage-count raster and erode edge no-data areas."""
     height, width = raster.shape
@@ -70,9 +70,9 @@ def _frequent_coverage_from_raster(
     if max_count == 0:
         return np.zeros((height, width), dtype=bool)
 
-    # Any area that is covered by more than coverage_threshold_pct of the
+    # Any area that is covered by more than coverage_threshold of the
     # maximum overlap is considered covered.
-    dynamic_threshold = max_count * coverage_threshold_pct
+    dynamic_threshold = max_count * coverage_threshold
     logger.info(f"Dynamic threshold: {dynamic_threshold}")
 
     frequent_data_mask = raster >= dynamic_threshold
@@ -88,7 +88,7 @@ def _frequent_coverage_from_extents(
     *,
     transform: Affine,
     out_shape: Tuple[int, int],
-    coverage_threshold_pct: float,
+    coverage_threshold: float,
 ) -> npt.NDArray[np.bool_]:
     """Rasterize scene extents, threshold frequent coverage, and erode edges."""
     geoms_with_values = [(geom, 1) for geom in coverage_gdf.geometry]
@@ -100,13 +100,13 @@ def _frequent_coverage_from_extents(
         transform=transform,
         merge_alg=MergeAlg.add,
     )
-    return _frequent_coverage_from_raster(raster, coverage_threshold_pct)
+    return _frequent_coverage_from_raster(raster, coverage_threshold)
 
 
 def get_frequent_coverage(
     scene_bounds: Polygon,
     scenes: ItemCollection,
-    coverage_threshold_pct: float = 0.1,
+    coverage_threshold: float = 0.1,
     resolution: int = 10,
 ) -> npt.NDArray[np.bool_]:
     scenes_list = list(scenes)
@@ -125,7 +125,7 @@ def get_frequent_coverage(
         scene_bounds, coverage_gdf, local_crs, resolution=resolution
     )
     logger.info(f"Coverage raster shape: {raster.shape}")
-    return _frequent_coverage_from_raster(raster, coverage_threshold_pct)
+    return _frequent_coverage_from_raster(raster, coverage_threshold)
 
 
 def get_frequent_coverage_for_bbox(
@@ -135,7 +135,7 @@ def get_frequent_coverage_for_bbox(
     width: int,
     height: int,
     resolution: int,
-    coverage_threshold_pct: float = 0.1,
+    coverage_threshold: float = 0.1,
 ) -> npt.NDArray[np.bool_]:
     """Frequent-coverage mask for an arbitrary bbox in `target_crs`.
 
@@ -153,5 +153,5 @@ def get_frequent_coverage_for_bbox(
         coverage_gdf,
         transform=Affine(resolution, 0, minx, 0, -resolution, maxy),
         out_shape=(height, width),
-        coverage_threshold_pct=coverage_threshold_pct,
+        coverage_threshold=coverage_threshold,
     )
