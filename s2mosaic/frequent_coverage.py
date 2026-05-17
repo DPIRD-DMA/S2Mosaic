@@ -11,7 +11,7 @@ from pystac.item_collection import ItemCollection
 from rasterio.enums import MergeAlg
 from rasterio.features import rasterize
 from rasterio.transform import Affine
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, shape
 
 from .helpers import MGRS_TILE_SIZE_M
 
@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 def get_coverage(scenes: List[Item]) -> gpd.GeoDataFrame:
     extents = []
     for scene in scenes:
-        if scene.geometry is not None and "coordinates" in scene.geometry:
-            extents.append(Polygon(scene.geometry["coordinates"][0]))
+        if scene.geometry is not None:
+            extents.append(shape(scene.geometry))
 
     extent_gdf = gpd.GeoDataFrame(geometry=extents, crs="EPSG:4326")
     return extent_gdf
@@ -59,6 +59,50 @@ def get_raster_coverage(
     return raster  # type: ignore[no-any-return, unused-ignore]
 
 
+def _frequent_coverage_from_raster(
+    raster: npt.NDArray[np.int16],
+    coverage_threshold_pct: float,
+) -> npt.NDArray[np.bool_]:
+    """Threshold a coverage-count raster and erode edge no-data areas."""
+    height, width = raster.shape
+    max_count = raster.max()
+    logger.info(f"Max coverage count: {max_count}")
+    if max_count == 0:
+        return np.zeros((height, width), dtype=bool)
+
+    # Any area that is covered by more than coverage_threshold_pct of the
+    # maximum overlap is considered covered.
+    dynamic_threshold = max_count * coverage_threshold_pct
+    logger.info(f"Dynamic threshold: {dynamic_threshold}")
+
+    frequent_data_mask = raster >= dynamic_threshold
+
+    # Expand the mask to include nearby pixels; this grows no-data areas by 4px.
+    kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+    dilated = cv2.dilate((~frequent_data_mask).astype(np.uint8), kernel, iterations=4)
+    return dilated == 0  # type: ignore[no-any-return, unused-ignore]
+
+
+def _frequent_coverage_from_extents(
+    coverage_gdf: GeoDataFrame,
+    *,
+    transform: Affine,
+    out_shape: Tuple[int, int],
+    coverage_threshold_pct: float,
+) -> npt.NDArray[np.bool_]:
+    """Rasterize scene extents, threshold frequent coverage, and erode edges."""
+    geoms_with_values = [(geom, 1) for geom in coverage_gdf.geometry]
+    raster = rasterize(
+        geoms_with_values,
+        out_shape=out_shape,
+        fill=0,
+        dtype=np.int16,
+        transform=transform,
+        merge_alg=MergeAlg.add,
+    )
+    return _frequent_coverage_from_raster(raster, coverage_threshold_pct)
+
+
 def get_frequent_coverage(
     scene_bounds: Polygon,
     scenes: ItemCollection,
@@ -81,21 +125,7 @@ def get_frequent_coverage(
         scene_bounds, coverage_gdf, local_crs, resolution=resolution
     )
     logger.info(f"Coverage raster shape: {raster.shape}")
-
-    max_count = raster.max()
-    logger.info(f"Max coverage count: {max_count}")
-
-    # Any area that is covered by more than 10% of the scenes is considered covered
-    dynamic_threshold = max_count * coverage_threshold_pct
-    logger.info(f"Dynamic threshold: {dynamic_threshold}")
-
-    # Threshold the raster to get a mask of the frequent data
-    frequent_data_mask = raster >= dynamic_threshold
-
-    # Expand the mask to include nearby pixels, this grows the no data areas by 4 pixels
-    kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
-    dilated = cv2.dilate((~frequent_data_mask).astype(np.uint8), kernel, iterations=4)
-    return dilated == 0  # type: ignore[no-any-return, unused-ignore]
+    return _frequent_coverage_from_raster(raster, coverage_threshold_pct)
 
 
 def get_frequent_coverage_for_bbox(
@@ -119,24 +149,9 @@ def get_frequent_coverage_for_bbox(
     coverage_gdf["geometry"] = coverage_gdf.make_valid()
 
     minx, _, _, maxy = bounds_target
-    geoms_with_values = [(geom, 1) for geom in coverage_gdf.geometry]
-    raster = rasterize(
-        geoms_with_values,
-        out_shape=(height, width),
-        fill=0,
-        dtype=np.int16,
+    return _frequent_coverage_from_extents(
+        coverage_gdf,
         transform=Affine(resolution, 0, minx, 0, -resolution, maxy),
-        merge_alg=MergeAlg.add,
+        out_shape=(height, width),
+        coverage_threshold_pct=coverage_threshold_pct,
     )
-    assert raster is not None
-
-    max_count = raster.max()
-    if max_count == 0:
-        return np.zeros((height, width), dtype=bool)
-
-    dynamic_threshold = max_count * coverage_threshold_pct
-    frequent_data_mask = raster >= dynamic_threshold
-
-    kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
-    dilated = cv2.dilate((~frequent_data_mask).astype(np.uint8), kernel, iterations=4)
-    return dilated == 0  # type: ignore[no-any-return, unused-ignore]

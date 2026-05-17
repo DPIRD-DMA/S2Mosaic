@@ -140,7 +140,7 @@ def sort_items(items: DataFrame, sort_method: str) -> DataFrame:
             drop=True
         )
     else:
-        raise Exception("Invalid sort method, must be valid_data, oldest or newest")
+        raise ValueError("Invalid sort method, must be valid_data, oldest or newest")
 
     return items_sorted
 
@@ -169,7 +169,16 @@ def filter_latest_processing_baselines(
         # Get processing baseline from properties
         baseline_str: str = item.properties.get("s2:processing_baseline", "0.00")
         # Convert to number for comparison (e.g., '05.11' -> 5.11)
-        baseline_num: float = float(baseline_str)
+        try:
+            baseline_num = float(baseline_str)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid processing baseline %r for item %s; treating as 0.00",
+                baseline_str,
+                item.id,
+            )
+            baseline_str = str(baseline_str)
+            baseline_num = 0.0
 
         if acquisition_key not in acquisition_groups:
             acquisition_groups[acquisition_key] = []

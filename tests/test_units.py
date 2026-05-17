@@ -25,15 +25,18 @@ import s2mosaic.mosaic_core as mosaic_core
 from s2mosaic.bounds import (
     _expand_bounds_for_ocm_context,
     _rasterize_aoi_mask,
+    _target_grid,
     make_bounds_tile_reader,
     pick_utm_epsg,
     reproject_bbox,
 )
 from s2mosaic.helpers import (
     SceneFetchError,
+    _load_s2_grid,
     get_output_path,
     resolve_export_path,
     validate_inputs,
+    with_scene_retry,
 )
 from s2mosaic.frequent_coverage import (
     get_coverage,
@@ -61,7 +64,14 @@ from s2mosaic.mosaic_core import (
     stream_mosaic_pipeline,
     write_tile_aggregation_geotiff,
 )
-from s2mosaic.stac_utils import ITEM_COL
+from s2mosaic.stac_utils import (
+    DATETIME_COL,
+    GOOD_DATA_PCT_COL,
+    ITEM_COL,
+    ORBIT_COL,
+    filter_latest_processing_baselines,
+    sort_items,
+)
 
 
 class TestGetValidMask:
@@ -206,12 +216,28 @@ class TestPickUtmEpsg:
             (115.86, 31.95, 32650),  # mirror in the north → UTM 50N
             (-122.43, 37.77, 32610),  # San Francisco → UTM 10N
             (0.0, 0.0, 32631),  # equator/Greenwich → UTM 31N
+            (-180.0, 0.0, 32601),  # exact western dateline clamps to UTM 1N
+            (-179.999, 0.0, 32601),
             (-179.9, 0.0, 32601),  # west of dateline → UTM 1N
             (179.9, 0.0, 32660),  # east of dateline → UTM 60N
+            (179.999, 0.0, 32660),
+            (180.0, 0.0, 32660),  # exact dateline clamps to UTM 60N
         ],
     )
     def test_known_locations(self, lon, lat, expected):
         assert pick_utm_epsg(lon, lat) == expected
+
+
+class TestTargetGrid:
+    def test_tiny_valid_bounds_still_get_one_pixel(self):
+        _, width, height, crs = _target_grid(
+            (390_000.0, 6_460_000.0, 390_010.0, 6_460_010.0),
+            resolution=20,
+            target_crs=32750,
+        )
+
+        assert (width, height) == (1, 1)
+        assert crs.to_epsg() == 32750
 
 
 class TestRunTileAggregation:
@@ -502,11 +528,14 @@ class TestRunTileAggregation:
             def __init__(self, max_workers):
                 captured_workers.append(max_workers)
 
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
             def map(self, fn, specs):
                 return map(fn, specs)
-
-            def shutdown(self, wait):
-                assert wait is True
 
         monkeypatch.setattr(mosaic_core, "ThreadPoolExecutor", FakeExecutor)
 
@@ -1288,6 +1317,83 @@ class TestExportPaths:
             )
 
 
+class TestPackagedGrid:
+    def test_missing_packaged_grid_raises_runtime_error(self, monkeypatch, tmp_path):
+        import s2mosaic.helpers as helpers_mod
+
+        class FakeResource:
+            def __truediv__(self, _name):
+                return self
+
+        class FakeContext:
+            def __enter__(self):
+                return tmp_path / "missing.gpkg"
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        _load_s2_grid.cache_clear()
+        monkeypatch.setattr(
+            helpers_mod.resources, "files", lambda _package: FakeResource()
+        )
+        monkeypatch.setattr(
+            helpers_mod.resources, "as_file", lambda _resource: FakeContext()
+        )
+
+        try:
+            with pytest.raises(RuntimeError, match="S2 grid file not found"):
+                _load_s2_grid()
+        finally:
+            _load_s2_grid.cache_clear()
+
+
+class TestSortItems:
+    def test_invalid_sort_method_raises_value_error(self):
+        items = pd.DataFrame(
+            {
+                GOOD_DATA_PCT_COL: [90.0],
+                ORBIT_COL: [1],
+                DATETIME_COL: [datetime(2023, 1, 1, tzinfo=timezone.utc)],
+                ITEM_COL: [object()],
+            }
+        )
+
+        with pytest.raises(ValueError, match="Invalid sort method"):
+            sort_items(items, "bogus")
+
+
+class TestProcessingBaselineFilter:
+    def _item(self, item_id, baseline):
+        from pystac import Item
+
+        return Item(
+            id=item_id,
+            geometry=None,
+            bbox=None,
+            datetime=datetime(2023, 1, 1, tzinfo=timezone.utc),
+            properties={
+                "s2:mgrs_tile": "50HMH",
+                "s2:processing_baseline": baseline,
+            },
+        )
+
+    def test_malformed_processing_baseline_is_treated_as_lowest(self, caplog):
+        from pystac.item_collection import ItemCollection
+
+        items = ItemCollection(
+            [
+                self._item("bad", "not-a-number"),
+                self._item("good", "05.11"),
+            ]
+        )
+
+        with caplog.at_level(logging.WARNING):
+            filtered = filter_latest_processing_baselines(items)
+
+        assert [item.id for item in filtered] == ["good"]
+        assert "Invalid processing baseline" in caplog.text
+
+
 class TestOrderedPrefetch:
     class FakeItem:
         def __init__(self, scene_id, delay):
@@ -1351,6 +1457,24 @@ class TestOrderedPrefetch:
 
         assert [i for i, _ in got] == [0, 1, 2]
         assert isinstance(got[1][1], SceneFetchError)
+
+
+class TestSceneRetry:
+    def test_exhaustion_raises_scene_fetch_error_with_cause(self, monkeypatch):
+        monkeypatch.setattr("s2mosaic.helpers.time.sleep", lambda _: None)
+        calls = {"n": 0}
+
+        @with_scene_retry(attempts=3, base_delay=0.01)
+        def always_fails():
+            calls["n"] += 1
+            raise RasterioIOError("temporary read failure")
+
+        with pytest.raises(SceneFetchError) as exc_info:
+            always_fails()
+
+        assert calls["n"] == 3
+        assert isinstance(exc_info.value.__cause__, RasterioIOError)
+        assert "failed after 3 attempts" in str(exc_info.value)
 
 
 class TestGridOrderedMaskStreaming:
@@ -2200,6 +2324,47 @@ class TestGetRasterCoverage:
         ]
         return get_coverage([_FakeItem(coords)] * 3)
 
+    def test_get_coverage_empty_input_returns_empty_geodataframe(self):
+        coverage = get_coverage([])
+
+        assert coverage.empty
+        assert coverage.crs == "EPSG:4326"
+
+    def test_get_coverage_skips_none_geometry(self):
+        coords = [
+            (115.0, -32.5),
+            (116.5, -32.5),
+            (116.5, -31.5),
+            (115.0, -31.5),
+            (115.0, -32.5),
+        ]
+
+        class _NoGeometryItem:
+            geometry = None
+
+        coverage = get_coverage([_NoGeometryItem(), _FakeItem(coords)])
+
+        assert len(coverage) == 1
+        assert coverage.geometry.iloc[0].geom_type == "Polygon"
+
+    def test_get_coverage_preserves_multipolygon_geometry(self):
+        polygon = self._scene_polygon_4326()
+        shifted = Polygon([(x + 0.2, y) for x, y in polygon.exterior.coords])
+
+        class _FakeMultiPolygonItem:
+            geometry = {
+                "type": "MultiPolygon",
+                "coordinates": [
+                    [list(polygon.exterior.coords)],
+                    [list(shifted.exterior.coords)],
+                ],
+            }
+
+        coverage = get_coverage([_FakeMultiPolygonItem()])
+
+        assert coverage.geometry.iloc[0].geom_type == "MultiPolygon"
+        assert len(coverage.geometry.iloc[0].geoms) == 2
+
     @pytest.mark.parametrize(
         "resolution, expected_side",
         [
@@ -2524,6 +2689,20 @@ class TestTiledBandMaterialisation:
         )
         assert src.calls == 2
         np.testing.assert_array_equal(data, np.full((1, 2, 2), 7, dtype=np.uint16))
+
+    def test_read_with_retry_rejects_zero_attempts(self):
+        class Source:
+            def read(self, *, window, out_shape, resampling):
+                raise AssertionError("read should not be called")
+
+        with pytest.raises(RuntimeError, match="Remote read was not attempted"):
+            _read_with_retry(
+                Source(),
+                window=rio.windows.Window(0, 0, 2, 2),
+                out_shape=(1, 2, 2),
+                resampling=Resampling.nearest,
+                attempts=0,
+            )
 
     def test_write_tiled_copy_streams_destination_blocks(self, tmp_path):
         class FakeSource:

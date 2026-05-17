@@ -232,38 +232,34 @@ def _load_s2_grid() -> gpd.GeoDataFrame:
     with resources.as_file(
         resources.files("s2mosaic") / "sentinel_2_index.gpkg"
     ) as path:
-        S2_grid_file = Path(path)
-    assert S2_grid_file.exists(), (
-        f"S2 grid file not found at {S2_grid_file}. "
-        "This suggests the S2Mosaic package was not installed correctly. "
-        "Please reinstall the package."
-    )
-    return gpd.read_file(S2_grid_file)
+        s2_grid_file = Path(path)
+        if not s2_grid_file.exists():
+            raise RuntimeError(
+                f"S2 grid file not found at {s2_grid_file}. "
+                "This suggests the S2Mosaic package was not installed correctly. "
+                "Please reinstall the package."
+            )
+        return gpd.read_file(s2_grid_file)
 
 
 def get_extent_from_grid_id(grid_id: str) -> Polygon:
-    try:
-        all_grids = _load_s2_grid()
-        grid_entry = all_grids[all_grids["Name"] == grid_id]
+    all_grids = _load_s2_grid()
+    grid_entry = all_grids[all_grids["Name"] == grid_id]
 
-        return_count = grid_entry.shape[0]
-
-        if return_count == 0:
-            raise ValueError(
-                f"Grid {grid_id} not found. It should be in the format '50HMH'. "
-                "See https://sentiwiki.copernicus.eu/web/s2-products and "
-                "https://dpird-dma.github.io/Sentinel-2-grid-explorer/"
-            )
-        assert return_count == 1, (
+    return_count = grid_entry.shape[0]
+    if return_count == 0:
+        raise ValueError(
+            f"Grid {grid_id} not found. It should be in the format '50HMH'. "
+            "See https://sentiwiki.copernicus.eu/web/s2-products and "
+            "https://dpird-dma.github.io/Sentinel-2-grid-explorer/"
+        )
+    if return_count > 1:
+        raise RuntimeError(
             f"Multiple entries found for grid {grid_id}. "
             "This should not happen, please check the S2 grid file."
         )
 
-        return grid_entry.iloc[0].geometry
-
-    except Exception as e:
-        logger.error(f"Error reading grid entry: {e}")
-        raise
+    return grid_entry.iloc[0].geometry
 
 
 def define_dates(

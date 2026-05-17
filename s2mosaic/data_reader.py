@@ -21,9 +21,9 @@ def get_full_band(
 ) -> Tuple[npt.NDArray[np.uint16], Dict[str, Any]]:
     spatial_ratio = res / 10
 
-    singed_href = planetary_computer.sign(href)
+    signed_href = planetary_computer.sign(href)
     is_tci = "TCI_10m" in href
-    with rio.open(singed_href) as src:
+    with rio.open(signed_href) as src:
         target_side = int(10980 / spatial_ratio)
         # Passing an explicit window is required for rasterio to use COG
         # overviews. Single-band reads must use a scalar index rather than

@@ -18,7 +18,9 @@ from typing import (
     Dict,
     Iterator,
     List,
+    Mapping,
     Optional,
+    Protocol,
     Tuple,
     TypeAlias,
     Union,
@@ -88,9 +90,18 @@ Bbox = Tuple[float, float, float, float]
 Aoi: TypeAlias = Polygon
 
 
+class _AssetLike(Protocol):
+    href: str
+
+
+class _BoundsItemLike(Protocol):
+    id: str
+    assets: Mapping[str, _AssetLike]
+
+
 def pick_utm_epsg(lon: float, lat: float) -> int:
     """EPSG code of the UTM zone containing (lon, lat)."""
-    zone = int((lon + 180) / 6) + 1
+    zone = min(60, max(1, int((lon + 180) / 6) + 1))
     return (32700 if lat < 0 else 32600) + zone
 
 
@@ -123,33 +134,13 @@ def _search_for_items_by_bbox(
     ignore_duplicate_items: bool = True,
 ) -> ItemCollection:
     """Search Sentinel-2 L2A items intersecting bbox in EPSG:4326."""
-    query: Dict[str, Any] = {
-        "collections": ["sentinel-2-l2a"],
-        "bbox": list(bbox_4326),
-        "datetime": f"{start_date.isoformat()}Z/{end_date.isoformat()}Z",
-    }
-    if additional_query:
-        query["query"] = additional_query
-
-    retry = Retry(
-        total=5,
-        backoff_factor=1,
-        status_forcelist=[502, 503, 504],
-        allowed_methods=None,
+    return _search_for_items_by_geometry(
+        geometry=bbox_4326,
+        start_date=start_date,
+        end_date=end_date,
+        additional_query=additional_query,
+        ignore_duplicate_items=ignore_duplicate_items,
     )
-    stac_api_io = StacApiIO(max_retries=retry)
-    catalog = pystac_client.Client.open(
-        "https://planetarycomputer.microsoft.com/api/stac/v1",
-        modifier=planetary_computer.sign_inplace,
-        stac_io=stac_api_io,
-    )
-    items = catalog.search(**query).item_collection()
-    logger.info(f"Found {len(items)} items for bbox {bbox_4326}")
-
-    if ignore_duplicate_items:
-        items = filter_latest_processing_baselines(items)
-        logger.info(f"After dedupe, {len(items)} items remain")
-    return items
 
 
 def _search_for_items_by_aoi(
@@ -160,11 +151,33 @@ def _search_for_items_by_aoi(
     ignore_duplicate_items: bool = True,
 ) -> ItemCollection:
     """Search Sentinel-2 L2A items intersecting a polygon in EPSG:4326."""
+    return _search_for_items_by_geometry(
+        geometry=aoi_4326,
+        start_date=start_date,
+        end_date=end_date,
+        additional_query=additional_query,
+        ignore_duplicate_items=ignore_duplicate_items,
+    )
+
+
+def _search_for_items_by_geometry(
+    geometry: Union[Bbox, Aoi],
+    start_date: date,
+    end_date: date,
+    additional_query: Optional[Dict[str, Any]] = None,
+    ignore_duplicate_items: bool = True,
+) -> ItemCollection:
+    """Search Sentinel-2 L2A items intersecting a bbox or polygon in EPSG:4326."""
     query: Dict[str, Any] = {
         "collections": ["sentinel-2-l2a"],
-        "intersects": mapping(aoi_4326),
         "datetime": f"{start_date.isoformat()}Z/{end_date.isoformat()}Z",
     }
+    if isinstance(geometry, tuple):
+        query["bbox"] = list(geometry)
+        search_label = f"bbox {geometry}"
+    else:
+        query["intersects"] = mapping(geometry)
+        search_label = "AOI"
     if additional_query:
         query["query"] = additional_query
 
@@ -181,7 +194,7 @@ def _search_for_items_by_aoi(
         stac_io=stac_api_io,
     )
     items = catalog.search(**query).item_collection()
-    logger.info(f"Found {len(items)} items for AOI")
+    logger.info(f"Found {len(items)} items for {search_label}")
 
     if ignore_duplicate_items:
         items = filter_latest_processing_baselines(items)
@@ -199,8 +212,7 @@ def _target_grid(
 ) -> Tuple[Affine, int, int, CRS]:
     """Pixel grid + CRS for ``bounds_target`` at ``resolution`` in ``target_crs``."""
     minx, miny, maxx, maxy = bounds_target
-    width = int(round((maxx - minx) / resolution))
-    height = int(round((maxy - miny) / resolution))
+    width, height = _grid_shape_for_bounds(bounds_target, resolution)
     transform = Affine(resolution, 0, minx, 0, -resolution, maxy)
     target_crs_obj = CRS.from_epsg(target_crs)
     return transform, width, height, target_crs_obj
@@ -266,7 +278,7 @@ def _expand_bounds_for_ocm_context(
 
 
 def _materialise_bounds_band(
-    item: Any,
+    item: _BoundsItemLike,
     asset_name: str,
     bounds_target: Bbox,
     target_crs: int,
@@ -320,7 +332,7 @@ def _materialise_bounds_band(
 
 
 def make_bounds_tile_reader(
-    items: List[Any],
+    items: List[_BoundsItemLike],
     href_template: List[Tuple[str, int]],
     bounds_target: Bbox,
     target_crs: int,
@@ -357,7 +369,7 @@ def make_bounds_tile_reader(
             signed_url = planetary_computer.sign(item.assets[asset].href)
 
             def source_for(
-                item: Any = item,
+                item: _BoundsItemLike = item,
                 asset: str = asset,
                 cache_key: str = cache_key,
                 signed_url: str = signed_url,
@@ -447,7 +459,7 @@ def _read_warpvrt(
 
 
 def _fetch_one_scl_key(
-    item: Any,
+    item: _BoundsItemLike,
     bounds_target: Bbox,
     target_crs: int,
     mask_resolution: int,
@@ -458,7 +470,7 @@ def _fetch_one_scl_key(
 @disk_cache("scl", key_fn=_fetch_one_scl_key)
 @with_scene_retry()
 def _fetch_one_scl(
-    item: Any,
+    item: _BoundsItemLike,
     bounds_target: Bbox,
     target_crs: int,
     mask_resolution: int,
@@ -482,7 +494,7 @@ def _fetch_one_scl(
 
 @with_scene_retry()
 def _fetch_one_scl_tiled(
-    item: Any,
+    item: _BoundsItemLike,
     bounds_target: Bbox,
     target_crs: int,
     mask_resolution: int,
@@ -521,7 +533,7 @@ def _fetch_one_scl_tiled(
 
 
 def _source_block_count_for_scl_tiles(
-    item: Any,
+    item: _BoundsItemLike,
     bounds_target: Bbox,
     target_crs: int,
     mask_resolution: int,
@@ -569,7 +581,7 @@ def _source_block_count_for_scl_tiles(
 
 
 def _should_use_tiled_scl_fetch(
-    item: Any,
+    item: _BoundsItemLike,
     bounds_target: Bbox,
     target_crs: int,
     mask_resolution: int,
@@ -606,7 +618,7 @@ def _should_use_tiled_scl_fetch(
 
 
 def _fetch_one_ocm_key(
-    item: Any,
+    item: _BoundsItemLike,
     bounds_target: Bbox,
     target_crs: int,
     ocm_resolution: int,
@@ -617,7 +629,7 @@ def _fetch_one_ocm_key(
 @disk_cache("ocm", key_fn=_fetch_one_ocm_key)
 @with_scene_retry()
 def _fetch_one_ocm(
-    item: Any,
+    item: _BoundsItemLike,
     bounds_target: Bbox,
     target_crs: int,
     ocm_resolution: int,
@@ -642,6 +654,225 @@ def _fetch_one_ocm(
     with ThreadPoolExecutor(max_workers=len(_OCM_BANDS)) as executor:
         bands = list(executor.map(_read_band, _OCM_BANDS))
     return np.stack(bands, axis=0).astype(np.uint16)  # type: ignore[no-any-return, unused-ignore]
+
+
+def _search_and_sort_bounds_items(
+    *,
+    bounds: Bbox,
+    bounds_4326: Bbox,
+    aoi_4326: Optional[Aoi],
+    start_date: date,
+    end_date: date,
+    additional_query: Optional[Dict[str, Any]],
+    ignore_duplicate_items: bool,
+    sort_method: str,
+    sort_function: Optional[Callable[..., Any]],
+) -> Tuple[ItemCollection, Any, List[_BoundsItemLike]]:
+    """Search bounds/AOI scenes and return sorted STAC items."""
+    if aoi_4326 is not None:
+        items = _search_for_items_by_aoi(
+            aoi_4326=aoi_4326,
+            start_date=start_date,
+            end_date=end_date,
+            additional_query=additional_query,
+            ignore_duplicate_items=ignore_duplicate_items,
+        )
+    else:
+        items = _search_for_items_by_bbox(
+            bbox_4326=bounds_4326,
+            start_date=start_date,
+            end_date=end_date,
+            additional_query=additional_query,
+            ignore_duplicate_items=ignore_duplicate_items,
+        )
+    if len(items) == 0:
+        raise ValueError(
+            f"No scenes found for bounds {bounds} between "
+            f"{start_date.isoformat()} and {end_date.isoformat()}"
+        )
+
+    items_with_orbits = add_item_info(items)
+    if sort_function:
+        sorted_items = sort_function(items=items_with_orbits)
+    else:
+        sorted_items = sort_items(items=items_with_orbits, sort_method=sort_method)
+    return (
+        items,
+        sorted_items,
+        cast(List[_BoundsItemLike], sorted_items[ITEM_COL].tolist()),
+    )
+
+
+def _stream_bounds_combo_masks(
+    *,
+    items_list: List[_BoundsItemLike],
+    bounds_target: Bbox,
+    target_crs: int,
+    mask_resolution: int,
+    mask_w: int,
+    mask_h: int,
+    coverage_mask: npt.NDArray[Any],
+    cloud_mask: str,
+    mosaic_method: str,
+    no_data_threshold: Optional[float],
+    possible_pixel_count: int,
+    tile_workers: Optional[int],
+    ocm_bounds_target: Bbox,
+    ocm_crop: Optional[Tuple[slice, slice]],
+    ocm_batch_size: int,
+    ocm_inference_dtype: str,
+    scl_tile_specs: Optional[List[Tuple[int, int, int, int]]],
+    show_progress: bool,
+) -> Dict[int, npt.NDArray[Any]]:
+    """Stream per-scene cloud masks and keep only masks that contribute pixels."""
+    n_time = len(items_list)
+    logger.info(
+        f"Streaming cloud mask over up to {n_time} scenes "
+        f"(per-scene fetch at {mask_resolution}m, EPSG:{target_crs})"
+    )
+    kept_combo_masks: Dict[int, npt.NDArray[Any]] = {}
+    good_pixel_tracker = np.zeros((mask_h, mask_w), dtype=bool)
+    n_mask_fetch_failed = 0
+    mask_progress: Optional["tqdm[Any]"] = None
+    if show_progress:
+        mask_progress = tqdm(
+            total=n_time,
+            desc=f"Phase 1: streaming cloud masks ({cloud_mask})",
+            unit="scene",
+        )
+    mask_fetch_iter: Optional[
+        Iterator[Tuple[int, Union[npt.NDArray[Any], Exception]]]
+    ] = None
+    phase1_workers = tile_workers if tile_workers is not None else DEFAULT_TILE_WORKERS
+    if cloud_mask == CLOUD_MASK_SCL:
+        mask_fetch_iter = iter_ordered_fetches(
+            items=items_list,
+            fetch_fn=lambda _i, item: (
+                _fetch_one_scl_tiled(
+                    item,
+                    bounds_target,
+                    target_crs,
+                    mask_resolution,
+                    mask_w,
+                    mask_h,
+                    scl_tile_specs,
+                )
+                if scl_tile_specs is not None
+                else _fetch_one_scl(item, bounds_target, target_crs, mask_resolution)
+            ),
+            max_workers=phase1_workers,
+        )
+    elif cloud_mask == CLOUD_MASK_OCM:
+        # Each OCM fetch already reads R/G/NIR in parallel. Keep scene-level
+        # prefetch modest so download for the next scene overlaps inference
+        # without multiplying concurrent reads too aggressively.
+        mask_fetch_iter = iter_ordered_fetches(
+            items=items_list,
+            fetch_fn=lambda _i, item: _fetch_one_ocm(
+                item,
+                ocm_bounds_target,
+                target_crs,
+                mask_resolution,
+            ),
+            max_workers=min(2, phase1_workers),
+        )
+
+    for scene_position in range(n_time):
+        # FIRST mode: stop scanning once everything in coverage is filled.
+        if (
+            mosaic_method == MOSAIC_FIRST
+            and (good_pixel_tracker | ~coverage_mask).all()
+        ):
+            logger.info(
+                "All in-coverage pixels filled after "
+                f"{scene_position}/{n_time} scenes — "
+                "skipping remaining cloud-mask fetches"
+            )
+            break
+
+        try:
+            assert mask_fetch_iter is not None
+            scene_idx, mask_result = next(mask_fetch_iter)
+            if isinstance(mask_result, Exception):
+                raise mask_result
+            if mask_progress is not None:
+                mask_progress.update(1)
+        except StopIteration:
+            break
+        except SceneFetchError as e:
+            if mask_progress is not None:
+                mask_progress.update(1)
+            n_mask_fetch_failed += 1
+            logger.warning(
+                f"Scene {scene_idx + 1}/{n_time} "
+                f"({items_list[scene_idx].id}): mask fetch failed, "
+                f"skipping ({e})"
+            )
+            continue
+
+        if cloud_mask == CLOUD_MASK_SCL:
+            clear, valid = compute_masks_from_scl(mask_result)
+        else:
+            clear, valid = compute_masks_from_array(
+                mask_result,
+                batch_size=ocm_batch_size,
+                inference_dtype=ocm_inference_dtype,
+            )
+            if ocm_crop is not None:
+                clear = clear[ocm_crop]
+                valid = valid[ocm_crop]
+        combo = clear & valid
+
+        if mosaic_method == MOSAIC_FIRST:
+            new_pixels = combo & ~good_pixel_tracker
+            if not new_pixels.any():
+                continue
+            combo = new_pixels
+        elif not combo.any():
+            # All-cloud scene — no contribution to mean/percentile either.
+            continue
+
+        kept_combo_masks[scene_idx] = combo
+        good_pixel_tracker |= combo
+
+        if (
+            no_data_threshold is not None
+            and mosaic_method != MOSAIC_PERCENTILE
+            and possible_pixel_count > 0
+        ):
+            completed = int((coverage_mask & good_pixel_tracker).sum())
+            no_data_sum = possible_pixel_count - completed
+            no_data_pct = (1 - completed / possible_pixel_count) * 100
+            logger.info(
+                f"Scene {scene_idx + 1}/{n_time} kept; no-data {no_data_pct:.1f}%"
+            )
+            if no_data_sum < possible_pixel_count * no_data_threshold:
+                logger.info(
+                    f"no_data_threshold met after {len(kept_combo_masks)} kept "
+                    f"scenes ({scene_idx + 1}/{n_time} examined)"
+                )
+                break
+
+    if mask_progress is not None:
+        # `first` mode and no_data_threshold can break the loop early. Snap
+        # the bar to total so tqdm renders it as complete rather than red.
+        remaining = mask_progress.total - mask_progress.n
+        if remaining > 0:
+            mask_progress.update(remaining)
+        mask_progress.close()
+
+    if n_mask_fetch_failed:
+        logger.warning(
+            f"Mask phase: {n_mask_fetch_failed}/{n_time} scenes failed to fetch "
+            "after retries; continuing with the rest"
+        )
+
+    if not kept_combo_masks:
+        raise RuntimeError(
+            "No usable scenes — every scene was fully cloud-masked, invalid, "
+            "or failed to fetch"
+        )
+    return kept_combo_masks
 
 
 def run_bounds_pipeline(
@@ -840,34 +1071,17 @@ def run_bounds_pipeline(
         if export_path.exists() and not overwrite:
             return export_path
 
-    if aoi_4326 is not None:
-        items = _search_for_items_by_aoi(
-            aoi_4326=aoi_4326,
-            start_date=start_date,
-            end_date=end_date,
-            additional_query=additional_query,
-            ignore_duplicate_items=ignore_duplicate_items,
-        )
-    else:
-        items = _search_for_items_by_bbox(
-            bbox_4326=bounds_4326,
-            start_date=start_date,
-            end_date=end_date,
-            additional_query=additional_query,
-            ignore_duplicate_items=ignore_duplicate_items,
-        )
-    if len(items) == 0:
-        raise ValueError(
-            f"No scenes found for bounds {bounds} between "
-            f"{start_date.isoformat()} and {end_date.isoformat()}"
-        )
-
-    items_with_orbits = add_item_info(items)
-    if sort_function:
-        sorted_items = sort_function(items=items_with_orbits)
-    else:
-        sorted_items = sort_items(items=items_with_orbits, sort_method=sort_method)
-    items_list = sorted_items[ITEM_COL].tolist()
+    items, _, items_list = _search_and_sort_bounds_items(
+        bounds=bounds,
+        bounds_4326=bounds_4326,
+        aoi_4326=aoi_4326,
+        start_date=start_date,
+        end_date=end_date,
+        additional_query=additional_query,
+        ignore_duplicate_items=ignore_duplicate_items,
+        sort_method=sort_method,
+        sort_function=sort_function,
+    )
 
     # Mask resolution depends on provider: OCM is fastest at coarser resolutions
     # so we clamp to [20, 50]; SCL is a single COG read, so we fetch at the
@@ -940,151 +1154,26 @@ def run_bounds_pipeline(
         ):
             scl_tile_specs = None
 
-    # Phase 1+2: stream cloud-mask fetch + classification. One scene's mask
-    # input is in memory at a time, and late scenes are skipped entirely once
-    # first mode's coverage is filled or no_data_threshold is met.
-    logger.info(
-        f"Streaming cloud mask over up to {n_time} scenes "
-        f"(per-scene fetch at {mask_resolution}m, EPSG:{target_crs})"
+    kept_combo_masks_ocm = _stream_bounds_combo_masks(
+        items_list=items_list,
+        bounds_target=bounds_target,
+        target_crs=target_crs,
+        mask_resolution=mask_resolution,
+        mask_w=mask_w,
+        mask_h=mask_h,
+        coverage_mask=coverage_mask_ocm,
+        cloud_mask=cloud_mask,
+        mosaic_method=mosaic_method,
+        no_data_threshold=no_data_threshold,
+        possible_pixel_count=possible_pixel_count,
+        tile_workers=tile_workers,
+        ocm_bounds_target=ocm_bounds_target,
+        ocm_crop=ocm_crop,
+        ocm_batch_size=ocm_batch_size,
+        ocm_inference_dtype=ocm_inference_dtype,
+        scl_tile_specs=scl_tile_specs,
+        show_progress=show_progress,
     )
-    kept_combo_masks_ocm: Dict[int, npt.NDArray[Any]] = {}
-    good_pixel_tracker = np.zeros((mask_h, mask_w), dtype=bool)
-    n_mask_fetch_failed = 0
-    mask_progress: Optional["tqdm[Any]"] = None
-    if show_progress:
-        mask_progress = tqdm(
-            total=n_time,
-            desc=f"Phase 1: streaming cloud masks ({cloud_mask})",
-            unit="scene",
-        )
-    mask_fetch_iter: Optional[
-        Iterator[Tuple[int, Union[npt.NDArray[Any], Exception]]]
-    ] = None
-    phase1_workers = tile_workers if tile_workers is not None else DEFAULT_TILE_WORKERS
-    if cloud_mask == CLOUD_MASK_SCL:
-        mask_fetch_iter = iter_ordered_fetches(
-            items=items_list,
-            fetch_fn=lambda _i, item: (
-                _fetch_one_scl_tiled(
-                    item,
-                    bounds_target,
-                    target_crs,
-                    mask_resolution,
-                    mask_w,
-                    mask_h,
-                    scl_tile_specs,
-                )
-                if scl_tile_specs is not None
-                else _fetch_one_scl(item, bounds_target, target_crs, mask_resolution)
-            ),
-            max_workers=phase1_workers,
-        )
-    elif cloud_mask == CLOUD_MASK_OCM:
-        # Each OCM fetch already reads R/G/NIR in parallel. Keep scene-level
-        # prefetch modest so download for the next scene overlaps inference
-        # without multiplying concurrent reads too aggressively.
-        mask_fetch_iter = iter_ordered_fetches(
-            items=items_list,
-            fetch_fn=lambda _i, item: _fetch_one_ocm(
-                item,
-                ocm_bounds_target,
-                target_crs,
-                mask_resolution,
-            ),
-            max_workers=min(2, phase1_workers),
-        )
-
-    for fallback_i in range(n_time):
-        # FIRST mode: stop scanning once everything in coverage is filled.
-        if (
-            mosaic_method == MOSAIC_FIRST
-            and (good_pixel_tracker | ~coverage_mask_ocm).all()
-        ):
-            logger.info(
-                f"All in-coverage pixels filled after {fallback_i}/{n_time} scenes — "
-                "skipping remaining cloud-mask fetches"
-            )
-            break
-
-        try:
-            assert mask_fetch_iter is not None
-            i, mask_result = next(mask_fetch_iter)
-            if isinstance(mask_result, Exception):
-                raise mask_result
-            if mask_progress is not None:
-                mask_progress.update(1)
-        except StopIteration:
-            break
-        except SceneFetchError as e:
-            if mask_progress is not None:
-                mask_progress.update(1)
-            n_mask_fetch_failed += 1
-            logger.warning(
-                f"Scene {i + 1}/{n_time} ({items_list[i].id}): mask fetch failed, "
-                f"skipping ({e})"
-            )
-            continue
-
-        if cloud_mask == CLOUD_MASK_SCL:
-            clear, valid = compute_masks_from_scl(mask_result)
-        else:
-            clear, valid = compute_masks_from_array(
-                mask_result,
-                batch_size=ocm_batch_size,
-                inference_dtype=ocm_inference_dtype,
-            )
-            if ocm_crop is not None:
-                clear = clear[ocm_crop]
-                valid = valid[ocm_crop]
-        combo = clear & valid
-
-        if mosaic_method == MOSAIC_FIRST:
-            new_pixels = combo & ~good_pixel_tracker
-            if not new_pixels.any():
-                continue
-            combo = new_pixels
-        elif not combo.any():
-            # All-cloud scene — no contribution to mean/percentile either.
-            continue
-
-        kept_combo_masks_ocm[i] = combo
-        good_pixel_tracker |= combo
-
-        if (
-            no_data_threshold is not None
-            and mosaic_method != MOSAIC_PERCENTILE
-            and possible_pixel_count > 0
-        ):
-            completed = int((coverage_mask_ocm & good_pixel_tracker).sum())
-            no_data_sum = possible_pixel_count - completed
-            no_data_pct = (1 - completed / possible_pixel_count) * 100
-            logger.info(f"Scene {i + 1}/{n_time} kept; no-data {no_data_pct:.1f}%")
-            if no_data_sum < possible_pixel_count * no_data_threshold:
-                logger.info(
-                    f"no_data_threshold met after {len(kept_combo_masks_ocm)} kept "
-                    f"scenes ({i + 1}/{n_time} examined)"
-                )
-                break
-
-    if mask_progress is not None:
-        # `first` mode and no_data_threshold can break the loop early. Snap
-        # the bar to total so tqdm renders it as complete rather than red.
-        remaining = mask_progress.total - mask_progress.n
-        if remaining > 0:
-            mask_progress.update(remaining)
-        mask_progress.close()
-
-    if n_mask_fetch_failed:
-        logger.warning(
-            f"Mask phase: {n_mask_fetch_failed}/{n_time} scenes failed to fetch "
-            "after retries; continuing with the rest"
-        )
-
-    if not kept_combo_masks_ocm:
-        raise RuntimeError(
-            "No usable scenes — every scene was fully cloud-masked, invalid, "
-            "or failed to fetch"
-        )
 
     # Prepare the user-resolution masks and target grid for tile aggregation.
     kept_indices = sorted(kept_combo_masks_ocm.keys())

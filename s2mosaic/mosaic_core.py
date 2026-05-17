@@ -213,7 +213,9 @@ def _read_with_retry(
             if attempt == attempts - 1:
                 break
             time.sleep(0.5 * (attempt + 1))
-    raise last_error  # type: ignore[misc]
+    if last_error is None:
+        raise RuntimeError("Remote read was not attempted")
+    raise last_error
 
 
 def _write_tiled_copy(
@@ -915,18 +917,20 @@ def iter_tile_aggregation(
 
     completed = 0
     log_every = max(1, len(specs) // 10)
-    tile_iter: Iterator[Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]]
-    if n_workers <= 1:
-        tile_iter = map(worker_fn, specs)
-    else:
-        ex = ThreadPoolExecutor(max_workers=n_workers)
-        tile_iter = ex.map(worker_fn, specs)
     try:
-        for spec, tile_data in tile_iter:
-            completed += 1
-            if completed % log_every == 0 or completed == len(specs):
-                logger.info("Phase 2: %d/%d tiles done", completed, len(specs))
-            yield spec, tile_data
+        if n_workers <= 1:
+            for spec, tile_data in map(worker_fn, specs):
+                completed += 1
+                if completed % log_every == 0 or completed == len(specs):
+                    logger.info("Phase 2: %d/%d tiles done", completed, len(specs))
+                yield spec, tile_data
+        else:
+            with ThreadPoolExecutor(max_workers=n_workers) as ex:
+                for spec, tile_data in ex.map(worker_fn, specs):
+                    completed += 1
+                    if completed % log_every == 0 or completed == len(specs):
+                        logger.info("Phase 2: %d/%d tiles done", completed, len(specs))
+                    yield spec, tile_data
     finally:
         if progress_bar is not None:
             # Early-stop modes (first, observation target) skip reads, so the
@@ -935,8 +939,6 @@ def iter_tile_aggregation(
             if remaining > 0:
                 progress_bar.update(remaining)
             progress_bar.close()
-        if n_workers > 1:
-            ex.shutdown(wait=True)
 
 
 def write_tile_aggregation_geotiff(
@@ -1207,7 +1209,7 @@ def stream_mosaic_pipeline(
     )
 
     try:
-        for fallback_idx in range(n_scenes):
+        for scene_position in range(n_scenes):
             if (
                 mosaic_method == MOSAIC_FIRST
                 and (good_pixel_tracker | ~coverage_mask).all()
@@ -1215,28 +1217,28 @@ def stream_mosaic_pipeline(
                 logger.info(
                     "All in-coverage pixels filled after %d/%d scenes — "
                     "skipping remaining cloud-mask fetches",
-                    fallback_idx,
+                    scene_position,
                     n_scenes,
                 )
                 break
             try:
-                idx, combo_result = next(mask_iter)
+                scene_idx, combo_result = next(mask_iter)
             except StopIteration:
                 break
             if isinstance(combo_result, Exception):
                 n_mask_fetch_failed += 1
                 logger.warning(
                     "Mask fetch failed for %s, skipping (%s)",
-                    items[idx].id,
+                    items[scene_idx].id,
                     combo_result,
                 )
                 continue
             combo = combo_result
             logger.info(
                 "Phase 1: scene %d/%d (%s): %s",
-                idx + 1,
+                scene_idx + 1,
                 n_scenes,
-                items[idx].id,
+                items[scene_idx].id,
                 "ok" if combo is not None else "skipped",
             )
             if combo is None:
@@ -1249,7 +1251,7 @@ def stream_mosaic_pipeline(
                 combo = new_pixels
             elif not combo.any():
                 continue
-            masks[idx] = combo
+            masks[scene_idx] = combo
             good_pixel_tracker |= combo
 
             if (
@@ -1263,7 +1265,7 @@ def stream_mosaic_pipeline(
                     logger.info(
                         "no_data_threshold met after %d kept scenes (%d/%d examined)",
                         sum(1 for m in masks if m is not None),
-                        idx + 1,
+                        scene_idx + 1,
                         n_scenes,
                     )
                     break
