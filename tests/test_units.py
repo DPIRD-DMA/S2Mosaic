@@ -1704,6 +1704,9 @@ class TestBoundsOcmContext:
         )
         monkeypatch.setattr(bounds_mod, "_rasterize_aoi_mask", fake_rasterize_aoi_mask)
         monkeypatch.setattr(
+            bounds_mod, "_should_use_tiled_scl_fetch", lambda *_, **__: True
+        )
+        monkeypatch.setattr(
             bounds_mod, "_fetch_one_scl_tiled", fake_fetch_one_scl_tiled
         )
         monkeypatch.setattr(
@@ -1749,6 +1752,82 @@ class TestBoundsOcmContext:
         assert fetch_tile_specs[0] != [(0, 0, 2048, 2048)]
         assert all(h <= 512 and w <= 512 for _, _, h, w in fetch_tile_specs[0])
         assert len(fetch_tile_specs[0]) == 4
+
+    def test_aoi_scl_uses_full_read_when_block_gate_rejects_tiling(self, monkeypatch):
+        import s2mosaic.bounds as bounds_mod
+
+        aoi = Polygon(
+            [
+                (390_000.0, 6_460_000.0),
+                (410_480.0, 6_460_000.0),
+                (410_480.0, 6_480_480.0),
+                (390_000.0, 6_480_480.0),
+            ]
+        )
+        full_fetches = []
+
+        def fake_rasterize_aoi_mask(**kwargs):
+            mask = np.zeros((kwargs["height"], kwargs["width"]), dtype=bool)
+            mask[:64, :] = True
+            return mask
+
+        def fake_fetch_one_scl(item, bounds_target, target_crs, mask_resolution):
+            full_fetches.append(item.id)
+            return np.ones((2048, 2048), dtype=np.uint8)
+
+        monkeypatch.setattr(
+            bounds_mod, "_search_for_items_by_aoi", lambda **_: [self.FakeItem()]
+        )
+        monkeypatch.setattr(bounds_mod, "_rasterize_aoi_mask", fake_rasterize_aoi_mask)
+        monkeypatch.setattr(
+            bounds_mod, "_should_use_tiled_scl_fetch", lambda *_, **__: False
+        )
+        monkeypatch.setattr(bounds_mod, "_fetch_one_scl", fake_fetch_one_scl)
+        monkeypatch.setattr(
+            bounds_mod,
+            "_fetch_one_scl_tiled",
+            lambda *_, **__: pytest.fail("block gate should choose full SCL read"),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "compute_masks_from_scl",
+            lambda scl: (
+                np.ones_like(scl, dtype=bool),
+                np.ones_like(scl, dtype=bool),
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "make_bounds_tile_reader",
+            lambda **_: (
+                lambda scene_idx, band_idx, window: np.ones(
+                    (window[2], window[3]), dtype=np.uint16
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "run_tile_aggregation",
+            lambda **kwargs: np.ones(
+                (kwargs["bands_count"], kwargs["height"], kwargs["width"]),
+                dtype=np.uint16,
+            ),
+        )
+
+        bounds_mod.run_bounds_pipeline(
+            aoi=aoi,
+            input_crs=32750,
+            output_crs=32750,
+            start_year=2023,
+            duration_days=1,
+            required_bands=["B04"],
+            cloud_mask="SCL",
+            coverage_threshold_pct=None,
+            no_data_threshold=None,
+            adaptive_tiling=True,
+        )
+
+        assert full_fetches == ["fake-scene"]
 
     def test_aoi_pipeline_uses_polygon_search(self, monkeypatch):
         import s2mosaic.bounds as bounds_mod
