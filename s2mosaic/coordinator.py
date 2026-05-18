@@ -17,6 +17,7 @@ from .helpers import (
     validate_inputs,
 )
 from .mosaic_core import stream_mosaic_pipeline
+from .sources import SOURCE_MPC, get_source
 from .stac_utils import add_item_info, search_for_items, sort_items
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,7 @@ def mosaic(
     resolution: int = ...,
     resampling_method: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
+    source: str = ...,
     no_data_tolerance: Union[float, None] = ...,
     observation_target: Optional[int] = ...,
     min_coverage_fraction: Optional[float] = ...,
@@ -83,6 +85,7 @@ def mosaic(
     resolution: int = ...,
     resampling_method: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
+    source: str = ...,
     no_data_tolerance: Union[float, None] = ...,
     observation_target: Optional[int] = ...,
     min_coverage_fraction: Optional[float] = ...,
@@ -121,6 +124,7 @@ def mosaic(
     resolution: int = ...,
     resampling_method: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
+    source: str = ...,
     no_data_tolerance: Union[float, None] = ...,
     observation_target: Optional[int] = ...,
     min_coverage_fraction: Optional[float] = ...,
@@ -158,6 +162,7 @@ def mosaic(
     resolution: int = 10,
     resampling_method: str = "nearest",
     additional_query: Optional[Dict[str, Any]] = None,
+    source: str = SOURCE_MPC,
     no_data_tolerance: Union[float, None] = 0.0,
     observation_target: Optional[int] = None,
     min_coverage_fraction: Optional[float] = 0.1,
@@ -222,6 +227,10 @@ def mosaic(
             "bilinear", "cubic", "average", and "lanczos". Defaults to "nearest".
         additional_query (Dict[str, Any], optional): Additional query parameters for STAC API.
             Defaults to {"eo:cloud_cover": {"lt": 100}}.
+        source (str, optional): STAC imagery source. ``"MPC"`` (default) uses
+            Microsoft Planetary Computer (SAS-signed URLs); ``"AWS"`` uses
+            Element 84 Earth Search on AWS Open Data (public S3, no auth).
+            Defaults to "MPC".
         no_data_tolerance (float, optional): Early-stop fraction for scene
             ingestion. Stops reading further scenes once the AOI's no-data
             fraction drops below this value. Set to ``0.0`` (default) or
@@ -273,6 +282,8 @@ def mosaic(
     if sum(x is not None for x in (grid_id, bounds, aoi)) != 1:
         raise ValueError("Exactly one of grid_id, bounds, or aoi must be provided")
 
+    source_obj = get_source(source)
+
     if bounds is not None or aoi is not None:
         return run_bounds_pipeline(
             bounds=bounds,
@@ -306,6 +317,7 @@ def mosaic(
             tile_workers=tile_workers,
             adaptive_tiling=adaptive_tiling,
             show_progress=show_progress,
+            source=source_obj,
         )
 
     (
@@ -343,6 +355,7 @@ def mosaic(
         cloud_mask=cloud_mask,
         adaptive_tiling=adaptive_tiling,
         min_coverage_fraction=min_coverage_fraction,
+        source=source,
     )
     logger.info("All inputs validated successfully.")
 
@@ -382,6 +395,7 @@ def mosaic(
         start_date=start_date,
         end_date=end_date,
         additional_query=additional_query,
+        source=source_obj,
         ignore_duplicate_items=ignore_duplicate_items,
     )
     logger.info(f"Found {len(items)} scenes for grid {grid_id}.")
@@ -419,6 +433,7 @@ def mosaic(
         sorted_scenes=sorted_items,
         required_bands=required_bands,
         no_data_tolerance=no_data_tolerance,
+        source=source_obj,
         observation_target=observation_target,
         export_path=export_path,
         output_coverage_mask=output_coverage_mask,

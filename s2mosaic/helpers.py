@@ -340,7 +340,14 @@ def validate_inputs(
     adaptive_tiling: bool = True,
     aoi: Optional[Polygon] = None,
     min_coverage_fraction: Optional[float] = None,
+    source: str = "MPC",
 ) -> None:
+    from .sources import VALID_SOURCES
+
+    if source not in VALID_SOURCES:
+        raise ValueError(
+            f"Invalid source: {source}. Must be one of {sorted(VALID_SOURCES)}"
+        )
     if grid_id is not None and (not grid_id.isalnum() or not grid_id.isupper()):
         raise ValueError(
             f"""Grid {grid_id} is invalid. It should be in the format '50HMH'.

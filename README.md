@@ -138,6 +138,7 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 
 **Scene selection**
 
+- `source` (`"MPC"`): STAC provider. `"MPC"` (default) uses Microsoft Planetary Computer with SAS-signed URLs. `"AWS"` uses Element 84's Earth Search on AWS Open Data — same Sentinel-2 L2A scenes, public S3 (no auth, no SAS rotation). Useful as a fallback when Planetary Computer is having an outage, or for bulk runs that benefit from no rate-limited token issuance.
 - `additional_query` (`{"eo:cloud_cover": {"lt": 100}}`): extra STAC query filters, e.g. `{"eo:cloud_cover": {"lt": 80}}`.
 - `no_data_tolerance` (`0.0`): scene-selection early stop once the AOI no-data fraction drops below this. The default `0.0` (or `None`) examines every scene. Ignored for `percentile` mosaic methods.
 - `min_coverage_fraction` (`0.1`): drop scene-edge pixels covered by fewer than this fraction of the maximum overlap count in the AOI. Set to `None` to keep everything.

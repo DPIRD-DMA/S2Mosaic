@@ -1,10 +1,10 @@
 import json
 import logging
+import re
 from datetime import date
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
-import pystac_client
 import shapely
 from pandas import DataFrame
 from pystac import Item
@@ -14,6 +14,7 @@ from shapely.geometry.polygon import Polygon
 from urllib3 import Retry
 
 from .helpers import SORT_NEWEST, SORT_OLDEST, SORT_VALID_DATA, pickle_cache
+from .sources import Source
 
 logger = logging.getLogger(__name__)
 
@@ -23,24 +24,54 @@ ORBIT_COL = "orbit"
 GOOD_DATA_PCT_COL = "good_data_pct"
 DATETIME_COL = "datetime"
 
+# Element 84's Earth Search v1 drops ``sat:relative_orbit`` and
+# ``s2:mgrs_tile`` from item properties. The orbit number is embedded in the
+# product URI (``..._R060_...``) and the tile lives in ``grid:code``
+# (``MGRS-50HMH``); these helpers recover both with property fallbacks first.
+_PRODUCT_URI_ORBIT_RE = re.compile(r"_R(\d+)_")
+
+
+def _extract_relative_orbit(props: Dict[str, Any]) -> int:
+    if "sat:relative_orbit" in props:
+        return int(props["sat:relative_orbit"])
+    product_uri = props.get("s2:product_uri") or props.get("s2:product_id") or ""
+    m = _PRODUCT_URI_ORBIT_RE.search(product_uri)
+    return int(m.group(1)) if m else 0
+
+
+def _extract_mgrs_tile(props: Dict[str, Any]) -> Optional[str]:
+    if "s2:mgrs_tile" in props:
+        return str(props["s2:mgrs_tile"])
+    grid_code = props.get("grid:code")
+    if isinstance(grid_code, str) and grid_code.startswith("MGRS-"):
+        return grid_code[len("MGRS-") :]
+    return None
+
 
 def add_item_info(items: ItemCollection) -> DataFrame:
-    """Split items by orbit and sort by no_data"""
+    """Split items by orbit and sort by no_data.
+
+    Element 84's Earth Search publishes ``s2:nodata_pixel_percentage`` and
+    ``s2:high_proba_clouds_percentage`` (so the MPC code path is preserved),
+    but it does *not* publish ``sat:relative_orbit`` — we recover that from
+    the ``_R(\\d+)_`` token in ``s2:product_uri``.
+    """
 
     items_list = []
     for item in items:
-        nodata = item.properties["s2:nodata_pixel_percentage"]
+        props = item.properties
+        nodata = props.get("s2:nodata_pixel_percentage", 0)
         data_pct = 100 - nodata
 
-        cloud = item.properties["s2:high_proba_clouds_percentage"]
-        shadow = item.properties["s2:cloud_shadow_percentage"]
+        cloud = props.get("s2:high_proba_clouds_percentage", 0)
+        shadow = props.get("s2:cloud_shadow_percentage", 0)
         good_data_pct = data_pct * (1 - (cloud + shadow) / 100)
         capture_date = item.datetime
 
         items_list.append(
             {
                 ITEM_COL: item,
-                ORBIT_COL: item.properties["sat:relative_orbit"],
+                ORBIT_COL: _extract_relative_orbit(props),
                 GOOD_DATA_PCT_COL: good_data_pct,
                 DATETIME_COL: capture_date,
             }
@@ -56,18 +87,26 @@ def search_for_items(
     start_date: date,
     end_date: date,
     additional_query: Dict[str, Any],
+    source: Source,
     ignore_duplicate_items: bool = True,
 ) -> ItemCollection:
-    base_query = {"s2:mgrs_tile": {"eq": grid_id}}
+    base_query: Dict[str, Any] = {}
+    mgrs_filter = source.mgrs_query(grid_id)
+    if mgrs_filter is not None:
+        base_query.update(mgrs_filter)
     if additional_query:
         base_query.update(additional_query)
 
-    query = {
-        "collections": ["sentinel-2-l2a"],
+    query: Dict[str, Any] = {
+        "collections": [source.collection_id],
         "intersects": shapely.to_geojson(bounds),
-        "datetime": f"{start_date.isoformat()}Z/{end_date.isoformat()}Z",
-        "query": base_query,
+        "datetime": (
+            f"{start_date.strftime('%Y-%m-%dT00:00:00Z')}/"
+            f"{end_date.strftime('%Y-%m-%dT00:00:00Z')}"
+        ),
     }
+    if base_query:
+        query["query"] = base_query
 
     logger.info(
         f"""Searching for items in grid {grid_id} from
@@ -79,7 +118,7 @@ def search_for_items(
     # (signing happens at asset read time), so the cached payload is stable
     # across runs.
     cache_key = (
-        f"{grid_id}|{start_date.isoformat()}|{end_date.isoformat()}|"
+        f"{source.name}|{grid_id}|{start_date.isoformat()}|{end_date.isoformat()}|"
         f"{shapely.to_geojson(bounds)}|"
         f"{json.dumps(additional_query or {}, sort_keys=True, default=str)}|"
         f"dedupe={ignore_duplicate_items}"
@@ -93,11 +132,25 @@ def search_for_items(
             allowed_methods=None,
         )
         stac_api_io = StacApiIO(max_retries=retry)
-        catalog = pystac_client.Client.open(
-            "https://planetarycomputer.microsoft.com/api/stac/v1", stac_io=stac_api_io
-        )
+        catalog = source.open_catalog(stac_io=stac_api_io)
         items = catalog.search(**query).item_collection()
         logger.info(f"Found {len(items)}")
+        # When the source can't filter by MGRS server-side (e.g. AWS — Earth
+        # Search rejects ``query`` combined with ``intersects``), the search
+        # also returns scenes from adjacent tiles that overlap the tile
+        # polygon. Filter those out client-side using the per-item tile ID
+        # so grid_id-mode output is restricted to the requested tile.
+        if mgrs_filter is None:
+            before = len(items)
+            kept = [it for it in items if _extract_mgrs_tile(it.properties) == grid_id]
+            items = ItemCollection(kept)
+            if len(items) != before:
+                logger.info(
+                    "Post-filtered %d -> %d items by grid_id=%s",
+                    before,
+                    len(items),
+                    grid_id,
+                )
         if ignore_duplicate_items:
             items = filter_latest_processing_baselines(items)
             logger.info(f"After filtering, {len(items)} items remain")
@@ -163,7 +216,7 @@ def filter_latest_processing_baselines(
         datetime_str: str = (
             item.datetime.strftime("%Y%m%dT%H%M%S") if item.datetime else "unknown"
         )
-        tile_id: str = item.properties.get("s2:mgrs_tile", "unknown")
+        tile_id: str = _extract_mgrs_tile(item.properties) or "unknown"
         acquisition_key: str = f"{datetime_str}_{tile_id}"
 
         # Get processing baseline from properties

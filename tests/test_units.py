@@ -1657,7 +1657,7 @@ class TestBoundsOcmContext:
             lambda **_: np.ones((5, 10), dtype=bool),
         )
 
-        def fake_fetch_one_ocm(item, bounds_target, target_crs, ocm_resolution):
+        def fake_fetch_one_ocm(item, source, bounds_target, target_crs, ocm_resolution):
             fetch_calls.append((item.id, bounds_target, target_crs, ocm_resolution))
             return np.zeros((3, 100, 100), dtype=np.uint16)
 
@@ -1813,6 +1813,7 @@ class TestBoundsOcmContext:
 
         def fake_fetch_one_scl_tiled(
             item,
+            source,
             bounds_target,
             target_crs,
             mask_resolution,
@@ -1895,7 +1896,9 @@ class TestBoundsOcmContext:
             mask[:64, :] = True
             return mask
 
-        def fake_fetch_one_scl(item, bounds_target, target_crs, mask_resolution):
+        def fake_fetch_one_scl(
+            item, source, bounds_target, target_crs, mask_resolution
+        ):
             full_fetches.append(item.id)
             return np.ones((2048, 2048), dtype=np.uint8)
 
@@ -1973,7 +1976,7 @@ class TestBoundsOcmContext:
         monkeypatch.setattr(
             bounds_mod,
             "_fetch_one_scl",
-            lambda item, bounds_target, target_crs, mask_resolution: np.ones(
+            lambda item, source, bounds_target, target_crs, mask_resolution: np.ones(
                 (4, 4), dtype=np.uint8
             ),
         )
@@ -2047,7 +2050,7 @@ class TestBoundsOcmContext:
         monkeypatch.setattr(
             bounds_mod,
             "_fetch_one_scl",
-            lambda item, bounds_target, target_crs, mask_resolution: np.ones(
+            lambda item, source, bounds_target, target_crs, mask_resolution: np.ones(
                 (4, 4), dtype=np.uint8
             ),
         )
@@ -2108,7 +2111,7 @@ class TestBoundsOcmContext:
         monkeypatch.setattr(
             bounds_mod,
             "_fetch_one_scl",
-            lambda item, bounds_target, target_crs, mask_resolution: np.ones(
+            lambda item, source, bounds_target, target_crs, mask_resolution: np.ones(
                 (4, 4), dtype=np.uint8
             ),
         )
@@ -2169,7 +2172,7 @@ class TestBoundsOcmContext:
         monkeypatch.setattr(
             bounds_mod,
             "_fetch_one_scl",
-            lambda item, bounds_target, target_crs, mask_resolution: np.ones(
+            lambda item, source, bounds_target, target_crs, mask_resolution: np.ones(
                 (4, 4), dtype=np.uint8
             ),
         )
@@ -2638,18 +2641,19 @@ class TestTiledBandMaterialisation:
             assert source == "cached.tif"
             return FakeDataset()
 
-        monkeypatch.setattr(
-            "s2mosaic.bounds.planetary_computer.sign", lambda href: href
-        )
+        monkeypatch.setattr("planetary_computer.sign", lambda href: href)
         monkeypatch.setattr(
             "s2mosaic.bounds._materialise_bounds_band", fake_materialiser_factory
         )
         monkeypatch.setattr("s2mosaic.bounds.materialise_tiled_band", fake_materialise)
         monkeypatch.setattr("s2mosaic.bounds.rio.open", fake_open)
 
+        from s2mosaic.sources import MPC
+
         read_fn = make_bounds_tile_reader(
             items=[FakeItem()],
             href_template=[("B04", 1)],
+            source=MPC,
             bounds_target=(0.0, 0.0, 10.0, 10.0),
             target_crs=32750,
             user_transform=from_origin(0, 10, 1, 1),

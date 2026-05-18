@@ -2,27 +2,27 @@ from typing import Any, Dict, Tuple
 
 import numpy as np
 import numpy.typing as npt
-import planetary_computer
 import rasterio as rio
 from rasterio.windows import Window
 
 from .helpers import disk_cache, with_scene_retry
+from .sources import Source
 
 
-def _full_band_key(href: str, res: int = 10) -> str:
+def _full_band_key(href: str, source: Source, res: int = 10) -> str:
     href_parts = href.split("/")
-    return f"{href_parts[-4]}|{href_parts[-1]}|{res / 10}|{res}"
+    return f"{source.name}|{href_parts[-4]}|{href_parts[-1]}|{res / 10}|{res}"
 
 
 @disk_cache("full_band", key_fn=_full_band_key)
 @with_scene_retry()
 def get_full_band(
-    href: str, res: int = 10
+    href: str, source: Source, res: int = 10
 ) -> Tuple[npt.NDArray[np.uint16], Dict[str, Any]]:
     spatial_ratio = res / 10
 
-    signed_href = planetary_computer.sign(href)
-    is_tci = "TCI_10m" in href
+    signed_href = source.sign(href)
+    is_tci = "TCI_10m" in href or "/visual/" in href or href.endswith("_TCI.tif")
     with rio.open(signed_href) as src:
         target_side = int(10980 / spatial_ratio)
         # Passing an explicit window is required for rasterio to use COG

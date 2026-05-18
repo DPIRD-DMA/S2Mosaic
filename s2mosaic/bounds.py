@@ -30,8 +30,6 @@ from typing import (
 import cv2
 import numpy as np
 import numpy.typing as npt
-import planetary_computer
-import pystac_client
 import rasterio as rio
 from pyproj import Transformer
 from pystac.item_collection import ItemCollection
@@ -77,6 +75,7 @@ from .mosaic_core import (
     should_prewarm_sources,
     write_tile_aggregation_geotiff,
 )
+from .sources import Source
 from .stac_utils import (
     ITEM_COL,
     add_item_info,
@@ -130,6 +129,7 @@ def _search_for_items_by_bbox(
     bbox_4326: Bbox,
     start_date: date,
     end_date: date,
+    source: Source,
     additional_query: Optional[Dict[str, Any]] = None,
     ignore_duplicate_items: bool = True,
 ) -> ItemCollection:
@@ -138,6 +138,7 @@ def _search_for_items_by_bbox(
         geometry=bbox_4326,
         start_date=start_date,
         end_date=end_date,
+        source=source,
         additional_query=additional_query,
         ignore_duplicate_items=ignore_duplicate_items,
     )
@@ -147,6 +148,7 @@ def _search_for_items_by_aoi(
     aoi_4326: Aoi,
     start_date: date,
     end_date: date,
+    source: Source,
     additional_query: Optional[Dict[str, Any]] = None,
     ignore_duplicate_items: bool = True,
 ) -> ItemCollection:
@@ -155,6 +157,7 @@ def _search_for_items_by_aoi(
         geometry=aoi_4326,
         start_date=start_date,
         end_date=end_date,
+        source=source,
         additional_query=additional_query,
         ignore_duplicate_items=ignore_duplicate_items,
     )
@@ -164,13 +167,17 @@ def _search_for_items_by_geometry(
     geometry: Union[Bbox, Aoi],
     start_date: date,
     end_date: date,
+    source: Source,
     additional_query: Optional[Dict[str, Any]] = None,
     ignore_duplicate_items: bool = True,
 ) -> ItemCollection:
     """Search Sentinel-2 L2A items intersecting a bbox or polygon in EPSG:4326."""
     query: Dict[str, Any] = {
-        "collections": ["sentinel-2-l2a"],
-        "datetime": f"{start_date.isoformat()}Z/{end_date.isoformat()}Z",
+        "collections": [source.collection_id],
+        "datetime": (
+            f"{start_date.strftime('%Y-%m-%dT00:00:00Z')}/"
+            f"{end_date.strftime('%Y-%m-%dT00:00:00Z')}"
+        ),
     }
     if isinstance(geometry, tuple):
         query["bbox"] = list(geometry)
@@ -188,11 +195,7 @@ def _search_for_items_by_geometry(
         allowed_methods=None,
     )
     stac_api_io = StacApiIO(max_retries=retry)
-    catalog = pystac_client.Client.open(
-        "https://planetarycomputer.microsoft.com/api/stac/v1",
-        modifier=planetary_computer.sign_inplace,
-        stac_io=stac_api_io,
-    )
+    catalog = source.open_catalog(stac_io=stac_api_io)
     items = catalog.search(**query).item_collection()
     logger.info(f"Found {len(items)} items for {search_label}")
 
@@ -280,6 +283,7 @@ def _expand_bounds_for_ocm_context(
 def _materialise_bounds_band(
     item: _BoundsItemLike,
     asset_name: str,
+    source: Source,
     bounds_target: Bbox,
     target_crs: int,
     width: int,
@@ -300,7 +304,7 @@ def _materialise_bounds_band(
     transform = Affine(resolution, 0, minx, 0, -resolution, maxy)
 
     def write(tmp_path: Path) -> None:
-        signed = planetary_computer.sign(item.assets[asset_name].href)
+        signed = source.sign(item.assets[asset_name].href)
         with rio.open(signed) as src:
             with WarpedVRT(
                 src,
@@ -334,6 +338,7 @@ def _materialise_bounds_band(
 def make_bounds_tile_reader(
     items: List[_BoundsItemLike],
     href_template: List[Tuple[str, int]],
+    source: Source,
     bounds_target: Bbox,
     target_crs: int,
     user_transform: Affine,
@@ -362,15 +367,16 @@ def make_bounds_tile_reader(
     for item in items:
         scene_sources: List[Callable[[], Tuple[str, bool]]] = []
         for asset, _ in href_template:
+            asset_key = source.asset_name(asset)
             cache_key = (
-                f"bounds|{item.id}|{asset}|{bounds_target}|{target_crs}|"
-                f"{width}|{height}|{resolution}|{resampling_method}"
+                f"bounds|{source.name}|{item.id}|{asset_key}|{bounds_target}|"
+                f"{target_crs}|{width}|{height}|{resolution}|{resampling_method}"
             )
-            signed_url = planetary_computer.sign(item.assets[asset].href)
+            signed_url = source.sign(item.assets[asset_key].href)
 
             def source_for(
                 item: _BoundsItemLike = item,
-                asset: str = asset,
+                asset_key: str = asset_key,
                 cache_key: str = cache_key,
                 signed_url: str = signed_url,
             ) -> Tuple[str, bool]:
@@ -378,7 +384,8 @@ def make_bounds_tile_reader(
                     cache_key,
                     _materialise_bounds_band(
                         item,
-                        asset,
+                        asset_key,
+                        source,
                         bounds_target,
                         target_crs,
                         width,
@@ -461,17 +468,19 @@ def _read_warpvrt(
 
 def _fetch_one_scl_key(
     item: _BoundsItemLike,
+    source: Source,
     bounds_target: Bbox,
     target_crs: int,
     mask_resolution: int,
 ) -> str:
-    return f"{item.id}|{bounds_target}|{target_crs}|{mask_resolution}"
+    return f"{source.name}|{item.id}|{bounds_target}|{target_crs}|{mask_resolution}"
 
 
 @disk_cache("scl", key_fn=_fetch_one_scl_key)
 @with_scene_retry()
 def _fetch_one_scl(
     item: _BoundsItemLike,
+    source: Source,
     bounds_target: Bbox,
     target_crs: int,
     mask_resolution: int,
@@ -486,7 +495,7 @@ def _fetch_one_scl(
         bounds_target, mask_resolution, target_crs
     )
     rio_resampling = get_rasterio_resampling("nearest")
-    href = planetary_computer.sign(item.assets["SCL"].href)
+    href = source.sign(item.assets[source.asset_name("SCL")].href)
     arr = _read_warpvrt(
         href, 1, transform, width, height, target_crs_obj, rio_resampling
     )
@@ -496,6 +505,7 @@ def _fetch_one_scl(
 @with_scene_retry()
 def _fetch_one_scl_tiled(
     item: _BoundsItemLike,
+    source: Source,
     bounds_target: Bbox,
     target_crs: int,
     mask_resolution: int,
@@ -505,7 +515,7 @@ def _fetch_one_scl_tiled(
 ) -> npt.NDArray[Any]:
     """Fetch one scene's SCL band using sparse AOI tile windows."""
     if tile_specs == [(0, 0, height, width)]:
-        return _fetch_one_scl(item, bounds_target, target_crs, mask_resolution)
+        return _fetch_one_scl(item, source, bounds_target, target_crs, mask_resolution)
 
     transform, expected_width, expected_height, target_crs_obj = _target_grid(
         bounds_target, mask_resolution, target_crs
@@ -517,7 +527,7 @@ def _fetch_one_scl_tiled(
         )
 
     rio_resampling = get_rasterio_resampling("nearest")
-    href = planetary_computer.sign(item.assets["SCL"].href)
+    href = source.sign(item.assets[source.asset_name("SCL")].href)
     out = np.zeros((height, width), dtype=np.uint8)
     with rio.open(href) as src:
         with WarpedVRT(
@@ -536,6 +546,7 @@ def _fetch_one_scl_tiled(
 
 def _source_block_count_for_scl_tiles(
     item: _BoundsItemLike,
+    source: Source,
     bounds_target: Bbox,
     target_crs: int,
     mask_resolution: int,
@@ -553,7 +564,7 @@ def _source_block_count_for_scl_tiles(
             f"expected {(expected_width, expected_height)}, got {(width, height)}"
         )
 
-    href = planetary_computer.sign(item.assets["SCL"].href)
+    href = source.sign(item.assets[source.asset_name("SCL")].href)
     blocks: set[Tuple[int, int]] = set()
     window_cls: Any = Window
     with rio.open(href) as src:
@@ -585,6 +596,7 @@ def _source_block_count_for_scl_tiles(
 
 def _should_use_tiled_scl_fetch(
     item: _BoundsItemLike,
+    source: Source,
     bounds_target: Bbox,
     target_crs: int,
     mask_resolution: int,
@@ -599,6 +611,7 @@ def _should_use_tiled_scl_fetch(
 
     full_blocks = _source_block_count_for_scl_tiles(
         item,
+        source,
         bounds_target,
         target_crs,
         mask_resolution,
@@ -608,6 +621,7 @@ def _should_use_tiled_scl_fetch(
     )
     tiled_blocks = _source_block_count_for_scl_tiles(
         item,
+        source,
         bounds_target,
         target_crs,
         mask_resolution,
@@ -622,17 +636,19 @@ def _should_use_tiled_scl_fetch(
 
 def _fetch_one_ocm_key(
     item: _BoundsItemLike,
+    source: Source,
     bounds_target: Bbox,
     target_crs: int,
     ocm_resolution: int,
 ) -> str:
-    return f"{item.id}|{bounds_target}|{target_crs}|{ocm_resolution}"
+    return f"{source.name}|{item.id}|{bounds_target}|{target_crs}|{ocm_resolution}"
 
 
 @disk_cache("ocm", key_fn=_fetch_one_ocm_key)
 @with_scene_retry()
 def _fetch_one_ocm(
     item: _BoundsItemLike,
+    source: Source,
     bounds_target: Bbox,
     target_crs: int,
     ocm_resolution: int,
@@ -649,7 +665,7 @@ def _fetch_one_ocm(
     rio_resampling = get_rasterio_resampling("nearest")
 
     def _read_band(band_name: str) -> npt.NDArray[Any]:
-        href = planetary_computer.sign(item.assets[band_name].href)
+        href = source.sign(item.assets[source.asset_name(band_name)].href)
         return _read_warpvrt(
             href, 1, transform, width, height, target_crs_obj, rio_resampling
         )
@@ -666,6 +682,7 @@ def _search_and_sort_bounds_items(
     aoi_4326: Optional[Aoi],
     start_date: date,
     end_date: date,
+    source: Source,
     additional_query: Optional[Dict[str, Any]],
     ignore_duplicate_items: bool,
     sort_method: str,
@@ -677,6 +694,7 @@ def _search_and_sort_bounds_items(
             aoi_4326=aoi_4326,
             start_date=start_date,
             end_date=end_date,
+            source=source,
             additional_query=additional_query,
             ignore_duplicate_items=ignore_duplicate_items,
         )
@@ -685,6 +703,7 @@ def _search_and_sort_bounds_items(
             bbox_4326=bounds_4326,
             start_date=start_date,
             end_date=end_date,
+            source=source,
             additional_query=additional_query,
             ignore_duplicate_items=ignore_duplicate_items,
         )
@@ -709,6 +728,7 @@ def _search_and_sort_bounds_items(
 def _stream_bounds_combo_masks(
     *,
     items_list: List[_BoundsItemLike],
+    source: Source,
     bounds_target: Bbox,
     target_crs: int,
     mask_resolution: int,
@@ -753,6 +773,7 @@ def _stream_bounds_combo_masks(
             fetch_fn=lambda _i, item: (
                 _fetch_one_scl_tiled(
                     item,
+                    source,
                     bounds_target,
                     target_crs,
                     mask_resolution,
@@ -761,7 +782,9 @@ def _stream_bounds_combo_masks(
                     scl_tile_specs,
                 )
                 if scl_tile_specs is not None
-                else _fetch_one_scl(item, bounds_target, target_crs, mask_resolution)
+                else _fetch_one_scl(
+                    item, source, bounds_target, target_crs, mask_resolution
+                )
             ),
             max_workers=phase1_workers,
         )
@@ -773,6 +796,7 @@ def _stream_bounds_combo_masks(
             items=items_list,
             fetch_fn=lambda _i, item: _fetch_one_ocm(
                 item,
+                source,
                 ocm_bounds_target,
                 target_crs,
                 mask_resolution,
@@ -911,6 +935,7 @@ def run_bounds_pipeline(
     tile_workers: Optional[int] = None,
     adaptive_tiling: bool = True,
     show_progress: bool = False,
+    source: Optional[Source] = None,
 ) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
     """Bounds/AOI-mode pipeline. Called from mosaic() for non-grid AOIs.
 
@@ -985,6 +1010,11 @@ def run_bounds_pipeline(
         RuntimeError: If scenes were found but every scene was fully
             cloud-masked or invalid.
     """
+    if source is None:
+        from .sources import MPC
+
+        source = MPC
+
     (
         required_bands,
         additional_query,
@@ -1030,6 +1060,7 @@ def run_bounds_pipeline(
         tile_workers=tile_workers,
         adaptive_tiling=adaptive_tiling,
         min_coverage_fraction=min_coverage_fraction,
+        source=source.name,
     )
 
     aoi_4326 = reproject_aoi(aoi, input_crs, 4326) if aoi is not None else None
@@ -1082,6 +1113,7 @@ def run_bounds_pipeline(
         aoi_4326=aoi_4326,
         start_date=start_date,
         end_date=end_date,
+        source=source,
         additional_query=additional_query,
         ignore_duplicate_items=ignore_duplicate_items,
         sort_method=sort_method,
@@ -1150,6 +1182,7 @@ def run_bounds_pipeline(
         )
         if not _should_use_tiled_scl_fetch(
             items_list[0],
+            source,
             bounds_target,
             target_crs,
             mask_resolution,
@@ -1161,6 +1194,7 @@ def run_bounds_pipeline(
 
     kept_combo_masks_ocm = _stream_bounds_combo_masks(
         items_list=items_list,
+        source=source,
         bounds_target=bounds_target,
         target_crs=target_crs,
         mask_resolution=mask_resolution,
@@ -1223,6 +1257,7 @@ def run_bounds_pipeline(
     read_fn = make_bounds_tile_reader(
         items=kept_items,
         href_template=href_template,
+        source=source,
         bounds_target=bounds_target,
         target_crs=target_crs,
         user_transform=user_transform,

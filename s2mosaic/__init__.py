@@ -10,6 +10,7 @@ except ImportError:
 
 from .coordinator import mosaic
 from .helpers import SceneFetchError
+from .sources import SOURCE_AWS, SOURCE_MPC
 
 
 def set_log_level(level: Union[int, str] = _logging.INFO) -> None:
@@ -41,5 +42,7 @@ __all__ = [
     "mosaic",
     "set_log_level",
     "SceneFetchError",
+    "SOURCE_AWS",
+    "SOURCE_MPC",
     "__version__",
 ]

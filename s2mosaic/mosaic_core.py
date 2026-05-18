@@ -38,7 +38,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
-import planetary_computer
+from .sources import Source
 import rasterio as rio
 from numba import njit
 from rasterio.errors import RasterioIOError
@@ -244,18 +244,19 @@ def _write_tiled_copy(
 def _materialise_grid_band(
     item: Any,
     asset_name: str,
+    source: Source,
     s2_scene_size: int,
     rio_resampling: Resampling,
 ) -> Callable[[Path], None]:
     """Build a materialiser for a grid_id-mode band cache entry.
 
     Returns a closure that, given an output path, downloads the full asset
-    from PC and writes it as a tiled GeoTIFF on the MGRS grid at the user's
-    output resolution.
+    from the configured source and writes it as a tiled GeoTIFF on the MGRS
+    grid at the user's output resolution.
     """
 
     def write(tmp_path: Path) -> None:
-        signed = planetary_computer.sign(item.assets[asset_name].href)
+        signed = source.sign(item.assets[asset_name].href)
         with rio.open(signed) as src:
             n_bands = src.count
             scale_x = src.width / s2_scene_size
@@ -293,6 +294,7 @@ def _materialise_grid_band(
 
 def _compute_one_scene_mask(
     item: Any,
+    source: Source,
     cloud_mask: str,
     ocm_batch_size: int,
     ocm_inference_dtype: str,
@@ -304,10 +306,13 @@ def _compute_one_scene_mask(
     """Phase-1 worker: return the per-scene combo mask or None on fetch error."""
     try:
         if cloud_mask == CLOUD_MASK_SCL:
-            clear, valid = get_scl_masks(item=item, user_resolution=resolution)
+            clear, valid = get_scl_masks(
+                item=item, source=source, user_resolution=resolution
+            )
         else:
             clear, valid = get_masks(
                 item=item,
+                source=source,
                 batch_size=ocm_batch_size,
                 inference_dtype=ocm_inference_dtype,
                 max_dl_workers=max_dl_workers,
@@ -1013,6 +1018,7 @@ def write_tile_aggregation_geotiff(
 def make_grid_tile_reader(
     items: List[Any],
     href_template: List[Tuple[str, int]],
+    source: Source,
     s2_scene_size: int,
     resolution: int,
     resampling_method: str,
@@ -1037,21 +1043,24 @@ def make_grid_tile_reader(
     for item in items:
         scene_sources: List[Callable[[], str]] = []
         for asset, _ in href_template:
+            asset_key = source.asset_name(asset)
             cache_key = (
-                f"grid|{item.id}|{asset}|{s2_scene_size}|"
+                f"grid|{source.name}|{item.id}|{asset_key}|{s2_scene_size}|"
                 f"{resolution}|{resampling_method}"
             )
-            signed_url = planetary_computer.sign(item.assets[asset].href)
+            signed_url = source.sign(item.assets[asset_key].href)
 
             def source_for(
                 item: Any = item,
-                asset: str = asset,
+                asset_key: str = asset_key,
                 cache_key: str = cache_key,
                 signed_url: str = signed_url,
             ) -> str:
                 local = materialise_tiled_band(
                     cache_key,
-                    _materialise_grid_band(item, asset, s2_scene_size, rio_resampling),
+                    _materialise_grid_band(
+                        item, asset_key, source, s2_scene_size, rio_resampling
+                    ),
                 )
                 return str(local) if local is not None else signed_url
 
@@ -1123,6 +1132,7 @@ def stream_mosaic_pipeline(
     required_bands: List[str],
     coverage_mask: npt.NDArray[Any],
     no_data_tolerance: Union[float, None],
+    source: Optional[Source] = None,
     observation_target: Optional[int] = None,
     export_path: Optional[Path] = None,
     output_coverage_mask: Optional[npt.NDArray[Any]] = None,
@@ -1151,6 +1161,10 @@ def stream_mosaic_pipeline(
     stops once every coverable pixel has at least that many valid observations.
     ``first`` always stops once every coverable pixel has its first observation.
     """
+    if source is None:
+        from .sources import MPC
+
+        source = MPC
     ocm_resolution = pick_ocm_resolution(resolution)
     logger.info(f"OCM resolution: {ocm_resolution}m")
     possible_pixel_count = coverage_mask.sum()
@@ -1179,6 +1193,7 @@ def stream_mosaic_pipeline(
     def _fetch_mask(idx: int, item: Any) -> Optional[npt.NDArray[Any]]:
         return _compute_one_scene_mask(
             item=item,
+            source=source,
             cloud_mask=cloud_mask,
             ocm_batch_size=ocm_batch_size,
             ocm_inference_dtype=ocm_inference_dtype,
@@ -1293,12 +1308,14 @@ def stream_mosaic_pipeline(
     # first band will do — they all snap to the same MGRS grid.
     sample_idx = next(i for i, m in enumerate(masks) if m is not None)
     first_asset, _ = href_template[0]
-    sample_href = planetary_computer.sign(items[sample_idx].assets[first_asset].href)
+    first_asset_key = source.asset_name(first_asset)
+    sample_href = source.sign(items[sample_idx].assets[first_asset_key].href)
     last_profile = _build_output_profile(sample_href, s2_scene_size)
 
     read_fn = make_grid_tile_reader(
         items=items,
         href_template=href_template,
+        source=source,
         s2_scene_size=s2_scene_size,
         resolution=resolution,
         resampling_method=resampling_method,

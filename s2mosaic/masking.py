@@ -11,6 +11,7 @@ from multiclean import clean_array
 from omnicloudmask import predict_from_array
 
 from .data_reader import get_full_band
+from .sources import Source
 
 # Sentinel-2 SCL band class values:
 #   0  no_data       6  water
@@ -91,6 +92,7 @@ def compute_masks_from_array(
 
 def get_scl_masks(
     item: pystac.Item,
+    source: Source,
     user_resolution: int = 10,
 ) -> Tuple[npt.NDArray[Any], npt.NDArray[Any]]:
     """SCL-based clear+valid masks at the user's output resolution.
@@ -99,13 +101,14 @@ def get_scl_masks(
     accurate — relies on the L2A processor's published Scene Classification
     Layer rather than re-running cloud detection.
     """
-    href = item.assets["SCL"].href
-    arr, _ = get_full_band(href=href, res=user_resolution)
+    href = item.assets[source.asset_name("SCL")].href
+    arr, _ = get_full_band(href=href, source=source, res=user_resolution)
     return compute_masks_from_scl(arr)
 
 
 def get_masks(
     item: pystac.Item,
+    source: Source,
     batch_size: int = 6,
     inference_dtype: str = "bf16",
     max_dl_workers: int = 4,
@@ -114,9 +117,9 @@ def get_masks(
 ) -> Tuple[npt.NDArray[Any], npt.NDArray[Any]]:
     # download RG+NIR bands at OCM resolution for cloud masking
     required_bands = ["B04", "B03", "B8A"]
-    get_band_at_ocm_res = partial(get_full_band, res=ocm_resolution)
+    get_band_at_ocm_res = partial(get_full_band, source=source, res=ocm_resolution)
 
-    hrefs = [item.assets[band].href for band in required_bands]
+    hrefs = [item.assets[source.asset_name(band)].href for band in required_bands]
 
     with ThreadPoolExecutor(max_workers=max_dl_workers) as executor:
         bands_and_profiles = list(executor.map(get_band_at_ocm_res, hrefs))
