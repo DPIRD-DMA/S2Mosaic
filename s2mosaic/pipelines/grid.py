@@ -20,7 +20,13 @@ from ..helpers import (
     get_extent_from_grid_id,
     pick_ocm_resolution,
 )
-from ..output import finalize_output, resolve_export_path
+from ..output import (
+    finalize_output,
+    output_request_hash,
+    output_sidecar_metadata,
+    resolve_export_path,
+    write_output_sidecar,
+)
 from ..readers import (
     DEFAULT_TILE_WORKERS,
     _build_output_profile,
@@ -62,6 +68,21 @@ def run_grid_pipeline(
         request.duration_months,
         request.duration_days,
     )
+    filename_hash = output_request_hash(
+        request,
+        mode="grid",
+        start_date=start_date,
+        end_date=end_date,
+        source_name=source.name,
+    )
+    sidecar_metadata = output_sidecar_metadata(
+        request,
+        mode="grid",
+        filename_hash=filename_hash,
+        start_date=start_date,
+        end_date=end_date,
+        source_name=source.name,
+    )
     export_path = resolve_export_path(
         output_dir=request.output_dir,
         output_path=request.output_path,
@@ -72,6 +93,10 @@ def run_grid_pipeline(
         mosaic_method=request.mosaic_method,
         required_bands=required_bands,
         percentile=request.percentile,
+        source_name=source.name,
+        resolution=request.resolution,
+        cloud_mask=request.cloud_mask,
+        filename_hash=filename_hash,
     )
     if export_path is not None and export_path.exists() and not request.overwrite:
         return export_path
@@ -148,6 +173,7 @@ def run_grid_pipeline(
         show_progress=request.show_progress,
     )
     if export_path is not None:
+        write_output_sidecar(export_path, sidecar_metadata)
         return export_path
     assert mosaic is not None
     return finalize_output(

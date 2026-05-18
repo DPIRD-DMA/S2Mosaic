@@ -1,16 +1,136 @@
 """Output path resolution and GeoTIFF finalisation."""
 
+import hashlib
+import json
 import logging
+from dataclasses import fields, is_dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 import numpy as np
 import numpy.typing as npt
 import rasterio as rio
+from shapely.geometry.base import BaseGeometry
+from shapely.geometry import mapping
 
 logger = logging.getLogger(__name__)
 MOSAIC_PERCENTILE = "percentile"
+REQUEST_HASH_EXCLUDED_FIELDS = {
+    "output_dir",
+    "output_path",
+    "overwrite",
+    "show_progress",
+    "tile_workers",
+}
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, BaseGeometry):
+        return mapping(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Mapping):
+        return {str(k): _jsonable(v) for k, v in sorted(value.items())}
+    if isinstance(value, tuple):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, list):
+        return [_jsonable(v) for v in value]
+    if callable(value):
+        name = getattr(value, "__qualname__", repr(value))
+        module = getattr(value, "__module__", None)
+        return f"{module}.{name}" if module else name
+    return value
+
+
+def _request_metadata(request: Any) -> Dict[str, Any]:
+    if not is_dataclass(request):
+        raise TypeError("request must be a dataclass instance")
+    return {
+        field.name: _jsonable(getattr(request, field.name)) for field in fields(request)
+    }
+
+
+def output_request_hash(
+    request: Any,
+    *,
+    mode: str,
+    start_date: date,
+    end_date: date,
+    source_name: str,
+    target_crs: Optional[int] = None,
+    bounds_4326: Optional[Tuple[float, float, float, float]] = None,
+) -> str:
+    """Stable short hash for output-affecting request parameters."""
+    metadata = {
+        field.name: _jsonable(getattr(request, field.name))
+        for field in fields(request)
+        if field.name not in REQUEST_HASH_EXCLUDED_FIELDS
+    }
+    metadata.update(
+        {
+            "mode": mode,
+            "start_date": start_date.strftime("%Y-%m-%d"),
+            "end_date": end_date.strftime("%Y-%m-%d"),
+            "source_name": source_name,
+            "target_crs": target_crs,
+            "bounds_4326": bounds_4326,
+        }
+    )
+    encoded = json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()[:10]
+
+
+def _hash_value(value: Any, length: int = 10) -> str:
+    encoded = json.dumps(_jsonable(value), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()[:length]
+
+
+def _safe_token(value: Union[float, int, str]) -> str:
+    token = f"{value:.4f}" if isinstance(value, float) else str(value)
+    return token.replace("-", "m").replace(".", "p").replace(" ", "")
+
+
+def _method_token(mosaic_method: str, percentile: Optional[float]) -> str:
+    if mosaic_method == MOSAIC_PERCENTILE and percentile is not None:
+        percentile_str = f"{percentile:g}".replace(".", "p")
+        return f"{mosaic_method}-p{percentile_str}"
+    return mosaic_method
+
+
+def output_sidecar_metadata(
+    request: Any,
+    *,
+    mode: str,
+    filename_hash: str,
+    start_date: date,
+    end_date: date,
+    source_name: str,
+    target_crs: Optional[int] = None,
+    bounds_4326: Optional[Tuple[float, float, float, float]] = None,
+) -> Dict[str, Any]:
+    """JSON-serialisable metadata describing an exported GeoTIFF request."""
+    return {
+        "filename_hash": filename_hash,
+        "mode": mode,
+        "start_date": start_date.strftime("%Y-%m-%d"),
+        "end_date": end_date.strftime("%Y-%m-%d"),
+        "source_name": source_name,
+        "target_crs": target_crs,
+        "bounds_4326": _jsonable(bounds_4326),
+        "request": _request_metadata(request),
+    }
+
+
+def write_output_sidecar(export_path: Path, metadata: Dict[str, Any]) -> None:
+    """Write a JSON metadata sidecar beside an exported GeoTIFF."""
+    sidecar_path = export_path.with_suffix(".json")
+    sidecar_path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def get_output_path(
@@ -23,28 +143,41 @@ def get_output_path(
     percentile: Optional[float] = None,
     grid_id: Optional[str] = None,
     bounds: Optional[Tuple[float, float, float, float]] = None,
+    aoi: Optional[BaseGeometry] = None,
+    source_name: Optional[str] = None,
+    resolution: Optional[int] = None,
+    cloud_mask: Optional[str] = None,
+    filename_hash: Optional[str] = None,
 ) -> Path:
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
-    bands_str = "_".join(required_bands)
-    method_str = mosaic_method
-    if mosaic_method == MOSAIC_PERCENTILE and percentile is not None:
-        percentile_str = f"{percentile:g}".replace(".", "p")
-        method_str = f"{mosaic_method}_p{percentile_str}"
+    bands_str = "-".join(required_bands)
+    method_str = _method_token(mosaic_method, percentile)
 
     if grid_id is not None:
-        prefix = grid_id
+        prefix = f"grid-{grid_id}"
+    elif aoi is not None:
+        prefix = f"aoi-{_hash_value(aoi)}"
     elif bounds is not None:
-        prefix = (
-            f"bounds_{bounds[0]:.4f}_{bounds[1]:.4f}_{bounds[2]:.4f}_{bounds[3]:.4f}"
-        )
+        coords = "_".join(_safe_token(coord) for coord in bounds)
+        prefix = f"bbox-{coords}"
     else:
-        raise ValueError("Either grid_id or bounds is required")
+        raise ValueError("Either grid_id, bounds, or aoi is required")
+
+    detail_tokens = [bands_str, method_str, f"sort-{sort_method}"]
+    if resolution is not None:
+        detail_tokens.append(f"{resolution}m")
+    if cloud_mask is not None:
+        detail_tokens.append(cloud_mask)
+    if source_name is not None:
+        detail_tokens.append(source_name)
+    if filename_hash is not None:
+        detail_tokens.append(filename_hash)
+    details = "_".join(detail_tokens)
 
     return output_dir / (
         f"{prefix}_{start_date.strftime('%Y-%m-%d')}_to_"
-        f"{end_date.strftime('%Y-%m-%d')}_{sort_method}_{method_str}_"
-        f"{bands_str}.tif"
+        f"{end_date.strftime('%Y-%m-%d')}_{details}.tif"
     )
 
 
@@ -59,6 +192,11 @@ def resolve_export_path(
     percentile: Optional[float] = None,
     grid_id: Optional[str] = None,
     bounds: Optional[Tuple[float, float, float, float]] = None,
+    aoi: Optional[BaseGeometry] = None,
+    source_name: Optional[str] = None,
+    resolution: Optional[int] = None,
+    cloud_mask: Optional[str] = None,
+    filename_hash: Optional[str] = None,
 ) -> Optional[Path]:
     """Resolve explicit or auto-generated GeoTIFF export path."""
     if output_dir is not None and output_path is not None:
@@ -81,6 +219,11 @@ def resolve_export_path(
         percentile=percentile,
         grid_id=grid_id,
         bounds=bounds,
+        aoi=aoi,
+        source_name=source_name,
+        resolution=resolution,
+        cloud_mask=cloud_mask,
+        filename_hash=filename_hash,
     )
 
 

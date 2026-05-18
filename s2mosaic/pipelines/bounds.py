@@ -50,7 +50,13 @@ from ..readers import (
     DEFAULT_TILE_WORKERS,
     should_prewarm_sources,
 )
-from ..output import finalize_output, resolve_export_path
+from ..output import (
+    finalize_output,
+    output_request_hash,
+    output_sidecar_metadata,
+    resolve_export_path,
+    write_output_sidecar,
+)
 from ..sources import Source
 from ..stac import (
     ITEM_COL,
@@ -484,6 +490,26 @@ def run_bounds_pipeline(
         request.duration_days,
     )
 
+    mode = "aoi" if aoi is not None else "bounds"
+    filename_hash = output_request_hash(
+        request,
+        mode=mode,
+        start_date=start_date,
+        end_date=end_date,
+        source_name=source.name,
+        target_crs=target_crs,
+        bounds_4326=bounds_4326,
+    )
+    sidecar_metadata = output_sidecar_metadata(
+        request,
+        mode=mode,
+        filename_hash=filename_hash,
+        start_date=start_date,
+        end_date=end_date,
+        source_name=source.name,
+        target_crs=target_crs,
+        bounds_4326=bounds_4326,
+    )
     export_path = resolve_export_path(
         output_dir=request.output_dir,
         output_path=request.output_path,
@@ -494,6 +520,11 @@ def run_bounds_pipeline(
         required_bands=required_bands,
         percentile=request.percentile,
         bounds=bounds_4326,
+        aoi=aoi_4326,
+        source_name=source.name,
+        resolution=request.resolution,
+        cloud_mask=request.cloud_mask,
+        filename_hash=filename_hash,
     )
     if export_path is not None:
         if export_path.exists() and not request.overwrite:
@@ -695,7 +726,7 @@ def run_bounds_pipeline(
 
     try:
         if export_path is not None:
-            return write_tile_aggregation_geotiff(
+            result = write_tile_aggregation_geotiff(
                 export_path=export_path,
                 profile=profile,
                 required_bands=required_bands,
@@ -716,6 +747,8 @@ def run_bounds_pipeline(
                 adaptive_tiling=request.adaptive_tiling,
                 show_progress=request.show_progress,
             )
+            write_output_sidecar(export_path, sidecar_metadata)
+            return result
 
         output_array = run_tile_aggregation(
             masks=masks_in_order,

@@ -73,6 +73,12 @@ To save a GeoTIFF instead of returning the array, pass `output_dir=Path("output"
 for an auto-generated filename, or `output_path=Path("output/custom.tif")` to
 choose the exact filename. The function then returns the file path.
 
+Auto-generated `output_dir` filenames include a readable summary of the target,
+date range, bands, method, resolution, cloud-mask provider, source, and a short
+deterministic hash of the output-affecting request fields. A matching `.json`
+sidecar is written next to the GeoTIFF with the normalized request metadata, so
+similar requests do not silently collide while the filename stays scan-friendly.
+
 ## Quick start — arbitrary bounding box
 
 Pass `bounds=(minx, miny, maxx, maxy)` instead of `grid_id` to mosaic any rectangular AOI, including ones that cross MGRS tile boundaries. Each intersecting scene is streamed through a rasterio `WarpedVRT` and aggregated onto a common UTM grid.
@@ -126,7 +132,7 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 
 **Output destination**
 
-- `output_dir` (`None`): if set, writes a GeoTIFF to this directory using an auto-generated filename and returns the file path. Mutually exclusive with `output_path`.
+- `output_dir` (`None`): if set, writes a GeoTIFF to this directory using an auto-generated filename and returns the file path. The filename includes a readable request summary plus a short deterministic hash, and a matching `.json` sidecar records the normalized request metadata. Mutually exclusive with `output_path`.
 - `output_path` (`None`): if set, writes a GeoTIFF to this exact `.tif`/`.tiff` path and returns it. Mutually exclusive with `output_dir`.
 - `overwrite` (`True`): when exporting and the target path exists, controls whether to overwrite it.
 

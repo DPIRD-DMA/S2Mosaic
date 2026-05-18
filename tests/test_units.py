@@ -1,4 +1,5 @@
 import logging
+import json
 import os
 import sys
 import threading
@@ -36,7 +37,13 @@ from s2mosaic.helpers import (
     with_scene_retry,
 )
 from s2mosaic.config import MosaicRequest, validate_inputs
-from s2mosaic.output import get_output_path, resolve_export_path
+from s2mosaic.output import (
+    get_output_path,
+    output_request_hash,
+    output_sidecar_metadata,
+    resolve_export_path,
+    write_output_sidecar,
+)
 from s2mosaic.frequent_coverage import (
     get_coverage,
     get_frequent_coverage_for_bbox,
@@ -1236,7 +1243,7 @@ class TestMosaicBoundsValidation:
 
 
 class TestExportPaths:
-    def test_auto_filename_keeps_existing_mean_format(self, tmp_path):
+    def test_auto_filename_uses_v2_readable_core(self, tmp_path):
         path = get_output_path(
             output_dir=tmp_path,
             start_date=date(2023, 6, 1),
@@ -1245,10 +1252,15 @@ class TestExportPaths:
             mosaic_method="mean",
             required_bands=["B04", "B03", "B02"],
             grid_id="50HMH",
+            source_name="MPC",
+            resolution=10,
+            cloud_mask="OCM",
+            filename_hash="abc123def0",
         )
 
         assert path.name == (
-            "50HMH_2023-06-01_to_2023-06-08_oldest_mean_B04_B03_B02.tif"
+            "grid-50HMH_2023-06-01_to_2023-06-08_"
+            "B04-B03-B02_mean_sort-oldest_10m_OCM_MPC_abc123def0.tif"
         )
 
     def test_auto_percentile_filename_includes_percentile(self, tmp_path):
@@ -1273,9 +1285,133 @@ class TestExportPaths:
             bounds=(115.8301, -31.9702, 115.9103, -31.9404),
         )
 
-        assert "_percentile_p25_" in p25.name
-        assert "_percentile_p75_" in p75.name
+        assert "_percentile-p25_" in p25.name
+        assert "_percentile-p75_" in p75.name
         assert p25 != p75
+
+    def test_request_hash_changes_for_output_affecting_fields(self):
+        start = date(2023, 6, 1)
+        end = date(2023, 6, 8)
+        base = MosaicRequest(
+            grid_id="50HMH",
+            start_year=2023,
+            duration_days=7,
+            required_bands=["B04"],
+        ).normalized()
+        lower_resolution = MosaicRequest(
+            grid_id="50HMH",
+            start_year=2023,
+            duration_days=7,
+            required_bands=["B04"],
+            resolution=20,
+        ).normalized()
+        stricter_query = MosaicRequest(
+            grid_id="50HMH",
+            start_year=2023,
+            duration_days=7,
+            required_bands=["B04"],
+            additional_query={"eo:cloud_cover": {"lt": 20}},
+        ).normalized()
+
+        base_hash = output_request_hash(
+            base,
+            mode="grid",
+            start_date=start,
+            end_date=end,
+            source_name="MPC",
+        )
+
+        assert base_hash != output_request_hash(
+            lower_resolution,
+            mode="grid",
+            start_date=start,
+            end_date=end,
+            source_name="MPC",
+        )
+        assert base_hash != output_request_hash(
+            stricter_query,
+            mode="grid",
+            start_date=start,
+            end_date=end,
+            source_name="MPC",
+        )
+
+    def test_request_hash_ignores_non_output_fields(self, tmp_path):
+        start = date(2023, 6, 1)
+        end = date(2023, 6, 8)
+        base = MosaicRequest(
+            grid_id="50HMH",
+            start_year=2023,
+            duration_days=7,
+            required_bands=["B04"],
+        ).normalized()
+        runtime_only = MosaicRequest(
+            grid_id="50HMH",
+            start_year=2023,
+            duration_days=7,
+            required_bands=["B04"],
+            output_dir=tmp_path / "one",
+            output_path=tmp_path / "custom.tif",
+            overwrite=False,
+            show_progress=True,
+            tile_workers=8,
+        ).normalized()
+
+        assert output_request_hash(
+            base,
+            mode="grid",
+            start_date=start,
+            end_date=end,
+            source_name="MPC",
+        ) == output_request_hash(
+            runtime_only,
+            mode="grid",
+            start_date=start,
+            end_date=end,
+            source_name="MPC",
+        )
+
+    def test_aoi_filename_uses_geometry_hash(self, tmp_path):
+        aoi = Polygon([(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)])
+        path = get_output_path(
+            output_dir=tmp_path,
+            start_date=date(2023, 6, 1),
+            end_date=date(2023, 6, 8),
+            sort_method="valid_data",
+            mosaic_method="mean",
+            required_bands=["B04"],
+            aoi=aoi,
+            filename_hash="abc123def0",
+        )
+
+        assert path.name.startswith("aoi-")
+        assert "abc123def0" in path.name
+        assert "40.0" not in path.name
+
+    def test_output_sidecar_metadata_is_written(self, tmp_path):
+        request = MosaicRequest(
+            grid_id="50HMH",
+            start_year=2023,
+            duration_days=7,
+            required_bands=["B04"],
+        ).normalized()
+        metadata = output_sidecar_metadata(
+            request,
+            mode="grid",
+            filename_hash="abc123def0",
+            start_date=date(2023, 6, 1),
+            end_date=date(2023, 6, 8),
+            source_name="MPC",
+        )
+        export_path = tmp_path / "mosaic.tif"
+
+        write_output_sidecar(export_path, metadata)
+
+        sidecar = json.loads(export_path.with_suffix(".json").read_text())
+        assert sidecar["filename_hash"] == "abc123def0"
+        assert sidecar["mode"] == "grid"
+        assert sidecar["request"]["grid_id"] == "50HMH"
+        assert sidecar["request"]["required_bands"] == ["B04"]
 
     def test_output_path_is_used_directly(self, tmp_path):
         path = resolve_export_path(
