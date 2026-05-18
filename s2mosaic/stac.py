@@ -13,7 +13,8 @@ from pystac_client.stac_api_io import StacApiIO
 from shapely.geometry.polygon import Polygon
 from urllib3 import Retry
 
-from .helpers import SORT_NEWEST, SORT_OLDEST, SORT_VALID_DATA, pickle_cache
+from .config import SORT_NEWEST, SORT_OLDEST, SORT_VALID_DATA
+from .helpers import pickle_cache
 from .sources import Source
 
 logger = logging.getLogger(__name__)

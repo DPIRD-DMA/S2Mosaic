@@ -11,7 +11,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from s2mosaic import SOURCE_AWS, SOURCE_MPC, mosaic
-from s2mosaic.helpers import validate_inputs
+from s2mosaic.config import validate_inputs
 from s2mosaic.sources import AWS, MPC, VALID_SOURCES, Source, get_source
 
 
@@ -159,16 +159,16 @@ class TestSourceThreadsThroughBoundsPipeline:
     def test_aws_source_reaches_bounds_search(self, monkeypatch):
         captured = {}
 
-        def fake_search(*, geometry, start_date, end_date, source, **_):
+        def fake_search(*, bbox_4326, start_date, end_date, source, **_):
             captured["source"] = source
-            captured["geometry"] = geometry
+            captured["geometry"] = bbox_4326
             captured["start_date"] = start_date
             captured["end_date"] = end_date
             raise RuntimeError("stop-here")  # short-circuit further work
 
-        import s2mosaic.bounds as bounds_mod
+        import s2mosaic.pipelines.bounds as bounds_mod
 
-        monkeypatch.setattr(bounds_mod, "_search_for_items_by_geometry", fake_search)
+        monkeypatch.setattr(bounds_mod, "_search_for_items_by_bbox", fake_search)
 
         with pytest.raises(RuntimeError, match="stop-here"):
             mosaic(
@@ -184,13 +184,13 @@ class TestSourceThreadsThroughBoundsPipeline:
     def test_mpc_source_reaches_bounds_search_by_default(self, monkeypatch):
         captured = {}
 
-        def fake_search(*, geometry, start_date, end_date, source, **_):
+        def fake_search(*, bbox_4326, start_date, end_date, source, **_):
             captured["source"] = source
             raise RuntimeError("stop-here")
 
-        import s2mosaic.bounds as bounds_mod
+        import s2mosaic.pipelines.bounds as bounds_mod
 
-        monkeypatch.setattr(bounds_mod, "_search_for_items_by_geometry", fake_search)
+        monkeypatch.setattr(bounds_mod, "_search_for_items_by_bbox", fake_search)
 
         with pytest.raises(RuntimeError, match="stop-here"):
             mosaic(
@@ -213,9 +213,9 @@ class TestSourceThreadsThroughGridPipeline:
             captured.update(kwargs)
             raise RuntimeError("stop-here")
 
-        import s2mosaic.coordinator as coordinator_mod
+        import s2mosaic.pipelines.grid as grid_mod
 
-        monkeypatch.setattr(coordinator_mod, "search_for_items", fake_search)
+        monkeypatch.setattr(grid_mod, "search_for_items", fake_search)
 
         with pytest.raises(RuntimeError, match="stop-here"):
             mosaic(
@@ -233,7 +233,7 @@ class TestStacPropertyFallbacks:
     """Element 84 omits some MPC-shaped properties; the helpers fall back."""
 
     def test_relative_orbit_falls_back_from_product_uri(self):
-        from s2mosaic.stac_utils import _extract_relative_orbit
+        from s2mosaic.stac import _extract_relative_orbit
 
         # Element 84 publishes s2:product_uri with the R\\d+ token but no
         # sat:relative_orbit; recovery must produce the orbit as int.
@@ -249,7 +249,7 @@ class TestStacPropertyFallbacks:
         assert _extract_relative_orbit({}) == 0
 
     def test_mgrs_tile_falls_back_from_grid_code(self):
-        from s2mosaic.stac_utils import _extract_mgrs_tile
+        from s2mosaic.stac import _extract_mgrs_tile
 
         # MPC publishes s2:mgrs_tile directly.
         assert _extract_mgrs_tile({"s2:mgrs_tile": "50HMH"}) == "50HMH"
@@ -272,7 +272,7 @@ class TestAddItemInfoOnAwsShapedItems:
     def test_orbit_recovered_from_product_uri_when_sat_field_missing(self):
         from datetime import datetime, timezone
 
-        from s2mosaic.stac_utils import ORBIT_COL, add_item_info
+        from s2mosaic.stac import ORBIT_COL, add_item_info
 
         item = self._FakeItem(
             datetime(2023, 6, 30, tzinfo=timezone.utc),
@@ -315,7 +315,7 @@ class TestSearchPostFilter:
     def test_grid_id_post_filter_drops_adjacent_tiles_on_aws(self, monkeypatch):
         # Build a fake item collection mixing the requested tile and a
         # neighbour; search_for_items should keep only the requested one.
-        import s2mosaic.stac_utils as stac_utils_mod
+        import s2mosaic.stac as stac_mod
         from s2mosaic.sources import AWS
 
         wanted = self._make_item("S2A_50HMH_2023_0_L2A", "MGRS-50HMH")
@@ -341,13 +341,13 @@ class TestSearchPostFilter:
             classmethod(lambda cls, *_, **__: _FakeCatalog()),
         )
         # Skip the disk-cache wrapper so the search actually runs.
-        monkeypatch.setattr(stac_utils_mod, "pickle_cache", lambda _p, _k, fn: fn())
+        monkeypatch.setattr(stac_mod, "pickle_cache", lambda _p, _k, fn: fn())
 
         from datetime import date as _date
 
         from shapely.geometry import Polygon
 
-        items = stac_utils_mod.search_for_items(
+        items = stac_mod.search_for_items(
             bounds=Polygon([(0, 0), (1, 0), (1, 1), (0, 1)]),
             grid_id="50HMH",
             start_date=_date(2023, 6, 1),
@@ -405,13 +405,13 @@ class TestStacDatetimeFormat:
 
         from shapely.geometry import Polygon
 
-        import s2mosaic.stac_utils as stac_utils_mod
+        import s2mosaic.stac as stac_mod
         from s2mosaic.sources import MPC
 
         captured = self._capture_query(monkeypatch)
-        monkeypatch.setattr(stac_utils_mod, "pickle_cache", lambda _p, _k, fn: fn())
+        monkeypatch.setattr(stac_mod, "pickle_cache", lambda _p, _k, fn: fn())
 
-        stac_utils_mod.search_for_items(
+        stac_mod.search_for_items(
             bounds=Polygon([(0, 0), (1, 0), (1, 1), (0, 1)]),
             grid_id="50HMH",
             start_date=datetime(2023, 6, 1),
@@ -437,7 +437,7 @@ class TestStacDatetimeFormat:
 
         from shapely.geometry import Polygon
 
-        import s2mosaic.bounds as bounds_mod
+        import s2mosaic.pipelines.bounds as bounds_mod
         from s2mosaic.sources import MPC
 
         captured = self._capture_query(monkeypatch)

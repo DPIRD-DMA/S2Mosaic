@@ -12,7 +12,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from s2mosaic import mosaic
-from s2mosaic.helpers import validate_inputs
+from s2mosaic.config import validate_inputs
 
 
 class TestMosaicInputValidation:

@@ -2,23 +2,13 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, overload
 
-import numpy as np
 import numpy.typing as npt
 
-from .bounds import Aoi, Bbox, run_bounds_pipeline
-from .frequent_coverage import get_frequent_coverage
-from .helpers import (
-    MGRS_TILE_SIZE_M,
-    define_dates,
-    finalize_output,
-    get_extent_from_grid_id,
-    normalize_mosaic_inputs,
-    resolve_export_path,
-    validate_inputs,
-)
-from .mosaic_core import stream_mosaic_pipeline
+from .config import MosaicRequest
+from .geometry import Aoi, Bbox
+from .pipelines.bounds import run_bounds_pipeline
+from .pipelines.grid import run_grid_pipeline
 from .sources import SOURCE_MPC, get_source
-from .stac_utils import add_item_info, search_for_items, sort_items
 
 logger = logging.getLogger(__name__)
 
@@ -279,184 +269,45 @@ def mosaic(
         - If 'visual' is included in required_bands, it will be replaced with 'Red', 'Green', 'Blue' in the output.
         - The time range for scene selection is inclusive of the start date and exclusive of the end date.
     """  # noqa: E501
-    if sum(x is not None for x in (grid_id, bounds, aoi)) != 1:
-        raise ValueError("Exactly one of grid_id, bounds, or aoi must be provided")
-
-    source_obj = get_source(source)
-
-    if bounds is not None or aoi is not None:
-        return run_bounds_pipeline(
-            bounds=bounds,
-            aoi=aoi,
-            input_crs=input_crs,
-            start_year=start_year,
-            start_month=start_month,
-            start_day=start_day,
-            duration_years=duration_years,
-            duration_months=duration_months,
-            duration_days=duration_days,
-            required_bands=required_bands,
-            mosaic_method=mosaic_method,
-            percentile=percentile,
-            output_dir=output_dir,
-            output_path=output_path,
-            overwrite=overwrite,
-            output_crs=output_crs,
-            resolution=resolution,
-            resampling_method=resampling_method,
-            additional_query=additional_query,
-            no_data_tolerance=no_data_tolerance,
-            observation_target=observation_target,
-            min_coverage_fraction=min_coverage_fraction,
-            ignore_duplicate_items=ignore_duplicate_items,
-            sort_method=sort_method,
-            sort_function=sort_function,
-            cloud_mask=cloud_mask,
-            ocm_batch_size=ocm_batch_size,
-            ocm_inference_dtype=ocm_inference_dtype,
-            tile_workers=tile_workers,
-            adaptive_tiling=adaptive_tiling,
-            show_progress=show_progress,
-            source=source_obj,
-        )
-
-    (
-        required_bands,
-        additional_query,
-        sort_method,
-        mosaic_method,
-        percentile,
-    ) = normalize_mosaic_inputs(
-        required_bands=required_bands,
-        additional_query=additional_query,
-        sort_method=sort_method,
-        sort_function=sort_function,
-        mosaic_method=mosaic_method,
-        percentile=percentile,
-    )
-    logger.info(
-        f"Creating mosaic for grid {grid_id} "
-        f"from {start_year}-{start_month:02d}-{start_day:02d} "
-        f"to {duration_years} years, {duration_months} months, "
-        f"{duration_days} days later using {mosaic_method} method "
-        f"with bands {required_bands}."
-    )
-
-    validate_inputs(
-        sort_method=sort_method,
-        mosaic_method=mosaic_method,
-        no_data_tolerance=no_data_tolerance,
-        observation_target=observation_target,
-        tile_workers=tile_workers,
-        required_bands=required_bands,
+    request = MosaicRequest(
         grid_id=grid_id,
+        bounds=bounds,
+        aoi=aoi,
+        input_crs=input_crs,
+        start_year=start_year,
+        start_month=start_month,
+        start_day=start_day,
+        duration_years=duration_years,
+        duration_months=duration_months,
+        duration_days=duration_days,
+        required_bands=required_bands,
+        mosaic_method=mosaic_method,
         percentile=percentile,
-        resampling_method=resampling_method,
-        cloud_mask=cloud_mask,
-        adaptive_tiling=adaptive_tiling,
-        min_coverage_fraction=min_coverage_fraction,
-        source=source,
-    )
-    logger.info("All inputs validated successfully.")
-
-    start_date, end_date = define_dates(
-        start_year,
-        start_month,
-        start_day,
-        duration_years,
-        duration_months,
-        duration_days,
-    )
-    export_path = resolve_export_path(
         output_dir=output_dir,
         output_path=output_path,
-        grid_id=grid_id,
-        start_date=start_date,
-        end_date=end_date,
-        sort_method=sort_method,
-        mosaic_method=mosaic_method,
-        required_bands=required_bands,
-        percentile=percentile,
-    )
-    if export_path is not None:
-        if export_path.exists() and not overwrite:
-            return export_path
-
-    assert grid_id is not None  # narrowing: bounds-mode dispatch happened above
-    grid_polygon = get_extent_from_grid_id(grid_id)
-
-    logger.info(
-        f"Searching for scenes in grid {grid_id} within bounds {grid_polygon} "
-        f"from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}."
-    )
-    items = search_for_items(
-        bounds=grid_polygon.buffer(-0.05),
-        grid_id=grid_id,
-        start_date=start_date,
-        end_date=end_date,
+        overwrite=overwrite,
+        output_crs=output_crs,
+        resolution=resolution,
+        resampling_method=resampling_method,
         additional_query=additional_query,
-        source=source_obj,
-        ignore_duplicate_items=ignore_duplicate_items,
-    )
-    logger.info(f"Found {len(items)} scenes for grid {grid_id}.")
-    if len(items) == 0:
-        raise ValueError(
-            f"No scenes found for {grid_id} between {start_date.strftime('%Y-%m-%d')} "
-            f"and {end_date.strftime('%Y-%m-%d')}"
-        )
-
-    target_size = int(round(MGRS_TILE_SIZE_M / resolution))
-
-    # for scenes with only partial S2 coverage work out which pixels are covered
-    coverage_mask: npt.NDArray[np.bool_]
-    if min_coverage_fraction is None:
-        coverage_mask = np.ones((target_size, target_size), dtype=bool)
-    else:
-        coverage_mask = get_frequent_coverage(
-            scene_bounds=grid_polygon,
-            scenes=items,
-            min_coverage_fraction=min_coverage_fraction,
-            resolution=resolution,
-        )
-
-    items_with_orbits = add_item_info(items)
-
-    if not sort_function:
-        sorted_items = sort_items(items=items_with_orbits, sort_method=sort_method)
-    else:
-        sorted_items = sort_function(items=items_with_orbits)
-
-    logger.info(f"Sorted {len(sorted_items)} scenes using {sort_method} method.")
-
-    output_coverage_mask = coverage_mask if min_coverage_fraction is not None else None
-    mosaic, profile = stream_mosaic_pipeline(
-        sorted_scenes=sorted_items,
-        required_bands=required_bands,
+        source=source,
         no_data_tolerance=no_data_tolerance,
-        source=source_obj,
         observation_target=observation_target,
-        export_path=export_path,
-        output_coverage_mask=output_coverage_mask,
-        mosaic_method=mosaic_method,
+        min_coverage_fraction=min_coverage_fraction,
+        ignore_duplicate_items=ignore_duplicate_items,
+        sort_method=sort_method,
+        sort_function=sort_function,
+        cloud_mask=cloud_mask,
         ocm_batch_size=ocm_batch_size,
         ocm_inference_dtype=ocm_inference_dtype,
-        coverage_mask=coverage_mask,
-        percentile=percentile,
-        s2_scene_size=target_size,
-        resampling_method=resampling_method,
-        resolution=resolution,
-        cloud_mask=cloud_mask,
         tile_workers=tile_workers,
         adaptive_tiling=adaptive_tiling,
         show_progress=show_progress,
-    )
-    if export_path is not None:
-        return export_path
-    assert mosaic is not None
-    return finalize_output(
-        array=mosaic,
-        profile=profile,
-        required_bands=required_bands,
-        coverage_mask=output_coverage_mask,
-        export_path=export_path,
-    )
+    ).normalized()
+    request.validate()
+
+    source_obj = get_source(request.source)
+
+    if request.bounds is not None or request.aoi is not None:
+        return run_bounds_pipeline(request, source=source_obj)
+    return run_grid_pipeline(request, source=source_obj)

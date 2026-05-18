@@ -21,23 +21,22 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from s2mosaic import mosaic
-import s2mosaic.mosaic_core as mosaic_core
-from s2mosaic.bounds import (
+import s2mosaic.aggregation as aggregation_mod
+from s2mosaic.geometry import (
     _expand_bounds_for_ocm_context,
     _rasterize_aoi_mask,
     _target_grid,
-    make_bounds_tile_reader,
     pick_utm_epsg,
     reproject_bbox,
 )
+from s2mosaic.readers import make_bounds_tile_reader
 from s2mosaic.helpers import (
     SceneFetchError,
     _load_s2_grid,
-    get_output_path,
-    resolve_export_path,
-    validate_inputs,
     with_scene_retry,
 )
+from s2mosaic.config import MosaicRequest, validate_inputs
+from s2mosaic.output import get_output_path, resolve_export_path
 from s2mosaic.frequent_coverage import (
     get_coverage,
     get_frequent_coverage_for_bbox,
@@ -48,23 +47,21 @@ from s2mosaic.masking import (
     compute_masks_from_scl,
     get_valid_mask,
 )
-from s2mosaic.mosaic_core import (
+from s2mosaic.aggregation import (
     DEFAULT_TILE_WORKERS,
-    _HandleCache,
-    _read_with_retry,
     _nanquantile_axis0,
     _split_tile_size_aligned,
     _warm_nanquantile_axis0,
-    _write_tiled_copy,
     adaptive_tile_specs_for_masks,
     iter_tile_aggregation,
-    iter_ordered_fetches,
     run_tile_aggregation,
-    should_prewarm_sources,
-    stream_mosaic_pipeline,
     write_tile_aggregation_geotiff,
 )
-from s2mosaic.stac_utils import (
+from s2mosaic.cache import _read_with_retry, _write_tiled_copy, iter_ordered_fetches
+from s2mosaic.pipelines.grid import stream_mosaic_pipeline
+from s2mosaic.readers import _HandleCache, should_prewarm_sources
+from s2mosaic.sources import MPC
+from s2mosaic.stac import (
     DATETIME_COL,
     GOOD_DATA_PCT_COL,
     ITEM_COL,
@@ -72,6 +69,13 @@ from s2mosaic.stac_utils import (
     filter_latest_processing_baselines,
     sort_items,
 )
+
+
+def run_bounds_for_test(bounds_mod, **kwargs):
+    source = kwargs.pop("source", MPC)
+    request = MosaicRequest(**kwargs).normalized()
+    request.validate()
+    return bounds_mod.run_bounds_pipeline(request, source=source)
 
 
 class TestGetValidMask:
@@ -537,7 +541,7 @@ class TestRunTileAggregation:
             def map(self, fn, specs):
                 return map(fn, specs)
 
-        monkeypatch.setattr(mosaic_core, "ThreadPoolExecutor", FakeExecutor)
+        monkeypatch.setattr(aggregation_mod, "ThreadPoolExecutor", FakeExecutor)
 
         scenes = np.full((1, 1, self.H, self.W), 10, dtype=np.uint16)
         out = run_tile_aggregation(
@@ -875,21 +879,19 @@ class TestRunTileAggregation:
     def test_write_tile_aggregation_geotiff_does_not_allocate_full_output(
         self, tmp_path, monkeypatch
     ):
-        import s2mosaic.mosaic_core as mosaic_core
-
         bands_count = 2
         height = 9
         width = 11
         full_output_shape = (bands_count, height, width)
         large_allocations = []
-        original_zeros = mosaic_core.np.zeros
+        original_zeros = aggregation_mod.np.zeros
 
         def tracking_zeros(shape, *args, **kwargs):
             if tuple(shape) == full_output_shape:
                 large_allocations.append(shape)
             return original_zeros(shape, *args, **kwargs)
 
-        monkeypatch.setattr(mosaic_core.np, "zeros", tracking_zeros)
+        monkeypatch.setattr(aggregation_mod.np, "zeros", tracking_zeros)
 
         def read_fn(scene_idx, band_idx, spec):
             _, _, h, w = spec
@@ -1492,7 +1494,7 @@ class TestGridOrderedMaskStreaming:
         )
 
     def _patch_grid_pipeline_io(self, monkeypatch):
-        import s2mosaic.mosaic_core as core_mod
+        import s2mosaic.pipelines.grid as core_mod
 
         monkeypatch.setattr(
             core_mod,
@@ -1526,7 +1528,7 @@ class TestGridOrderedMaskStreaming:
         )
 
     def test_grid_first_stops_mask_stream_after_coverage_is_filled(self, monkeypatch):
-        import s2mosaic.mosaic_core as core_mod
+        import s2mosaic.pipelines.grid as core_mod
 
         self._patch_grid_pipeline_io(monkeypatch)
         calls = []
@@ -1556,7 +1558,7 @@ class TestGridOrderedMaskStreaming:
         assert profile["width"] == 4
 
     def test_grid_mean_stops_mask_stream_at_no_data_tolerance(self, monkeypatch):
-        import s2mosaic.mosaic_core as core_mod
+        import s2mosaic.pipelines.grid as core_mod
 
         self._patch_grid_pipeline_io(monkeypatch)
         calls = []
@@ -1623,7 +1625,7 @@ class TestBoundsOcmContext:
     def test_bounds_pipeline_fetches_expanded_ocm_and_aggregates_cropped_mask(
         self, monkeypatch
     ):
-        import s2mosaic.bounds as bounds_mod
+        import s2mosaic.pipelines.bounds as bounds_mod
 
         requested_bounds = (390_000.0, 6_460_000.0, 390_200.0, 6_460_100.0)
         expected_expanded = (
@@ -1691,7 +1693,8 @@ class TestBoundsOcmContext:
             bounds_mod, "run_tile_aggregation", fake_run_tile_aggregation
         )
 
-        arr, profile = bounds_mod.run_bounds_pipeline(
+        arr, profile = run_bounds_for_test(
+            bounds_mod,
             bounds=requested_bounds,
             input_crs=32750,
             output_crs=32750,
@@ -1713,7 +1716,7 @@ class TestBoundsOcmContext:
         assert aggregation_calls[0]["coverage_mask"].shape == (5, 10)
 
     def test_bounds_ocm_prefetch_is_capped_below_tile_workers(self, monkeypatch):
-        import s2mosaic.bounds as bounds_mod
+        import s2mosaic.pipelines.bounds as bounds_mod
 
         prefetch_workers = []
         aggregation_calls = []
@@ -1761,7 +1764,8 @@ class TestBoundsOcmContext:
             ),
         )
 
-        bounds_mod.run_bounds_pipeline(
+        run_bounds_for_test(
+            bounds_mod,
             bounds=(0.0, 0.0, 3000.0, 3000.0),
             input_crs=32750,
             output_crs=32750,
@@ -1794,7 +1798,7 @@ class TestBoundsOcmContext:
         assert 0 < mask.sum() < mask.size
 
     def test_aoi_scl_uses_adaptive_tile_windows_for_sparse_masks(self, monkeypatch):
-        import s2mosaic.bounds as bounds_mod
+        import s2mosaic.pipelines.bounds as bounds_mod
 
         aoi = Polygon(
             [
@@ -1860,7 +1864,8 @@ class TestBoundsOcmContext:
             ),
         )
 
-        bounds_mod.run_bounds_pipeline(
+        run_bounds_for_test(
+            bounds_mod,
             aoi=aoi,
             input_crs=32750,
             output_crs=32750,
@@ -1879,7 +1884,7 @@ class TestBoundsOcmContext:
         assert len(fetch_tile_specs[0]) == 4
 
     def test_aoi_scl_uses_full_read_when_block_gate_rejects_tiling(self, monkeypatch):
-        import s2mosaic.bounds as bounds_mod
+        import s2mosaic.pipelines.bounds as bounds_mod
 
         aoi = Polygon(
             [
@@ -1941,7 +1946,8 @@ class TestBoundsOcmContext:
             ),
         )
 
-        bounds_mod.run_bounds_pipeline(
+        run_bounds_for_test(
+            bounds_mod,
             aoi=aoi,
             input_crs=32750,
             output_crs=32750,
@@ -1957,7 +1963,7 @@ class TestBoundsOcmContext:
         assert full_fetches == ["fake-scene"]
 
     def test_aoi_pipeline_uses_polygon_search(self, monkeypatch):
-        import s2mosaic.bounds as bounds_mod
+        import s2mosaic.pipelines.bounds as bounds_mod
 
         aoi = Polygon([(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)])
         search_calls = []
@@ -2006,7 +2012,8 @@ class TestBoundsOcmContext:
             ),
         )
 
-        arr, profile = bounds_mod.run_bounds_pipeline(
+        arr, profile = run_bounds_for_test(
+            bounds_mod,
             aoi=aoi,
             input_crs=32750,
             output_crs=32750,
@@ -2025,7 +2032,7 @@ class TestBoundsOcmContext:
         assert profile["height"] == 4
 
     def test_aoi_mask_is_applied_to_aggregation_inputs(self, monkeypatch):
-        import s2mosaic.bounds as bounds_mod
+        import s2mosaic.pipelines.bounds as bounds_mod
 
         aoi = Polygon([(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)])
         aoi_mask = np.array(
@@ -2083,7 +2090,8 @@ class TestBoundsOcmContext:
             bounds_mod, "run_tile_aggregation", fake_run_tile_aggregation
         )
 
-        bounds_mod.run_bounds_pipeline(
+        run_bounds_for_test(
+            bounds_mod,
             aoi=aoi,
             input_crs=32750,
             output_crs=32750,
@@ -2101,7 +2109,7 @@ class TestBoundsOcmContext:
     def test_bounds_pipeline_passes_show_progress_to_tile_aggregation(
         self, monkeypatch
     ):
-        import s2mosaic.bounds as bounds_mod
+        import s2mosaic.pipelines.bounds as bounds_mod
 
         aggregation_calls = []
 
@@ -2144,7 +2152,8 @@ class TestBoundsOcmContext:
             ),
         )
 
-        bounds_mod.run_bounds_pipeline(
+        run_bounds_for_test(
+            bounds_mod,
             bounds=(0.0, 0.0, 40.0, 40.0),
             input_crs=32750,
             output_crs=32750,
@@ -2161,7 +2170,7 @@ class TestBoundsOcmContext:
         assert aggregation_calls[0]["tile_workers"] == 2
 
     def test_bounds_export_uses_streaming_geotiff_writer(self, monkeypatch, tmp_path):
-        import s2mosaic.bounds as bounds_mod
+        import s2mosaic.pipelines.bounds as bounds_mod
 
         writer_calls = []
         export_path = tmp_path / "bounds.tif"
@@ -2206,7 +2215,8 @@ class TestBoundsOcmContext:
 
         monkeypatch.setattr(bounds_mod, "write_tile_aggregation_geotiff", fake_writer)
 
-        result = bounds_mod.run_bounds_pipeline(
+        result = run_bounds_for_test(
+            bounds_mod,
             bounds=(0.0, 0.0, 40.0, 40.0),
             input_crs=32750,
             output_crs=32750,
@@ -2596,7 +2606,7 @@ class TestTiledBandMaterialisation:
             assert source == "lazy-source.tif"
             return FakeDataset()
 
-        monkeypatch.setattr("s2mosaic.mosaic_core.rio.open", fake_open)
+        monkeypatch.setattr("s2mosaic.readers.rio.open", fake_open)
         cache = _HandleCache([[resolver]])
 
         assert calls == {"resolver": 0, "open": 0}
@@ -2643,10 +2653,14 @@ class TestTiledBandMaterialisation:
 
         monkeypatch.setattr("planetary_computer.sign", lambda href: href)
         monkeypatch.setattr(
-            "s2mosaic.bounds._materialise_bounds_band", fake_materialiser_factory
+            "s2mosaic.readers._materialise_bounds_band",
+            fake_materialiser_factory,
         )
-        monkeypatch.setattr("s2mosaic.bounds.materialise_tiled_band", fake_materialise)
-        monkeypatch.setattr("s2mosaic.bounds.rio.open", fake_open)
+        monkeypatch.setattr(
+            "s2mosaic.readers.materialise_tiled_band",
+            fake_materialise,
+        )
+        monkeypatch.setattr("s2mosaic.readers.rio.open", fake_open)
 
         from s2mosaic.sources import MPC
 
@@ -2671,7 +2685,7 @@ class TestTiledBandMaterialisation:
         assert calls == {"materialise": 1, "materialiser_factory": 1, "open": 1}
 
     def test_read_with_retry_recovers_from_transient_rasterio_error(self, monkeypatch):
-        monkeypatch.setattr("s2mosaic.mosaic_core.time.sleep", lambda _: None)
+        monkeypatch.setattr("s2mosaic.cache.time.sleep", lambda _: None)
 
         class FlakySource:
             calls = 0
