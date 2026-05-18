@@ -90,7 +90,7 @@ array, profile = mosaic(
     duration_months=2,
     required_bands=["B04", "B03", "B02"],
     mosaic_method="percentile",
-    percentile_value=50,
+    percentile=50,
 )
 
 print(f"Shape: {array.shape}")
@@ -118,8 +118,8 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 **Output content**
 
 - `required_bands` (`["B04", "B03", "B02", "B08"]`): bands to include. Use `["visual"]` for the 3-band uint8 TCI RGB composite (mutually exclusive with other bands).
-- `mosaic_method` (`"mean"`): `"mean"`, `"first"`, `"percentile"` (with `percentile_value`), or `"median"` (shortcut for percentile 50).
-- `percentile_value` (`None`): percentile to compute when `mosaic_method="percentile"` (0–100).
+- `mosaic_method` (`"mean"`): `"mean"`, `"first"`, `"percentile"` (with `percentile`), or `"median"` (shortcut for percentile 50).
+- `percentile` (`None`): percentile to compute when `mosaic_method="percentile"` (0–100).
 - `observation_target` (`None`): minimum valid observations per pixel for `"mean"` and `"percentile"`. When set, aggregation stops reading later scenes for a tile once every coverable pixel has reached the target. This is not an output quality filter; pixels that cannot reach the target use whatever observations are available.
 - `tile_workers` (`min(4, os.cpu_count() or 1)`): number of output tiles to aggregate concurrently. Higher values can improve throughput for network-bound reads, but increase memory use and simultaneous source reads.
 - `adaptive_tiling` (`True`): split sparse output tiles based on the actual cloud-valid contribution masks. This reduces wasted reads for irregular AOIs, sparse coverage, and heavily masked scenes. Set to `False` to use fixed-size output tiles.
@@ -139,8 +139,8 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 **Scene selection**
 
 - `additional_query` (`{"eo:cloud_cover": {"lt": 100}}`): extra STAC query filters, e.g. `{"eo:cloud_cover": {"lt": 80}}`.
-- `no_data_threshold` (`0.01`): bounds-mode scene-selection early stop once the AOI no-data fraction is below this. Set to `None` to examine every scene.
-- `coverage_threshold` (`0.1`): drop scene-edge pixels covered by fewer than this fraction of overlapping scenes. Set to `None` to keep everything.
+- `no_data_tolerance` (`0.0`): scene-selection early stop once the AOI no-data fraction drops below this. The default `0.0` (or `None`) examines every scene. Ignored for `percentile` mosaic methods.
+- `min_coverage_fraction` (`0.1`): drop scene-edge pixels covered by fewer than this fraction of the maximum overlap count in the AOI. Set to `None` to keep everything.
 - `ignore_duplicate_items` (`True`): drop duplicate acquisitions, keeping the latest processing baseline.
 
 **Scene ordering**

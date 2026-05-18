@@ -43,19 +43,19 @@ class TestMosaicInputValidation:
         with pytest.raises(ValueError, match="Invalid mosaic method"):
             mosaic(grid_id="50HMH", start_year=2023, mosaic_method="invalid_method")
 
-    def test_invalid_no_data_threshold_negative(self):
-        """Test that negative no_data_threshold is rejected"""
+    def test_invalid_no_data_tolerance_negative(self):
+        """Test that negative no_data_tolerance is rejected"""
         with pytest.raises(
             ValueError, match="No data threshold must be between 0 and 1"
         ):
-            mosaic(grid_id="50HMH", start_year=2023, no_data_threshold=-0.1)
+            mosaic(grid_id="50HMH", start_year=2023, no_data_tolerance=-0.1)
 
-    def test_invalid_no_data_threshold_greater_than_one(self):
-        """Test that no_data_threshold > 1 is rejected"""
+    def test_invalid_no_data_tolerance_greater_than_one(self):
+        """Test that no_data_tolerance > 1 is rejected"""
         with pytest.raises(
             ValueError, match="No data threshold must be between 0 and 1"
         ):
-            mosaic(grid_id="50HMH", start_year=2023, no_data_threshold=1.5)
+            mosaic(grid_id="50HMH", start_year=2023, no_data_tolerance=1.5)
 
     def test_invalid_band(self):
         """Test that invalid band names are rejected"""
@@ -75,45 +75,41 @@ class TestMosaicInputValidation:
         """Test that percentile parameter requires percentile method"""
         with pytest.raises(
             ValueError,
-            match="percentile_value is only valid for percentile mosaic method",
+            match="percentile is only valid for percentile mosaic method",
         ):
             mosaic(
                 grid_id="50HMH",
                 start_year=2023,
                 mosaic_method="mean",
-                percentile_value=50,
+                percentile=50,
             )
 
     def test_percentile_method_without_percentile(self):
         """Test that percentile method requires percentile parameter"""
         with pytest.raises(
             ValueError,
-            match="percentile_value must be provided for percentile mosaic method",
+            match="percentile must be provided for percentile mosaic method",
         ):
             mosaic(grid_id="50HMH", start_year=2023, mosaic_method="percentile")
 
     def test_invalid_percentile_negative(self):
         """Test that negative percentile values are rejected"""
-        with pytest.raises(
-            ValueError, match="percentile_value must be between 0 and 100"
-        ):
+        with pytest.raises(ValueError, match="percentile must be between 0 and 100"):
             mosaic(
                 grid_id="50HMH",
                 start_year=2023,
                 mosaic_method="percentile",
-                percentile_value=-10,
+                percentile=-10,
             )
 
     def test_invalid_percentile_greater_than_100(self):
         """Test that percentile values > 100 are rejected"""
-        with pytest.raises(
-            ValueError, match="percentile_value must be between 0 and 100"
-        ):
+        with pytest.raises(ValueError, match="percentile must be between 0 and 100"):
             mosaic(
                 grid_id="50HMH",
                 start_year=2023,
                 mosaic_method="percentile",
-                percentile_value=150,
+                percentile=150,
             )
 
 
@@ -184,11 +180,11 @@ class TestMosaicValidInputs:
     DEFAULT_KWARGS = {
         "sort_method": "valid_data",
         "mosaic_method": "mean",
-        "no_data_threshold": 0.01,
+        "no_data_tolerance": 0.01,
         "observation_target": None,
         "required_bands": ["B04", "B03", "B02", "B08"],
         "grid_id": "50HMH",
-        "percentile_value": None,
+        "percentile": None,
     }
 
     def _validate(self, **overrides):
@@ -206,11 +202,11 @@ class TestMosaicValidInputs:
         self._validate(mosaic_method=method)
 
     def test_valid_percentile_method(self):
-        self._validate(mosaic_method="percentile", percentile_value=50.0)
+        self._validate(mosaic_method="percentile", percentile=50.0)
 
     @pytest.mark.parametrize("threshold", [0.0, 0.01, 0.5, 1.0, None])
-    def test_valid_no_data_thresholds(self, threshold):
-        self._validate(no_data_threshold=threshold)
+    def test_valid_no_data_tolerances(self, threshold):
+        self._validate(no_data_tolerance=threshold)
 
     @pytest.mark.parametrize("target", [1, 2, 10, None])
     def test_valid_observation_targets(self, target):
@@ -425,7 +421,7 @@ class TestMosaicEndToEnd:
             start_day=1,
             duration_days=7,
             mosaic_method="percentile",
-            percentile_value=percentile,
+            percentile=percentile,
             required_bands=["B04"],
         )
 
@@ -633,7 +629,7 @@ class TestMosaicBoundsEndToEnd:
             **self.DATE_KW,
             required_bands=["B04", "B03", "B02"],
             mosaic_method="percentile",
-            percentile_value=50,
+            percentile=50,
             resolution=resolution,
             additional_query=self.QUERY,
         )
@@ -648,7 +644,7 @@ class TestMosaicBoundsEndToEnd:
     def test_mosaic_methods(self, method):
         kw = {}
         if method == "percentile":
-            kw["percentile_value"] = 25
+            kw["percentile"] = 25
         arr, profile = mosaic(
             bounds=self.AOI_SMALL,
             **self.DATE_KW,
@@ -672,8 +668,8 @@ class TestMosaicBoundsEndToEnd:
             additional_query=self.QUERY,
         )
 
-        p25, profile25 = mosaic(**kw, percentile_value=25)
-        p75, profile75 = mosaic(**kw, percentile_value=75)
+        p25, profile25 = mosaic(**kw, percentile=25)
+        p75, profile75 = mosaic(**kw, percentile=75)
 
         self._assert_basic_geotiff(
             p25, profile25, expect_bands=1, expect_dtype=np.uint16
@@ -716,7 +712,7 @@ class TestMosaicBoundsEndToEnd:
             **self.DATE_KW,
             required_bands=bands,
             mosaic_method="percentile",
-            percentile_value=50,
+            percentile=50,
             additional_query=self.QUERY,
         )
         self._assert_basic_geotiff(arr, profile, expect_bands=len(bands))
@@ -731,7 +727,7 @@ class TestMosaicBoundsEndToEnd:
             **self.DATE_KW,
             required_bands=["B04", "B03", "B02"],
             mosaic_method="percentile",
-            percentile_value=50,
+            percentile=50,
             resolution=30,  # forces actual resampling
             resampling_method=method,
             additional_query=self.QUERY,
@@ -760,28 +756,28 @@ class TestMosaicBoundsEndToEnd:
             **self.DATE_KW,
             required_bands=["B04", "B03", "B02"],
             mosaic_method="percentile",
-            percentile_value=50,
+            percentile=50,
             additional_query=self.QUERY,
         )
         self._assert_basic_geotiff(arr, profile, expect_bands=3)
 
     # --- Coverage threshold extremes ---
     @pytest.mark.parametrize("threshold", [None, 0.0, 0.1, 0.5, 0.9])
-    def test_coverage_threshold(self, threshold):
+    def test_min_coverage_fraction(self, threshold):
         arr, profile = mosaic(
             bounds=self.AOI_SMALL,
             **self.DATE_KW,
             required_bands=["B04"],
             mosaic_method="percentile",
-            percentile_value=50,
-            coverage_threshold=threshold,
+            percentile=50,
+            min_coverage_fraction=threshold,
             additional_query=self.QUERY,
         )
         self._assert_basic_geotiff(arr, profile, expect_bands=1)
 
-    # --- no_data_threshold (early termination) ---
+    # --- no_data_tolerance (early termination) ---
     @pytest.mark.parametrize("threshold", [None, 0.001, 0.5])
-    def test_no_data_threshold(self, threshold):
+    def test_no_data_tolerance(self, threshold):
         # Longer duration so we exercise multi-scene early termination
         date_kw = {**self.DATE_KW, "duration_days": 30}
         arr, profile = mosaic(
@@ -789,7 +785,7 @@ class TestMosaicBoundsEndToEnd:
             **date_kw,
             required_bands=["B04"],
             mosaic_method="first",  # early termination is meaningful
-            no_data_threshold=threshold,
+            no_data_tolerance=threshold,
             additional_query=self.QUERY,
         )
         self._assert_basic_geotiff(arr, profile, expect_bands=1)
@@ -802,7 +798,7 @@ class TestMosaicBoundsEndToEnd:
             **self.DATE_KW,
             required_bands=["B04"],
             mosaic_method="percentile",
-            percentile_value=50,
+            percentile=50,
             output_crs=3857,
             resolution=10,
             additional_query=self.QUERY,
@@ -820,7 +816,7 @@ class TestMosaicBoundsEndToEnd:
             **self.DATE_KW,
             required_bands=["B04"],
             mosaic_method="percentile",
-            percentile_value=50,
+            percentile=50,
             additional_query=self.QUERY,
         )
         self._assert_basic_geotiff(arr, profile, expect_bands=1)
@@ -834,7 +830,7 @@ class TestMosaicBoundsEndToEnd:
             output_dir=tmp_path,
             required_bands=["B04"],
             mosaic_method="percentile",
-            percentile_value=50,
+            percentile=50,
             additional_query=self.QUERY,
         )
         assert isinstance(result, Path) and result.exists()
@@ -849,7 +845,7 @@ class TestMosaicBoundsEndToEnd:
             output_dir=tmp_path,
             required_bands=["B04"],
             mosaic_method="percentile",
-            percentile_value=50,
+            percentile=50,
             additional_query=self.QUERY,
         )
         path1 = mosaic(**kw)
@@ -878,7 +874,7 @@ class TestMosaicBoundsEndToEnd:
             **self.DATE_KW,
             required_bands=["B04", "B03", "B02"],
             mosaic_method="percentile",
-            percentile_value=50,
+            percentile=50,
             additional_query=self.QUERY,
             cloud_mask=cloud_mask,
         )
@@ -915,7 +911,7 @@ class TestMosaicBoundsEndToEnd:
             **self.DATE_KW,
             required_bands=["B04"],
             mosaic_method="percentile",
-            percentile_value=50,
+            percentile=50,
             additional_query=self.QUERY,
             cloud_mask="SCL",
         )
@@ -930,7 +926,7 @@ class TestMosaicBoundsEndToEnd:
             **self.DATE_KW,
             required_bands=["B04"],
             mosaic_method="percentile",
-            percentile_value=50,
+            percentile=50,
             additional_query=self.QUERY,
             cloud_mask="SCL",
         )
@@ -948,7 +944,7 @@ class TestMosaicBoundsEndToEnd:
             **self.DATE_KW,
             required_bands=["B04"],
             mosaic_method="percentile",
-            percentile_value=50,
+            percentile=50,
             additional_query=self.QUERY,
         )
         arr1, _ = mosaic(**kw)

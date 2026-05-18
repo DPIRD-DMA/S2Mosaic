@@ -37,7 +37,7 @@ def mosaic(
     duration_days: int = ...,
     required_bands: Optional[List[str]] = ...,
     mosaic_method: str = ...,
-    percentile_value: Optional[float] = ...,
+    percentile: Optional[float] = ...,
     output_dir: None = None,
     output_path: None = None,
     overwrite: bool = ...,
@@ -45,9 +45,9 @@ def mosaic(
     resolution: int = ...,
     resampling_method: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
-    no_data_threshold: Union[float, None] = ...,
+    no_data_tolerance: Union[float, None] = ...,
     observation_target: Optional[int] = ...,
-    coverage_threshold: Optional[float] = ...,
+    min_coverage_fraction: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
     sort_method: str = ...,
     sort_function: Optional[Callable[..., Any]] = ...,
@@ -75,7 +75,7 @@ def mosaic(
     duration_days: int = ...,
     required_bands: Optional[List[str]] = ...,
     mosaic_method: str = ...,
-    percentile_value: Optional[float] = ...,
+    percentile: Optional[float] = ...,
     output_dir: Union[Path, str],
     output_path: None = None,
     overwrite: bool = ...,
@@ -83,9 +83,9 @@ def mosaic(
     resolution: int = ...,
     resampling_method: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
-    no_data_threshold: Union[float, None] = ...,
+    no_data_tolerance: Union[float, None] = ...,
     observation_target: Optional[int] = ...,
-    coverage_threshold: Optional[float] = ...,
+    min_coverage_fraction: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
     sort_method: str = ...,
     sort_function: Optional[Callable[..., Any]] = ...,
@@ -113,7 +113,7 @@ def mosaic(
     duration_days: int = ...,
     required_bands: Optional[List[str]] = ...,
     mosaic_method: str = ...,
-    percentile_value: Optional[float] = ...,
+    percentile: Optional[float] = ...,
     output_dir: None = None,
     output_path: Union[Path, str],
     overwrite: bool = ...,
@@ -121,9 +121,9 @@ def mosaic(
     resolution: int = ...,
     resampling_method: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
-    no_data_threshold: Union[float, None] = ...,
+    no_data_tolerance: Union[float, None] = ...,
     observation_target: Optional[int] = ...,
-    coverage_threshold: Optional[float] = ...,
+    min_coverage_fraction: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
     sort_method: str = ...,
     sort_function: Optional[Callable[..., Any]] = ...,
@@ -150,7 +150,7 @@ def mosaic(
     duration_days: int = 0,
     required_bands: Optional[List[str]] = None,
     mosaic_method: str = "mean",
-    percentile_value: Optional[float] = None,
+    percentile: Optional[float] = None,
     output_dir: Optional[Union[Path, str]] = None,
     output_path: Optional[Union[Path, str]] = None,
     overwrite: bool = True,
@@ -158,9 +158,9 @@ def mosaic(
     resolution: int = 10,
     resampling_method: str = "nearest",
     additional_query: Optional[Dict[str, Any]] = None,
-    no_data_threshold: Union[float, None] = 0.01,
+    no_data_tolerance: Union[float, None] = 0.0,
     observation_target: Optional[int] = None,
-    coverage_threshold: Optional[float] = 0.1,
+    min_coverage_fraction: Optional[float] = 0.1,
     ignore_duplicate_items: bool = True,
     sort_method: str = "valid_data",
     sort_function: Optional[Callable[..., Any]] = None,
@@ -203,7 +203,7 @@ def mosaic(
         required_bands (List[str], optional): List of required spectral bands.
             Defaults to ["B04", "B03", "B02", "B08"] (Red, Green, Blue, NIR).
         mosaic_method (str, optional): Method to create the mosaic. Options are "mean", "first", "median" or "percentile". Defaults to "mean".
-        percentile_value (Optional[float], optional): Percentile to calculate
+        percentile (Optional[float], optional): Percentile to calculate
             when using ``mosaic_method="percentile"``. Must be between 0 and 100.
         output_dir (Optional[Union[Path, str]], optional): Directory to save
             the output GeoTIFF using an auto-generated filename. Mutually
@@ -222,13 +222,17 @@ def mosaic(
             "bilinear", "cubic", "average", and "lanczos". Defaults to "nearest".
         additional_query (Dict[str, Any], optional): Additional query parameters for STAC API.
             Defaults to {"eo:cloud_cover": {"lt": 100}}.
-        no_data_threshold (float, optional): Threshold for no data values. Defaults to 0.01.
+        no_data_tolerance (float, optional): Early-stop fraction for scene
+            ingestion. Stops reading further scenes once the AOI's no-data
+            fraction drops below this value. Set to ``0.0`` (default) or
+            ``None`` to examine every available scene. Ignored for
+            ``percentile`` mosaic methods. Defaults to 0.0.
         observation_target (int, optional): Per-tile early-stop target
             for ``mean`` and ``percentile``. When set, aggregation stops
             reading later scenes for a tile once every coverable pixel has at
             least this many valid observations. This is not an output quality
             filter. Defaults to None.
-        coverage_threshold (float, optional): Drop pixels covered by fewer
+        min_coverage_fraction (float, optional): Drop pixels covered by fewer
             than this fraction of overlapping scenes. Set to None to disable.
             Defaults to 0.1.
         ignore_duplicate_items (bool, optional): Whether to remove duplicate scenes based on their IDs. Defaults to True.
@@ -282,7 +286,7 @@ def mosaic(
             duration_days=duration_days,
             required_bands=required_bands,
             mosaic_method=mosaic_method,
-            percentile_value=percentile_value,
+            percentile=percentile,
             output_dir=output_dir,
             output_path=output_path,
             overwrite=overwrite,
@@ -290,9 +294,9 @@ def mosaic(
             resolution=resolution,
             resampling_method=resampling_method,
             additional_query=additional_query,
-            no_data_threshold=no_data_threshold,
+            no_data_tolerance=no_data_tolerance,
             observation_target=observation_target,
-            coverage_threshold=coverage_threshold,
+            min_coverage_fraction=min_coverage_fraction,
             ignore_duplicate_items=ignore_duplicate_items,
             sort_method=sort_method,
             sort_function=sort_function,
@@ -309,14 +313,14 @@ def mosaic(
         additional_query,
         sort_method,
         mosaic_method,
-        percentile_value,
+        percentile,
     ) = normalize_mosaic_inputs(
         required_bands=required_bands,
         additional_query=additional_query,
         sort_method=sort_method,
         sort_function=sort_function,
         mosaic_method=mosaic_method,
-        percentile_value=percentile_value,
+        percentile=percentile,
     )
     logger.info(
         f"Creating mosaic for grid {grid_id} "
@@ -329,16 +333,16 @@ def mosaic(
     validate_inputs(
         sort_method=sort_method,
         mosaic_method=mosaic_method,
-        no_data_threshold=no_data_threshold,
+        no_data_tolerance=no_data_tolerance,
         observation_target=observation_target,
         tile_workers=tile_workers,
         required_bands=required_bands,
         grid_id=grid_id,
-        percentile_value=percentile_value,
+        percentile=percentile,
         resampling_method=resampling_method,
         cloud_mask=cloud_mask,
         adaptive_tiling=adaptive_tiling,
-        coverage_threshold=coverage_threshold,
+        min_coverage_fraction=min_coverage_fraction,
     )
     logger.info("All inputs validated successfully.")
 
@@ -359,7 +363,7 @@ def mosaic(
         sort_method=sort_method,
         mosaic_method=mosaic_method,
         required_bands=required_bands,
-        percentile_value=percentile_value,
+        percentile=percentile,
     )
     if export_path is not None:
         if export_path.exists() and not overwrite:
@@ -391,13 +395,13 @@ def mosaic(
 
     # for scenes with only partial S2 coverage work out which pixels are covered
     coverage_mask: npt.NDArray[np.bool_]
-    if coverage_threshold is None:
+    if min_coverage_fraction is None:
         coverage_mask = np.ones((target_size, target_size), dtype=bool)
     else:
         coverage_mask = get_frequent_coverage(
             scene_bounds=grid_polygon,
             scenes=items,
-            coverage_threshold=coverage_threshold,
+            min_coverage_fraction=min_coverage_fraction,
             resolution=resolution,
         )
 
@@ -410,11 +414,11 @@ def mosaic(
 
     logger.info(f"Sorted {len(sorted_items)} scenes using {sort_method} method.")
 
-    output_coverage_mask = coverage_mask if coverage_threshold is not None else None
+    output_coverage_mask = coverage_mask if min_coverage_fraction is not None else None
     mosaic, profile = stream_mosaic_pipeline(
         sorted_scenes=sorted_items,
         required_bands=required_bands,
-        no_data_threshold=no_data_threshold,
+        no_data_tolerance=no_data_tolerance,
         observation_target=observation_target,
         export_path=export_path,
         output_coverage_mask=output_coverage_mask,
@@ -422,7 +426,7 @@ def mosaic(
         ocm_batch_size=ocm_batch_size,
         ocm_inference_dtype=ocm_inference_dtype,
         coverage_mask=coverage_mask,
-        percentile_value=percentile_value,
+        percentile=percentile,
         s2_scene_size=target_size,
         resampling_method=resampling_method,
         resolution=resolution,

@@ -272,9 +272,9 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_threshold=None,
+            no_data_tolerance=None,
             mosaic_method="mean",
-            percentile_value=None,
+            percentile=None,
             tile_size=3,
             tile_workers=1,
         )
@@ -303,9 +303,9 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_threshold=None,
+            no_data_tolerance=None,
             mosaic_method="first",
-            percentile_value=None,
+            percentile=None,
             tile_size=4,
             tile_workers=1,
         )
@@ -332,9 +332,9 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_threshold=None,
+            no_data_tolerance=None,
             mosaic_method="percentile",
-            percentile_value=50.0,
+            percentile=50.0,
             tile_size=2,
             tile_workers=1,
         )
@@ -407,9 +407,9 @@ class TestRunTileAggregation:
                 height=4,
                 width=4,
                 coverage_mask=np.ones((4, 4), dtype=bool),
-                no_data_threshold=None,
+                no_data_tolerance=None,
                 mosaic_method="mean",
-                percentile_value=None,
+                percentile=None,
                 tile_size=2,
                 tile_workers=1,
                 adaptive_tiling=False,
@@ -441,9 +441,9 @@ class TestRunTileAggregation:
                 height=4,
                 width=4,
                 coverage_mask=np.ones((4, 4), dtype=bool),
-                no_data_threshold=None,
+                no_data_tolerance=None,
                 mosaic_method="mean",
-                percentile_value=None,
+                percentile=None,
                 tile_size=2,
                 tile_workers=1,
                 adaptive_tiling=True,
@@ -470,9 +470,9 @@ class TestRunTileAggregation:
             height=4,
             width=4,
             coverage_mask=np.ones((4, 4), dtype=bool),
-            no_data_threshold=None,
+            no_data_tolerance=None,
             mosaic_method="mean",
-            percentile_value=None,
+            percentile=None,
             tile_size=2,
             tile_workers=1,
             adaptive_tiling=True,
@@ -508,9 +508,9 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_threshold=None,
+            no_data_tolerance=None,
             mosaic_method="percentile",
-            percentile_value=50.0,
+            percentile=50.0,
             tile_size=3,
             tile_workers=None,
         )
@@ -547,9 +547,9 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_threshold=None,
+            no_data_tolerance=None,
             mosaic_method=mosaic_method,
-            percentile_value=50.0 if mosaic_method == "percentile" else None,
+            percentile=50.0 if mosaic_method == "percentile" else None,
             tile_size=2,
             tile_workers=None,
         )
@@ -584,9 +584,9 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_threshold=None,
+            no_data_tolerance=None,
             mosaic_method="percentile",
-            percentile_value=50.0,
+            percentile=50.0,
             tile_size=3,
             tile_workers=1,
         )
@@ -594,7 +594,7 @@ class TestRunTileAggregation:
         assert set(thread_names) == {"MainThread"}
         np.testing.assert_allclose(out, 20.0)
 
-    def test_percentile_ignores_no_data_threshold_inside_tile(self):
+    def test_percentile_ignores_no_data_tolerance_inside_tile(self):
         reads = []
         scenes = np.stack(
             [
@@ -619,9 +619,9 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_threshold=0.01,
+            no_data_tolerance=0.01,
             mosaic_method="percentile",
-            percentile_value=50.0,
+            percentile=50.0,
             tile_size=10,
             tile_workers=1,
         )
@@ -644,9 +644,9 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.zeros((self.H, self.W), dtype=bool),
-            no_data_threshold=None,
+            no_data_tolerance=None,
             mosaic_method="mean",
-            percentile_value=None,
+            percentile=None,
             tile_size=3,
             tile_workers=1,
         )
@@ -654,7 +654,7 @@ class TestRunTileAggregation:
         assert reads["n"] == 0
         np.testing.assert_array_equal(out, np.zeros((1, self.H, self.W)))
 
-    def test_mean_ignores_no_data_threshold_inside_tile(self):
+    def test_mean_ignores_no_data_tolerance_inside_tile(self):
         reads = []
 
         def read_fn(scene_idx, band_idx, spec):
@@ -672,9 +672,9 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_threshold=0.01,
+            no_data_tolerance=0.01,
             mosaic_method="mean",
-            percentile_value=None,
+            percentile=None,
             tile_size=10,
             tile_workers=1,
         )
@@ -701,9 +701,9 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_threshold=None,
+            no_data_tolerance=None,
             mosaic_method="mean",
-            percentile_value=None,
+            percentile=None,
             tile_size=10,
             tile_workers=1,
             observation_target=2,
@@ -733,9 +733,9 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_threshold=None,
+            no_data_tolerance=None,
             mosaic_method="percentile",
-            percentile_value=50.0,
+            percentile=50.0,
             tile_size=10,
             tile_workers=1,
             observation_target=2,
@@ -746,7 +746,7 @@ class TestRunTileAggregation:
         assert reads == [0, 1, 2]
         np.testing.assert_array_equal(out, expected)
 
-    def test_first_ignores_no_data_threshold_until_coverage_filled(self):
+    def test_first_ignores_no_data_tolerance_until_coverage_filled(self):
         reads = []
         first_mask = np.ones((self.H, self.W), dtype=bool)
         first_mask[0, 0] = False
@@ -768,9 +768,9 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_threshold=0.1,
+            no_data_tolerance=0.1,
             mosaic_method="first",
-            percentile_value=None,
+            percentile=None,
             tile_size=10,
             tile_workers=1,
         )
@@ -813,9 +813,9 @@ class TestRunTileAggregation:
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
             output_coverage_mask=None,
-            no_data_threshold=None,
+            no_data_tolerance=None,
             mosaic_method="mean",
-            percentile_value=None,
+            percentile=None,
             tile_size=3,
             tile_workers=1,
             out_dtype=np.dtype(np.uint16),
@@ -859,9 +859,9 @@ class TestRunTileAggregation:
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
             output_coverage_mask=coverage,
-            no_data_threshold=None,
+            no_data_tolerance=None,
             mosaic_method="mean",
-            percentile_value=None,
+            percentile=None,
             tile_size=3,
             tile_workers=1,
             out_dtype=np.dtype(np.uint16),
@@ -914,9 +914,9 @@ class TestRunTileAggregation:
             width=width,
             coverage_mask=np.ones((height, width), dtype=bool),
             output_coverage_mask=None,
-            no_data_threshold=None,
+            no_data_tolerance=None,
             mosaic_method="mean",
-            percentile_value=None,
+            percentile=None,
             tile_size=4,
             tile_workers=1,
             out_dtype=np.dtype(np.uint16),
@@ -1092,10 +1092,10 @@ class TestMosaicBoundsValidation:
         validate_inputs(
             sort_method="valid_data",
             mosaic_method="mean",
-            no_data_threshold=0.01,
+            no_data_tolerance=0.01,
             required_bands=["B04"],
             grid_id=None,
-            percentile_value=None,
+            percentile=None,
             bounds=utm_bounds,
             input_crs=32750,
             resolution=10,
@@ -1126,10 +1126,10 @@ class TestMosaicBoundsValidation:
             validate_inputs(
                 sort_method="valid_data",
                 mosaic_method="mean",
-                no_data_threshold=0.01,
+                no_data_tolerance=0.01,
                 required_bands=["B04"],
                 grid_id=None,
-                percentile_value=None,
+                percentile=None,
                 bounds=(110.0, -35.0, 115.0, -30.0),
                 input_crs=4326,
                 resolution=10,
@@ -1142,10 +1142,10 @@ class TestMosaicBoundsValidation:
             validate_inputs(
                 sort_method="valid_data",
                 mosaic_method="mean",
-                no_data_threshold=0.01,
+                no_data_tolerance=0.01,
                 required_bands=["B04"],
                 grid_id=None,
-                percentile_value=None,
+                percentile=None,
                 bounds=(300_000.0, 6_300_000.0, 600_000.0, 6_600_000.0),
                 input_crs=32750,
                 resolution=10,
@@ -1158,10 +1158,10 @@ class TestMosaicBoundsValidation:
         validate_inputs(
             sort_method="valid_data",
             mosaic_method="mean",
-            no_data_threshold=0.01,
+            no_data_tolerance=0.01,
             required_bands=["B04"],
             grid_id=None,
-            percentile_value=None,
+            percentile=None,
             bounds=(119.0, -29.0, 119.8, -28.2),
             input_crs=4326,
             resolution=10,
@@ -1179,10 +1179,10 @@ class TestMosaicBoundsValidation:
         validate_inputs(
             sort_method="valid_data",
             mosaic_method="mean",
-            no_data_threshold=0.01,
+            no_data_tolerance=0.01,
             required_bands=["B04"],
             grid_id=None,
-            percentile_value=None,
+            percentile=None,
             aoi=aoi,
             input_crs=4326,
             resolution=10,
@@ -1201,10 +1201,10 @@ class TestMosaicBoundsValidation:
             validate_inputs(
                 sort_method="valid_data",
                 mosaic_method="mean",
-                no_data_threshold=0.01,
+                no_data_tolerance=0.01,
                 required_bands=["B04"],
                 grid_id=None,
-                percentile_value=None,
+                percentile=None,
                 aoi=MultiPolygon([poly]),
                 input_crs=4326,
                 resolution=10,
@@ -1223,10 +1223,10 @@ class TestMosaicBoundsValidation:
             validate_inputs(
                 sort_method="valid_data",
                 mosaic_method="mean",
-                no_data_threshold=0.01,
+                no_data_tolerance=0.01,
                 required_bands=["B04"],
                 grid_id=None,
-                percentile_value=None,
+                percentile=None,
                 aoi=bowtie,
                 input_crs=4326,
                 resolution=10,
@@ -1256,7 +1256,7 @@ class TestExportPaths:
             end_date=date(2023, 8, 1),
             sort_method="valid_data",
             mosaic_method="percentile",
-            percentile_value=25,
+            percentile=25,
             required_bands=["B04"],
             bounds=(115.8301, -31.9702, 115.9103, -31.9404),
         )
@@ -1266,7 +1266,7 @@ class TestExportPaths:
             end_date=date(2023, 8, 1),
             sort_method="valid_data",
             mosaic_method="percentile",
-            percentile_value=75,
+            percentile=75,
             required_bands=["B04"],
             bounds=(115.8301, -31.9702, 115.9103, -31.9404),
         )
@@ -1543,7 +1543,7 @@ class TestGridOrderedMaskStreaming:
             sorted_scenes=self._sorted_scenes(4),
             required_bands=["B04"],
             coverage_mask=np.ones((4, 4), dtype=bool),
-            no_data_threshold=None,
+            no_data_tolerance=None,
             mosaic_method="first",
             cloud_mask="SCL",
             s2_scene_size=4,
@@ -1555,7 +1555,7 @@ class TestGridOrderedMaskStreaming:
         assert out is not None
         assert profile["width"] == 4
 
-    def test_grid_mean_stops_mask_stream_at_no_data_threshold(self, monkeypatch):
+    def test_grid_mean_stops_mask_stream_at_no_data_tolerance(self, monkeypatch):
         import s2mosaic.mosaic_core as core_mod
 
         self._patch_grid_pipeline_io(monkeypatch)
@@ -1577,7 +1577,7 @@ class TestGridOrderedMaskStreaming:
             sorted_scenes=self._sorted_scenes(4),
             required_bands=["B04"],
             coverage_mask=np.ones((4, 4), dtype=bool),
-            no_data_threshold=0.01,
+            no_data_tolerance=0.01,
             mosaic_method="mean",
             cloud_mask="SCL",
             s2_scene_size=4,
@@ -1770,8 +1770,8 @@ class TestBoundsOcmContext:
             duration_days=1,
             required_bands=["B04"],
             cloud_mask="OCM",
-            no_data_threshold=None,
-            coverage_threshold=None,
+            no_data_tolerance=None,
+            min_coverage_fraction=None,
             tile_workers=8,
         )
 
@@ -1867,8 +1867,8 @@ class TestBoundsOcmContext:
             duration_days=1,
             required_bands=["B04"],
             cloud_mask="SCL",
-            coverage_threshold=None,
-            no_data_threshold=None,
+            min_coverage_fraction=None,
+            no_data_tolerance=None,
             adaptive_tiling=True,
         )
 
@@ -1946,8 +1946,8 @@ class TestBoundsOcmContext:
             duration_days=1,
             required_bands=["B04"],
             cloud_mask="SCL",
-            coverage_threshold=None,
-            no_data_threshold=None,
+            min_coverage_fraction=None,
+            no_data_tolerance=None,
             adaptive_tiling=True,
         )
 
@@ -2011,7 +2011,7 @@ class TestBoundsOcmContext:
             duration_days=1,
             required_bands=["B04"],
             cloud_mask="SCL",
-            coverage_threshold=None,
+            min_coverage_fraction=None,
         )
 
         assert len(search_calls) == 1
@@ -2088,7 +2088,7 @@ class TestBoundsOcmContext:
             duration_days=1,
             required_bands=["B04"],
             cloud_mask="SCL",
-            coverage_threshold=None,
+            min_coverage_fraction=None,
         )
 
         assert len(aggregation_calls) == 1
@@ -2149,7 +2149,7 @@ class TestBoundsOcmContext:
             duration_days=1,
             required_bands=["B04"],
             cloud_mask="SCL",
-            coverage_threshold=None,
+            min_coverage_fraction=None,
             tile_workers=2,
             show_progress=True,
         )
@@ -2211,7 +2211,7 @@ class TestBoundsOcmContext:
             duration_days=1,
             required_bands=["B04"],
             cloud_mask="SCL",
-            coverage_threshold=None,
+            min_coverage_fraction=None,
             output_path=export_path,
         )
 
@@ -2300,7 +2300,7 @@ class TestFrequentCoverageForBbox:
             width=100,
             height=100,
             resolution=100,
-            coverage_threshold=0.5,
+            min_coverage_fraction=0.5,
         )
         # All pixels covered by 10/11 ≈ 91% of scenes → pass 50% threshold
         assert out.mean() > 0.8
@@ -2559,7 +2559,7 @@ class TestTiledBandMaterialisation:
     """Local tiled GeoTIFF materialisation helpers."""
 
     @pytest.mark.parametrize(
-        "mosaic_method,no_data_threshold,observation_target,expected",
+        "mosaic_method,no_data_tolerance,observation_target,expected",
         [
             ("mean", None, None, True),
             ("percentile", None, None, True),
@@ -2571,10 +2571,10 @@ class TestTiledBandMaterialisation:
         ],
     )
     def test_source_prewarm_policy(
-        self, mosaic_method, no_data_threshold, observation_target, expected
+        self, mosaic_method, no_data_tolerance, observation_target, expected
     ):
         assert (
-            should_prewarm_sources(mosaic_method, no_data_threshold, observation_target)
+            should_prewarm_sources(mosaic_method, no_data_tolerance, observation_target)
             is expected
         )
 
@@ -2758,12 +2758,12 @@ class TestMosaicSharedParamsValidation:
         with pytest.raises(ValueError, match="Invalid band"):
             mosaic(start_year=2023, bounds=self.BOUNDS, required_bands=["FOO"])
 
-    def test_bounds_mode_accepts_no_data_threshold(self):
+    def test_bounds_mode_accepts_no_data_tolerance(self):
         # Should fail later (no network) but not on validation
         with pytest.raises(
             ValueError, match="No data threshold must be between 0 and 1"
         ):
-            mosaic(start_year=2023, bounds=self.BOUNDS, no_data_threshold=2.0)
+            mosaic(start_year=2023, bounds=self.BOUNDS, no_data_tolerance=2.0)
 
     def test_bounds_mode_accepts_resolution(self):
         with pytest.raises(ValueError, match="resolution"):

@@ -717,7 +717,7 @@ def _stream_bounds_combo_masks(
     coverage_mask: npt.NDArray[Any],
     cloud_mask: str,
     mosaic_method: str,
-    no_data_threshold: Optional[float],
+    no_data_tolerance: Optional[float],
     possible_pixel_count: int,
     tile_workers: Optional[int],
     ocm_bounds_target: Bbox,
@@ -839,7 +839,7 @@ def _stream_bounds_combo_masks(
         good_pixel_tracker |= combo
 
         if (
-            no_data_threshold is not None
+            no_data_tolerance is not None
             and mosaic_method != MOSAIC_PERCENTILE
             and possible_pixel_count > 0
         ):
@@ -849,15 +849,15 @@ def _stream_bounds_combo_masks(
             logger.info(
                 f"Scene {scene_idx + 1}/{n_time} kept; no-data {no_data_pct:.1f}%"
             )
-            if no_data_sum < possible_pixel_count * no_data_threshold:
+            if no_data_sum < possible_pixel_count * no_data_tolerance:
                 logger.info(
-                    f"no_data_threshold met after {len(kept_combo_masks)} kept "
+                    f"no_data_tolerance met after {len(kept_combo_masks)} kept "
                     f"scenes ({scene_idx + 1}/{n_time} examined)"
                 )
                 break
 
     if mask_progress is not None:
-        # `first` mode and no_data_threshold can break the loop early. Snap
+        # `first` mode and no_data_tolerance can break the loop early. Snap
         # the bar to total so tqdm renders it as complete rather than red.
         remaining = mask_progress.total - mask_progress.n
         if remaining > 0:
@@ -891,7 +891,7 @@ def run_bounds_pipeline(
     duration_days: int = 0,
     required_bands: Optional[List[str]] = None,
     mosaic_method: str = "mean",
-    percentile_value: Optional[float] = None,
+    percentile: Optional[float] = None,
     output_dir: Optional[Union[Path, str]] = None,
     output_path: Optional[Union[Path, str]] = None,
     overwrite: bool = True,
@@ -899,9 +899,9 @@ def run_bounds_pipeline(
     resolution: int = 10,
     resampling_method: str = "nearest",
     additional_query: Optional[Dict[str, Any]] = None,
-    no_data_threshold: Optional[float] = 0.01,
+    no_data_tolerance: Optional[float] = 0.0,
     observation_target: Optional[int] = None,
-    coverage_threshold: Optional[float] = 0.1,
+    min_coverage_fraction: Optional[float] = 0.1,
     ignore_duplicate_items: bool = True,
     sort_method: str = "valid_data",
     sort_function: Optional[Callable[..., Any]] = None,
@@ -937,7 +937,7 @@ def run_bounds_pipeline(
             end exclusive).
         required_bands: Spectral bands to fetch (e.g. ``["B04", "B03", "B02"]``)
             or ``["visual"]`` for the 3-band uint8 TCI asset.
-        mosaic_method, percentile_value: As for :func:`s2mosaic.mosaic`.
+        mosaic_method, percentile: As for :func:`s2mosaic.mosaic`.
         output_dir: Directory to write the GeoTIFF using an auto-generated
             filename. Mutually exclusive with ``output_path``. If neither is
             provided, returns the array + profile instead.
@@ -953,14 +953,15 @@ def run_bounds_pipeline(
             / ``resolution`` during the WarpedVRT read.
         additional_query: Extra STAC query filters
             (e.g. ``{"eo:cloud_cover": {"lt": 50}}``).
-        no_data_threshold: Stop early once the uncovered fraction within the
-            coverage mask drops below this during scene selection.
+        no_data_tolerance: Stop early once the uncovered fraction within the
+            coverage mask drops below this during scene selection. Set to
+            ``0.0`` (default) or ``None`` to examine every scene.
         observation_target: Optional per-tile early-stop target for
             ``mean`` and ``percentile``. When set, user-band aggregation stops
             reading later scenes for a tile once every coverable pixel has at
             least this many valid observations. This is not an output quality
             filter.
-        coverage_threshold: Drop pixels covered by fewer than this fraction
+        min_coverage_fraction: Drop pixels covered by fewer than this fraction
             of overlapping scenes (scene-edge pixels). ``None`` disables.
         ignore_duplicate_items: Keep only the latest processing baseline per scene.
         sort_method, sort_function: As for :func:`s2mosaic.mosaic`.
@@ -989,14 +990,14 @@ def run_bounds_pipeline(
         additional_query,
         sort_method,
         mosaic_method,
-        percentile_value,
+        percentile,
     ) = normalize_mosaic_inputs(
         required_bands=required_bands,
         additional_query=additional_query,
         sort_method=sort_method,
         sort_function=sort_function,
         mosaic_method=mosaic_method,
-        percentile_value=percentile_value,
+        percentile=percentile,
     )
     if bounds is None and aoi is not None:
         bounds = aoi.bounds
@@ -1015,11 +1016,11 @@ def run_bounds_pipeline(
     validate_inputs(
         sort_method=sort_method,
         mosaic_method=mosaic_method,
-        no_data_threshold=no_data_threshold,
+        no_data_tolerance=no_data_tolerance,
         observation_target=observation_target,
         required_bands=required_bands,
         grid_id=None,
-        percentile_value=percentile_value,
+        percentile=percentile,
         resampling_method=resampling_method,
         bounds=bounds,
         aoi=aoi,
@@ -1028,7 +1029,7 @@ def run_bounds_pipeline(
         cloud_mask=cloud_mask,
         tile_workers=tile_workers,
         adaptive_tiling=adaptive_tiling,
-        coverage_threshold=coverage_threshold,
+        min_coverage_fraction=min_coverage_fraction,
     )
 
     aoi_4326 = reproject_aoi(aoi, input_crs, 4326) if aoi is not None else None
@@ -1068,7 +1069,7 @@ def run_bounds_pipeline(
         sort_method=sort_method,
         mosaic_method=mosaic_method,
         required_bands=required_bands,
-        percentile_value=percentile_value,
+        percentile=percentile,
         bounds=bounds_4326,
     )
     if export_path is not None:
@@ -1113,7 +1114,7 @@ def run_bounds_pipeline(
     n_time = len(items_list)
 
     # Coverage mask at mask resolution — used for skip decisions.
-    if coverage_threshold is not None:
+    if min_coverage_fraction is not None:
         coverage_mask_ocm = get_frequent_coverage_for_bbox(
             scenes=items,
             bounds_target=bounds_target,
@@ -1121,7 +1122,7 @@ def run_bounds_pipeline(
             width=mask_w,
             height=mask_h,
             resolution=mask_resolution,
-            coverage_threshold=coverage_threshold,
+            min_coverage_fraction=min_coverage_fraction,
         )
     else:
         coverage_mask_ocm = np.ones((mask_h, mask_w), dtype=bool)
@@ -1168,7 +1169,7 @@ def run_bounds_pipeline(
         coverage_mask=coverage_mask_ocm,
         cloud_mask=cloud_mask,
         mosaic_method=mosaic_method,
-        no_data_threshold=no_data_threshold,
+        no_data_tolerance=no_data_tolerance,
         possible_pixel_count=possible_pixel_count,
         tile_workers=tile_workers,
         ocm_bounds_target=ocm_bounds_target,
@@ -1230,7 +1231,7 @@ def run_bounds_pipeline(
         resolution=resolution,
         resampling_method=resampling_method,
         prewarm=should_prewarm_sources(
-            mosaic_method, no_data_threshold, observation_target
+            mosaic_method, no_data_tolerance, observation_target
         ),
     )
 
@@ -1259,7 +1260,7 @@ def run_bounds_pipeline(
         "crs": CRS.from_epsg(target_crs),
         "transform": user_transform,
     }
-    output_coverage_mask = coverage_mask if coverage_threshold is not None else None
+    output_coverage_mask = coverage_mask if min_coverage_fraction is not None else None
 
     if export_path is not None:
         return write_tile_aggregation_geotiff(
@@ -1273,10 +1274,10 @@ def run_bounds_pipeline(
             width=w,
             coverage_mask=coverage_mask,
             output_coverage_mask=output_coverage_mask,
-            no_data_threshold=no_data_threshold,
+            no_data_tolerance=no_data_tolerance,
             observation_target=observation_target,
             mosaic_method=mosaic_method,
-            percentile_value=percentile_value,
+            percentile=percentile,
             tile_size=tile_size,
             tile_workers=tile_workers,
             out_dtype=np.dtype(np.uint8) if is_visual else np.dtype(np.uint16),
@@ -1291,10 +1292,10 @@ def run_bounds_pipeline(
         height=h,
         width=w,
         coverage_mask=coverage_mask,
-        no_data_threshold=no_data_threshold,
+        no_data_tolerance=no_data_tolerance,
         observation_target=observation_target,
         mosaic_method=mosaic_method,
-        percentile_value=percentile_value,
+        percentile=percentile,
         tile_size=tile_size,
         tile_workers=tile_workers,
         out_dtype=np.dtype(np.uint8) if is_visual else np.dtype(np.uint16),

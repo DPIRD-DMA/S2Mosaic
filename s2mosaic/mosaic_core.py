@@ -544,7 +544,7 @@ def tile_percentile(
     masks: List[Optional[npt.NDArray[Any]]],
     read_fn: ReaderFn,
     bands_count: int,
-    percentile_value: float,
+    percentile: float,
     coverage_mask: npt.NDArray[Any],
     observation_target: Optional[int],
     out_dtype: "np.dtype[Any]",
@@ -580,7 +580,7 @@ def tile_percentile(
             stack[k, j].fill(np.nan)
             np.copyto(stack[k, j], data, where=mask_tile, casting="unsafe")
 
-    res = _nanquantile_axis0(stack, percentile_value / 100.0)
+    res = _nanquantile_axis0(stack, percentile / 100.0)
     res = np.nan_to_num(res, nan=0.0)
     return spec, _finalise_tile(res, out_dtype)
 
@@ -635,7 +635,7 @@ def tile_first(
     read_fn: ReaderFn,
     bands_count: int,
     coverage_mask: npt.NDArray[Any],
-    no_data_threshold: Optional[float],
+    no_data_tolerance: Optional[float],
     out_dtype: "np.dtype[Any]",
 ) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
     r, c, h, w = spec
@@ -760,9 +760,9 @@ def run_tile_aggregation(
     height: int,
     width: int,
     coverage_mask: npt.NDArray[Any],
-    no_data_threshold: Optional[float],
+    no_data_tolerance: Optional[float],
     mosaic_method: str,
-    percentile_value: Optional[float],
+    percentile: Optional[float],
     tile_size: int,
     tile_workers: Optional[int],
     out_dtype: "np.dtype[Any]" = DEFAULT_OUTPUT_DTYPE,
@@ -786,9 +786,9 @@ def run_tile_aggregation(
         height=height,
         width=width,
         coverage_mask=coverage_mask,
-        no_data_threshold=no_data_threshold,
+        no_data_tolerance=no_data_tolerance,
         mosaic_method=mosaic_method,
-        percentile_value=percentile_value,
+        percentile=percentile,
         tile_size=tile_size,
         tile_workers=tile_workers,
         out_dtype=out_dtype,
@@ -809,9 +809,9 @@ def iter_tile_aggregation(
     height: int,
     width: int,
     coverage_mask: npt.NDArray[Any],
-    no_data_threshold: Optional[float],
+    no_data_tolerance: Optional[float],
     mosaic_method: str,
-    percentile_value: Optional[float],
+    percentile: Optional[float],
     tile_size: int,
     tile_workers: Optional[int],
     out_dtype: "np.dtype[Any]" = DEFAULT_OUTPUT_DTYPE,
@@ -863,7 +863,7 @@ def iter_tile_aggregation(
 
     if mosaic_method == MOSAIC_PERCENTILE:
         _warm_nanquantile_axis0()
-        pv = percentile_value if percentile_value is not None else 50.0
+        pv = percentile if percentile is not None else 50.0
         n_workers = tile_workers if tile_workers is not None else DEFAULT_TILE_WORKERS
 
         def worker_fn(
@@ -908,7 +908,7 @@ def iter_tile_aggregation(
                 effective_read_fn,
                 bands_count,
                 coverage_mask,
-                no_data_threshold,
+                no_data_tolerance,
                 out_dtype,
             )
 
@@ -952,9 +952,9 @@ def write_tile_aggregation_geotiff(
     width: int,
     coverage_mask: npt.NDArray[Any],
     output_coverage_mask: Optional[npt.NDArray[Any]],
-    no_data_threshold: Optional[float],
+    no_data_tolerance: Optional[float],
     mosaic_method: str,
-    percentile_value: Optional[float],
+    percentile: Optional[float],
     tile_size: int,
     tile_workers: Optional[int],
     out_dtype: "np.dtype[Any]" = DEFAULT_OUTPUT_DTYPE,
@@ -985,9 +985,9 @@ def write_tile_aggregation_geotiff(
             height=height,
             width=width,
             coverage_mask=coverage_mask,
-            no_data_threshold=no_data_threshold,
+            no_data_tolerance=no_data_tolerance,
             mosaic_method=mosaic_method,
-            percentile_value=percentile_value,
+            percentile=percentile,
             tile_size=tile_size,
             tile_workers=tile_workers,
             out_dtype=out_dtype,
@@ -1100,20 +1100,20 @@ def _prewarm_sources(sources: List[List[Callable[..., Any]]]) -> None:
 
 def should_prewarm_sources(
     mosaic_method: str,
-    no_data_threshold: Optional[float],
+    no_data_tolerance: Optional[float],
     observation_target: Optional[int] = None,
 ) -> bool:
     """Whether to pre-materialise tile sources before aggregation.
 
     Prewarming improves throughput when most scene/band sources will be read
     anyway. Keep sources lazy when the aggregation is likely to skip many reads:
-    ``first`` mode can stop as pixels fill, ``no_data_threshold`` can stop
+    ``first`` mode can stop as pixels fill, ``no_data_tolerance`` can stop
     scene walks before all scenes are touched, and ``observation_target``
     can cap per-tile observations.
     """
     return (
         mosaic_method != MOSAIC_FIRST
-        and no_data_threshold is None
+        and no_data_tolerance is None
         and observation_target is None
     )
 
@@ -1122,7 +1122,7 @@ def stream_mosaic_pipeline(
     sorted_scenes: pd.DataFrame,
     required_bands: List[str],
     coverage_mask: npt.NDArray[Any],
-    no_data_threshold: Union[float, None],
+    no_data_tolerance: Union[float, None],
     observation_target: Optional[int] = None,
     export_path: Optional[Path] = None,
     output_coverage_mask: Optional[npt.NDArray[Any]] = None,
@@ -1130,7 +1130,7 @@ def stream_mosaic_pipeline(
     ocm_batch_size: int = 6,
     ocm_inference_dtype: str = "bf16",
     max_dl_workers: int = 4,
-    percentile_value: Optional[float] = 50.0,
+    percentile: Optional[float] = 50.0,
     s2_scene_size: int = 10980,
     resampling_method: str = "nearest",
     resolution: int = 10,
@@ -1256,15 +1256,15 @@ def stream_mosaic_pipeline(
             good_pixel_tracker |= combo
 
             if (
-                no_data_threshold is not None
+                no_data_tolerance is not None
                 and mosaic_method != MOSAIC_PERCENTILE
                 and possible_pixel_count > 0
             ):
                 completed = int((coverage_mask & good_pixel_tracker).sum())
                 no_data_sum = int(possible_pixel_count) - completed
-                if no_data_sum < possible_pixel_count * no_data_threshold:
+                if no_data_sum < possible_pixel_count * no_data_tolerance:
                     logger.info(
-                        "no_data_threshold met after %d kept scenes (%d/%d examined)",
+                        "no_data_tolerance met after %d kept scenes (%d/%d examined)",
                         sum(1 for m in masks if m is not None),
                         scene_idx + 1,
                         n_scenes,
@@ -1303,7 +1303,7 @@ def stream_mosaic_pipeline(
         resolution=resolution,
         resampling_method=resampling_method,
         prewarm=should_prewarm_sources(
-            mosaic_method, no_data_threshold, observation_target
+            mosaic_method, no_data_tolerance, observation_target
         ),
     )
 
@@ -1328,10 +1328,10 @@ def stream_mosaic_pipeline(
             width=s2_scene_size,
             coverage_mask=coverage_mask,
             output_coverage_mask=output_coverage_mask,
-            no_data_threshold=no_data_threshold,
+            no_data_tolerance=no_data_tolerance,
             observation_target=observation_target,
             mosaic_method=mosaic_method,
-            percentile_value=percentile_value,
+            percentile=percentile,
             tile_size=tile_size,
             tile_workers=tile_workers,
             out_dtype=out_dtype,
@@ -1347,10 +1347,10 @@ def stream_mosaic_pipeline(
         height=s2_scene_size,
         width=s2_scene_size,
         coverage_mask=coverage_mask,
-        no_data_threshold=no_data_threshold,
+        no_data_tolerance=no_data_tolerance,
         observation_target=observation_target,
         mosaic_method=mosaic_method,
-        percentile_value=percentile_value,
+        percentile=percentile,
         tile_size=tile_size,
         tile_workers=tile_workers,
         out_dtype=out_dtype,

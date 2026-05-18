@@ -287,12 +287,12 @@ def normalize_mosaic_inputs(
     sort_method: str,
     sort_function: Optional[Any],
     mosaic_method: str,
-    percentile_value: Optional[float],
+    percentile: Optional[float],
 ) -> Tuple[List[str], Dict[str, Any], str, str, Optional[float]]:
     """Apply defaults and rewrites shared by the grid and bounds pipelines.
 
     Returns the normalized (required_bands, additional_query, sort_method,
-    mosaic_method, percentile_value) — callers should overwrite their locals
+    mosaic_method, percentile) — callers should overwrite their locals
     with the returned values. ``"median"`` is rewritten to
     ``("percentile", 50.0)``; ``sort_function`` overrides ``sort_method``.
     """
@@ -303,18 +303,18 @@ def normalize_mosaic_inputs(
     if sort_function is not None:
         sort_method = SORT_CUSTOM
     if mosaic_method == "median":
-        if percentile_value is not None:
+        if percentile is not None:
             raise ValueError(
-                "percentile_value should not be set when using mosaic_method='median'."
+                "percentile should not be set when using mosaic_method='median'."
             )
         mosaic_method = MOSAIC_PERCENTILE
-        percentile_value = 50.0
+        percentile = 50.0
     return (
         required_bands,
         additional_query,
         sort_method,
         mosaic_method,
-        percentile_value,
+        percentile,
     )
 
 
@@ -326,10 +326,10 @@ BOUNDS_LARGE_AREA_WARNING_M2 = 200_000 * 200_000
 def validate_inputs(
     sort_method: str,
     mosaic_method: str,
-    no_data_threshold: Union[float, None],
+    no_data_tolerance: Union[float, None],
     required_bands: List[str],
     grid_id: Optional[str],
-    percentile_value: Optional[float],
+    percentile: Optional[float],
     resampling_method: str = "nearest",
     bounds: Optional[Tuple[float, float, float, float]] = None,
     input_crs: Optional[int] = None,
@@ -339,7 +339,7 @@ def validate_inputs(
     tile_workers: Optional[int] = None,
     adaptive_tiling: bool = True,
     aoi: Optional[Polygon] = None,
-    coverage_threshold: Optional[float] = None,
+    min_coverage_fraction: Optional[float] = None,
 ) -> None:
     if grid_id is not None and (not grid_id.isalnum() or not grid_id.isupper()):
         raise ValueError(
@@ -432,17 +432,17 @@ def validate_inputs(
             f"Invalid resampling method: {resampling_method}. "
             f"Must be one of {VALID_RESAMPLING_METHODS}"
         )
-    if no_data_threshold is not None:
-        if not (0.0 <= no_data_threshold <= 1.0):
+    if no_data_tolerance is not None:
+        if not (0.0 <= no_data_tolerance <= 1.0):
             raise ValueError(
                 f"""No data threshold must be between 0 and 1 or None,
-                got {no_data_threshold}"""
+                got {no_data_tolerance}"""
             )
-    if coverage_threshold is not None:
-        if not (0.0 <= coverage_threshold <= 1.0):
+    if min_coverage_fraction is not None:
+        if not (0.0 <= min_coverage_fraction <= 1.0):
             raise ValueError(
-                f"coverage_threshold must be between 0 and 1 or None, "
-                f"got {coverage_threshold}"
+                f"min_coverage_fraction must be between 0 and 1 or None, "
+                f"got {min_coverage_fraction}"
             )
     if observation_target is not None:
         if (
@@ -490,21 +490,17 @@ def validate_inputs(
         raise ValueError("Cannot use visual band with other bands, must be used alone")
 
     if mosaic_method != MOSAIC_PERCENTILE:
-        if percentile_value is not None:
+        if percentile is not None:
             raise ValueError(
-                f"""percentile_value is only valid for percentile mosaic method, 
-                got {percentile_value}"""
+                f"""percentile is only valid for percentile mosaic method, 
+                got {percentile}"""
             )
 
     if mosaic_method == MOSAIC_PERCENTILE:
-        if percentile_value is None:
-            raise ValueError(
-                "percentile_value must be provided for percentile mosaic method"
-            )
-        if percentile_value < 0 or percentile_value > 100:
-            raise ValueError(
-                f"percentile_value must be between 0 and 100, got {percentile_value}"
-            )
+        if percentile is None:
+            raise ValueError("percentile must be provided for percentile mosaic method")
+        if percentile < 0 or percentile > 100:
+            raise ValueError(f"percentile must be between 0 and 100, got {percentile}")
 
 
 def get_output_path(
@@ -514,7 +510,7 @@ def get_output_path(
     sort_method: str,
     mosaic_method: str,
     required_bands: List[str],
-    percentile_value: Optional[float] = None,
+    percentile: Optional[float] = None,
     grid_id: Optional[str] = None,
     bounds: Optional[Tuple[float, float, float, float]] = None,
 ) -> Path:
@@ -522,8 +518,8 @@ def get_output_path(
     output_dir.mkdir(exist_ok=True, parents=True)
     bands_str = "_".join(required_bands)
     method_str = mosaic_method
-    if mosaic_method == MOSAIC_PERCENTILE and percentile_value is not None:
-        percentile_str = f"{percentile_value:g}".replace(".", "p")
+    if mosaic_method == MOSAIC_PERCENTILE and percentile is not None:
+        percentile_str = f"{percentile:g}".replace(".", "p")
         method_str = f"{mosaic_method}_p{percentile_str}"
 
     if grid_id is not None:
@@ -550,7 +546,7 @@ def resolve_export_path(
     sort_method: str,
     mosaic_method: str,
     required_bands: List[str],
-    percentile_value: Optional[float] = None,
+    percentile: Optional[float] = None,
     grid_id: Optional[str] = None,
     bounds: Optional[Tuple[float, float, float, float]] = None,
 ) -> Optional[Path]:
@@ -572,7 +568,7 @@ def resolve_export_path(
         sort_method=sort_method,
         mosaic_method=mosaic_method,
         required_bands=required_bands,
-        percentile_value=percentile_value,
+        percentile=percentile,
         grid_id=grid_id,
         bounds=bounds,
     )
