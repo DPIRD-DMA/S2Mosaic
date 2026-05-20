@@ -116,10 +116,10 @@ def get_masks(
     ocm_resolution: int = 20,
 ) -> Tuple[npt.NDArray[Any], npt.NDArray[Any]]:
     # download RG+NIR bands at OCM resolution for cloud masking
-    required_bands = ["B04", "B03", "B8A"]
+    bands = ["B04", "B03", "B8A"]
     get_band_at_ocm_res = partial(get_full_band, source=source, res=ocm_resolution)
 
-    hrefs = [item.assets[source.asset_name(band)].href for band in required_bands]
+    hrefs = [item.assets[source.asset_name(band)].href for band in bands]
 
     with ThreadPoolExecutor(max_workers=max_dl_workers) as executor:
         bands_and_profiles = list(executor.map(get_band_at_ocm_res, hrefs))

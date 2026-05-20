@@ -137,9 +137,9 @@ def get_output_path(
     output_dir: Union[Path, str],
     start_date: date,
     end_date: date,
-    sort_method: str,
+    scene_order: str,
     mosaic_method: str,
-    required_bands: List[str],
+    bands: List[str],
     percentile: Optional[float] = None,
     grid_id: Optional[str] = None,
     bounds: Optional[Tuple[float, float, float, float]] = None,
@@ -151,7 +151,7 @@ def get_output_path(
 ) -> Path:
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
-    bands_str = "-".join(required_bands)
+    bands_str = "-".join(bands)
     method_str = _method_token(mosaic_method, percentile)
 
     if grid_id is not None:
@@ -164,7 +164,7 @@ def get_output_path(
     else:
         raise ValueError("Either grid_id, bounds, or aoi is required")
 
-    detail_tokens = [bands_str, method_str, f"sort-{sort_method}"]
+    detail_tokens = [bands_str, method_str, f"scene-{scene_order}"]
     if resolution is not None:
         detail_tokens.append(f"{resolution}m")
     if cloud_mask is not None:
@@ -186,9 +186,9 @@ def resolve_export_path(
     output_path: Optional[Union[Path, str]],
     start_date: date,
     end_date: date,
-    sort_method: str,
+    scene_order: str,
     mosaic_method: str,
-    required_bands: List[str],
+    bands: List[str],
     percentile: Optional[float] = None,
     grid_id: Optional[str] = None,
     bounds: Optional[Tuple[float, float, float, float]] = None,
@@ -213,9 +213,9 @@ def resolve_export_path(
         output_dir=output_dir,
         start_date=start_date,
         end_date=end_date,
-        sort_method=sort_method,
+        scene_order=scene_order,
         mosaic_method=mosaic_method,
-        required_bands=required_bands,
+        bands=bands,
         percentile=percentile,
         grid_id=grid_id,
         bounds=bounds,
@@ -231,7 +231,7 @@ def _export_tif(
     array: npt.NDArray[Any],
     profile: Dict[str, Any],
     export_path: Path,
-    required_bands: List[str],
+    bands: List[str],
     nodata_value: Union[int, None] = 0,
 ) -> None:
     profile.update(
@@ -239,22 +239,22 @@ def _export_tif(
     )
     with rio.open(export_path, "w", **profile) as dst:
         dst.write(array)
-        dst.descriptions = required_bands
+        dst.descriptions = bands
 
 
 def output_band_metadata(
-    required_bands: List[str],
+    bands: List[str],
 ) -> Tuple[List[str], Optional[int]]:
     """Return output band descriptions and nodata value for requested bands."""
-    if "visual" in required_bands:
+    if "visual" in bands:
         return ["Red", "Green", "Blue"], None
-    return list(required_bands), 0
+    return list(bands), 0
 
 
 def finalize_output(
     array: npt.NDArray[Any],
     profile: Dict[str, Any],
-    required_bands: List[str],
+    bands: List[str],
     coverage_mask: Optional[npt.NDArray[Any]],
     export_path: Optional[Path],
 ) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
@@ -262,7 +262,7 @@ def finalize_output(
     if coverage_mask is not None:
         np.multiply(array, coverage_mask[None, :, :], out=array, casting="unsafe")
 
-    band_descriptions, nodata_value = output_band_metadata(required_bands)
+    band_descriptions, nodata_value = output_band_metadata(bands)
 
     if export_path is not None:
         logger.info(f"Writing GeoTIFF to {export_path}")
@@ -270,7 +270,7 @@ def finalize_output(
             array=array,
             profile=profile,
             export_path=export_path,
-            required_bands=band_descriptions,
+            bands=band_descriptions,
             nodata_value=nodata_value,
         )
         return export_path

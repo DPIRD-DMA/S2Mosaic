@@ -3,7 +3,7 @@
 import logging
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -300,29 +300,33 @@ def _prewarm_sources(sources: List[List[Callable[..., Any]]]) -> None:
         return
     n_workers = min(len(flat), (os.cpu_count() or 8) * 2)
     with ThreadPoolExecutor(max_workers=n_workers) as ex:
-        # Drain any exceptions — the lazy path would raise on first read
-        # anyway, but raising eagerly gives a clearer stack.
-        for _ in ex.map(lambda fn: fn(), flat):
-            pass
+        # Drain exceptions; the lazy path still raises on first read, but this
+        # makes prewarm-only failures visible under DEBUG.
+        futures = [ex.submit(resolver) for resolver in flat]
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as exc:
+                logger.debug("Prewarm failure: %r", exc)
 
 
 def should_prewarm_sources(
     mosaic_method: str,
-    no_data_tolerance: Optional[float],
-    observation_target: Optional[int] = None,
+    early_stop_missing_fraction: Optional[float],
+    min_observations: Optional[int] = None,
 ) -> bool:
     """Whether to pre-materialise tile sources before aggregation.
 
     Prewarming improves throughput when most scene/band sources will be read
     anyway. Keep sources lazy when the aggregation is likely to skip many reads:
-    ``first`` mode can stop as pixels fill, ``no_data_tolerance`` can stop
-    scene walks before all scenes are touched, and ``observation_target``
+    ``first`` mode can stop as pixels fill, ``early_stop_missing_fraction`` can stop
+    scene walks before all scenes are touched, and ``min_observations``
     can cap per-tile observations.
     """
     return (
         mosaic_method != MOSAIC_FIRST
-        and (no_data_tolerance is None or no_data_tolerance == 0.0)
-        and observation_target is None
+        and (early_stop_missing_fraction is None or early_stop_missing_fraction == 0.0)
+        and min_observations is None
     )
 
 

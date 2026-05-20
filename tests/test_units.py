@@ -283,7 +283,7 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_tolerance=None,
+            early_stop_missing_fraction=None,
             mosaic_method="mean",
             percentile=None,
             tile_size=3,
@@ -314,7 +314,7 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_tolerance=None,
+            early_stop_missing_fraction=None,
             mosaic_method="first",
             percentile=None,
             tile_size=4,
@@ -343,7 +343,7 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_tolerance=None,
+            early_stop_missing_fraction=None,
             mosaic_method="percentile",
             percentile=50.0,
             tile_size=2,
@@ -418,7 +418,7 @@ class TestRunTileAggregation:
                 height=4,
                 width=4,
                 coverage_mask=np.ones((4, 4), dtype=bool),
-                no_data_tolerance=None,
+                early_stop_missing_fraction=None,
                 mosaic_method="mean",
                 percentile=None,
                 tile_size=2,
@@ -452,7 +452,7 @@ class TestRunTileAggregation:
                 height=4,
                 width=4,
                 coverage_mask=np.ones((4, 4), dtype=bool),
-                no_data_tolerance=None,
+                early_stop_missing_fraction=None,
                 mosaic_method="mean",
                 percentile=None,
                 tile_size=2,
@@ -481,7 +481,7 @@ class TestRunTileAggregation:
             height=4,
             width=4,
             coverage_mask=np.ones((4, 4), dtype=bool),
-            no_data_tolerance=None,
+            early_stop_missing_fraction=None,
             mosaic_method="mean",
             percentile=None,
             tile_size=2,
@@ -519,7 +519,7 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_tolerance=None,
+            early_stop_missing_fraction=None,
             mosaic_method="percentile",
             percentile=50.0,
             tile_size=3,
@@ -558,7 +558,7 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_tolerance=None,
+            early_stop_missing_fraction=None,
             mosaic_method=mosaic_method,
             percentile=50.0 if mosaic_method == "percentile" else None,
             tile_size=2,
@@ -595,7 +595,7 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_tolerance=None,
+            early_stop_missing_fraction=None,
             mosaic_method="percentile",
             percentile=50.0,
             tile_size=3,
@@ -605,7 +605,7 @@ class TestRunTileAggregation:
         assert set(thread_names) == {"MainThread"}
         np.testing.assert_allclose(out, 20.0)
 
-    def test_percentile_ignores_no_data_tolerance_inside_tile(self):
+    def test_percentile_ignores_early_stop_missing_fraction_inside_tile(self):
         reads = []
         scenes = np.stack(
             [
@@ -630,7 +630,7 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_tolerance=0.01,
+            early_stop_missing_fraction=0.01,
             mosaic_method="percentile",
             percentile=50.0,
             tile_size=10,
@@ -655,7 +655,7 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.zeros((self.H, self.W), dtype=bool),
-            no_data_tolerance=None,
+            early_stop_missing_fraction=None,
             mosaic_method="mean",
             percentile=None,
             tile_size=3,
@@ -665,7 +665,7 @@ class TestRunTileAggregation:
         assert reads["n"] == 0
         np.testing.assert_array_equal(out, np.zeros((1, self.H, self.W)))
 
-    def test_mean_ignores_no_data_tolerance_inside_tile(self):
+    def test_mean_ignores_early_stop_missing_fraction_inside_tile(self):
         reads = []
 
         def read_fn(scene_idx, band_idx, spec):
@@ -683,7 +683,7 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_tolerance=0.01,
+            early_stop_missing_fraction=0.01,
             mosaic_method="mean",
             percentile=None,
             tile_size=10,
@@ -693,7 +693,7 @@ class TestRunTileAggregation:
         assert reads == [0, 1]
         np.testing.assert_array_equal(out, np.full((1, self.H, self.W), 20))
 
-    def test_mean_stops_at_observation_target(self):
+    def test_mean_stops_at_min_observations(self):
         reads = []
 
         def read_fn(scene_idx, band_idx, spec):
@@ -712,18 +712,18 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_tolerance=None,
+            early_stop_missing_fraction=None,
             mosaic_method="mean",
             percentile=None,
             tile_size=10,
             tile_workers=1,
-            observation_target=2,
+            min_observations=2,
         )
 
         assert reads == [0, 1]
         np.testing.assert_array_equal(out, np.full((1, self.H, self.W), 15))
 
-    def test_percentile_stops_at_observation_target_per_pixel(self):
+    def test_percentile_stops_at_min_observations_per_pixel(self):
         reads = []
         masks = [
             np.ones((self.H, self.W), dtype=bool),
@@ -744,12 +744,12 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_tolerance=None,
+            early_stop_missing_fraction=None,
             mosaic_method="percentile",
             percentile=50.0,
             tile_size=10,
             tile_workers=1,
-            observation_target=2,
+            min_observations=2,
         )
 
         expected = np.full((1, self.H, self.W), 10, dtype=np.uint16)
@@ -757,7 +757,7 @@ class TestRunTileAggregation:
         assert reads == [0, 1, 2]
         np.testing.assert_array_equal(out, expected)
 
-    def test_first_ignores_no_data_tolerance_until_coverage_filled(self):
+    def test_first_ignores_early_stop_missing_fraction_until_coverage_filled(self):
         reads = []
         first_mask = np.ones((self.H, self.W), dtype=bool)
         first_mask[0, 0] = False
@@ -779,7 +779,7 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            no_data_tolerance=0.1,
+            early_stop_missing_fraction=0.1,
             mosaic_method="first",
             percentile=None,
             tile_size=10,
@@ -813,7 +813,7 @@ class TestRunTileAggregation:
         result = write_tile_aggregation_geotiff(
             export_path=export_path,
             profile=profile,
-            required_bands=["B04"],
+            bands=["B04"],
             masks=[
                 np.ones((self.H, self.W), dtype=bool),
                 np.ones((self.H, self.W), dtype=bool),
@@ -824,7 +824,7 @@ class TestRunTileAggregation:
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
             output_coverage_mask=None,
-            no_data_tolerance=None,
+            early_stop_missing_fraction=None,
             mosaic_method="mean",
             percentile=None,
             tile_size=3,
@@ -862,7 +862,7 @@ class TestRunTileAggregation:
                 "crs": None,
                 "transform": from_origin(0, self.H, 1, 1),
             },
-            required_bands=["B04"],
+            bands=["B04"],
             masks=[np.ones((self.H, self.W), dtype=bool)],
             read_fn=read_fn,
             bands_count=1,
@@ -870,7 +870,7 @@ class TestRunTileAggregation:
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
             output_coverage_mask=coverage,
-            no_data_tolerance=None,
+            early_stop_missing_fraction=None,
             mosaic_method="mean",
             percentile=None,
             tile_size=3,
@@ -915,7 +915,7 @@ class TestRunTileAggregation:
                 "crs": None,
                 "transform": from_origin(0, height, 1, 1),
             },
-            required_bands=["B04", "B03"],
+            bands=["B04", "B03"],
             masks=[np.ones((height, width), dtype=bool)],
             read_fn=read_fn,
             bands_count=bands_count,
@@ -923,7 +923,7 @@ class TestRunTileAggregation:
             width=width,
             coverage_mask=np.ones((height, width), dtype=bool),
             output_coverage_mask=None,
-            no_data_tolerance=None,
+            early_stop_missing_fraction=None,
             mosaic_method="mean",
             percentile=None,
             tile_size=4,
@@ -1046,11 +1046,11 @@ class TestMosaicBoundsValidation:
 
     def test_invalid_band_rejected(self):
         with pytest.raises(ValueError, match="Invalid band"):
-            self._call(self.VALID_BOUNDS, required_bands=["FOO"])
+            self._call(self.VALID_BOUNDS, bands=["FOO"])
 
     def test_visual_band_with_other_bands_rejected(self):
         with pytest.raises(ValueError, match="Cannot use visual band with other bands"):
-            self._call(self.VALID_BOUNDS, required_bands=["visual", "B04"])
+            self._call(self.VALID_BOUNDS, bands=["visual", "B04"])
 
     def test_invalid_mosaic_method_rejected(self):
         with pytest.raises(ValueError, match="Invalid mosaic method"):
@@ -1099,10 +1099,10 @@ class TestMosaicBoundsValidation:
         # validate_inputs must accept this without raising on range.
         utm_bounds = (390_000.0, 6_460_000.0, 400_000.0, 6_470_000.0)
         validate_inputs(
-            sort_method="valid_data",
+            scene_order="valid_data",
             mosaic_method="mean",
-            no_data_tolerance=0.01,
-            required_bands=["B04"],
+            early_stop_missing_fraction=0.01,
+            bands=["B04"],
             grid_id=None,
             percentile=None,
             bounds=utm_bounds,
@@ -1133,10 +1133,10 @@ class TestMosaicBoundsValidation:
         # 5 deg x 5 deg AOI at lat=-32: area is well over 200km x 200km.
         with caplog.at_level(logging.WARNING, logger="s2mosaic.helpers"):
             validate_inputs(
-                sort_method="valid_data",
+                scene_order="valid_data",
                 mosaic_method="mean",
-                no_data_tolerance=0.01,
-                required_bands=["B04"],
+                early_stop_missing_fraction=0.01,
+                bands=["B04"],
                 grid_id=None,
                 percentile=None,
                 bounds=(110.0, -35.0, 115.0, -30.0),
@@ -1149,10 +1149,10 @@ class TestMosaicBoundsValidation:
         # 300km x 300km in UTM.
         with caplog.at_level(logging.WARNING, logger="s2mosaic.helpers"):
             validate_inputs(
-                sort_method="valid_data",
+                scene_order="valid_data",
                 mosaic_method="mean",
-                no_data_tolerance=0.01,
-                required_bands=["B04"],
+                early_stop_missing_fraction=0.01,
+                bands=["B04"],
                 grid_id=None,
                 percentile=None,
                 bounds=(300_000.0, 6_300_000.0, 600_000.0, 6_600_000.0),
@@ -1165,10 +1165,10 @@ class TestMosaicBoundsValidation:
         # ~80km × 80km, larger than a single S2 tile's overlap zone but well
         # under the 200km ceiling — must pass validation cleanly.
         validate_inputs(
-            sort_method="valid_data",
+            scene_order="valid_data",
             mosaic_method="mean",
-            no_data_tolerance=0.01,
-            required_bands=["B04"],
+            early_stop_missing_fraction=0.01,
+            bands=["B04"],
             grid_id=None,
             percentile=None,
             bounds=(119.0, -29.0, 119.8, -28.2),
@@ -1186,10 +1186,10 @@ class TestMosaicBoundsValidation:
             ]
         )
         validate_inputs(
-            sort_method="valid_data",
+            scene_order="valid_data",
             mosaic_method="mean",
-            no_data_tolerance=0.01,
-            required_bands=["B04"],
+            early_stop_missing_fraction=0.01,
+            bands=["B04"],
             grid_id=None,
             percentile=None,
             aoi=aoi,
@@ -1208,10 +1208,10 @@ class TestMosaicBoundsValidation:
         )
         with pytest.raises(ValueError, match="single shapely Polygon"):
             validate_inputs(
-                sort_method="valid_data",
+                scene_order="valid_data",
                 mosaic_method="mean",
-                no_data_tolerance=0.01,
-                required_bands=["B04"],
+                early_stop_missing_fraction=0.01,
+                bands=["B04"],
                 grid_id=None,
                 percentile=None,
                 aoi=MultiPolygon([poly]),
@@ -1230,10 +1230,10 @@ class TestMosaicBoundsValidation:
         )
         with pytest.raises(ValueError, match="valid Polygon"):
             validate_inputs(
-                sort_method="valid_data",
+                scene_order="valid_data",
                 mosaic_method="mean",
-                no_data_tolerance=0.01,
-                required_bands=["B04"],
+                early_stop_missing_fraction=0.01,
+                bands=["B04"],
                 grid_id=None,
                 percentile=None,
                 aoi=bowtie,
@@ -1248,9 +1248,9 @@ class TestExportPaths:
             output_dir=tmp_path,
             start_date=date(2023, 6, 1),
             end_date=date(2023, 6, 8),
-            sort_method="oldest",
+            scene_order="oldest",
             mosaic_method="mean",
-            required_bands=["B04", "B03", "B02"],
+            bands=["B04", "B03", "B02"],
             grid_id="50HMH",
             source_name="MPC",
             resolution=10,
@@ -1260,7 +1260,7 @@ class TestExportPaths:
 
         assert path.name == (
             "grid-50HMH_2023-06-01_to_2023-06-08_"
-            "B04-B03-B02_mean_sort-oldest_10m_OCM_MPC_abc123def0.tif"
+            "B04-B03-B02_mean_scene-oldest_10m_OCM_MPC_abc123def0.tif"
         )
 
     def test_auto_percentile_filename_includes_percentile(self, tmp_path):
@@ -1268,20 +1268,20 @@ class TestExportPaths:
             output_dir=tmp_path,
             start_date=date(2023, 6, 1),
             end_date=date(2023, 8, 1),
-            sort_method="valid_data",
+            scene_order="valid_data",
             mosaic_method="percentile",
             percentile=25,
-            required_bands=["B04"],
+            bands=["B04"],
             bounds=(115.8301, -31.9702, 115.9103, -31.9404),
         )
         p75 = get_output_path(
             output_dir=tmp_path,
             start_date=date(2023, 6, 1),
             end_date=date(2023, 8, 1),
-            sort_method="valid_data",
+            scene_order="valid_data",
             mosaic_method="percentile",
             percentile=75,
-            required_bands=["B04"],
+            bands=["B04"],
             bounds=(115.8301, -31.9702, 115.9103, -31.9404),
         )
 
@@ -1296,20 +1296,20 @@ class TestExportPaths:
             grid_id="50HMH",
             start_year=2023,
             duration_days=7,
-            required_bands=["B04"],
+            bands=["B04"],
         ).normalized()
         lower_resolution = MosaicRequest(
             grid_id="50HMH",
             start_year=2023,
             duration_days=7,
-            required_bands=["B04"],
+            bands=["B04"],
             resolution=20,
         ).normalized()
         stricter_query = MosaicRequest(
             grid_id="50HMH",
             start_year=2023,
             duration_days=7,
-            required_bands=["B04"],
+            bands=["B04"],
             additional_query={"eo:cloud_cover": {"lt": 20}},
         ).normalized()
 
@@ -1343,13 +1343,13 @@ class TestExportPaths:
             grid_id="50HMH",
             start_year=2023,
             duration_days=7,
-            required_bands=["B04"],
+            bands=["B04"],
         ).normalized()
         runtime_only = MosaicRequest(
             grid_id="50HMH",
             start_year=2023,
             duration_days=7,
-            required_bands=["B04"],
+            bands=["B04"],
             output_dir=tmp_path / "one",
             output_path=tmp_path / "custom.tif",
             overwrite=False,
@@ -1377,9 +1377,9 @@ class TestExportPaths:
             output_dir=tmp_path,
             start_date=date(2023, 6, 1),
             end_date=date(2023, 6, 8),
-            sort_method="valid_data",
+            scene_order="valid_data",
             mosaic_method="mean",
-            required_bands=["B04"],
+            bands=["B04"],
             aoi=aoi,
             filename_hash="abc123def0",
         )
@@ -1393,7 +1393,7 @@ class TestExportPaths:
             grid_id="50HMH",
             start_year=2023,
             duration_days=7,
-            required_bands=["B04"],
+            bands=["B04"],
         ).normalized()
         metadata = output_sidecar_metadata(
             request,
@@ -1411,7 +1411,7 @@ class TestExportPaths:
         assert sidecar["filename_hash"] == "abc123def0"
         assert sidecar["mode"] == "grid"
         assert sidecar["request"]["grid_id"] == "50HMH"
-        assert sidecar["request"]["required_bands"] == ["B04"]
+        assert sidecar["request"]["bands"] == ["B04"]
 
     def test_output_path_is_used_directly(self, tmp_path):
         path = resolve_export_path(
@@ -1419,9 +1419,9 @@ class TestExportPaths:
             output_path=tmp_path / "nested" / "custom.tif",
             start_date=date(2023, 6, 1),
             end_date=date(2023, 6, 8),
-            sort_method="oldest",
+            scene_order="oldest",
             mosaic_method="mean",
-            required_bands=["B04"],
+            bands=["B04"],
             grid_id="50HMH",
         )
 
@@ -1435,9 +1435,9 @@ class TestExportPaths:
                 output_path=tmp_path / "custom.tif",
                 start_date=date(2023, 6, 1),
                 end_date=date(2023, 6, 8),
-                sort_method="oldest",
+                scene_order="oldest",
                 mosaic_method="mean",
-                required_bands=["B04"],
+                bands=["B04"],
                 grid_id="50HMH",
             )
 
@@ -1448,9 +1448,9 @@ class TestExportPaths:
                 output_path=tmp_path / "custom",
                 start_date=date(2023, 6, 1),
                 end_date=date(2023, 6, 8),
-                sort_method="oldest",
+                scene_order="oldest",
                 mosaic_method="mean",
-                required_bands=["B04"],
+                bands=["B04"],
                 grid_id="50HMH",
             )
 
@@ -1486,7 +1486,7 @@ class TestPackagedGrid:
 
 
 class TestSortItems:
-    def test_invalid_sort_method_raises_value_error(self):
+    def test_invalid_scene_order_raises_value_error(self):
         items = pd.DataFrame(
             {
                 GOOD_DATA_PCT_COL: [90.0],
@@ -1496,7 +1496,7 @@ class TestSortItems:
             }
         )
 
-        with pytest.raises(ValueError, match="Invalid sort method"):
+        with pytest.raises(ValueError, match="Invalid scene_order"):
             sort_items(items, "bogus")
 
 
@@ -1679,11 +1679,12 @@ class TestGridOrderedMaskStreaming:
 
         out, profile = stream_mosaic_pipeline(
             sorted_scenes=self._sorted_scenes(4),
-            required_bands=["B04"],
+            bands=["B04"],
             coverage_mask=np.ones((4, 4), dtype=bool),
-            no_data_tolerance=None,
+            early_stop_missing_fraction=None,
             mosaic_method="first",
             cloud_mask="SCL",
+            source=MPC,
             s2_scene_size=4,
             tile_size=4,
             tile_workers=1,
@@ -1693,7 +1694,9 @@ class TestGridOrderedMaskStreaming:
         assert out is not None
         assert profile["width"] == 4
 
-    def test_grid_mean_stops_mask_stream_at_no_data_tolerance(self, monkeypatch):
+    def test_grid_mean_stops_mask_stream_at_early_stop_missing_fraction(
+        self, monkeypatch
+    ):
         import s2mosaic.pipelines.grid as core_mod
 
         self._patch_grid_pipeline_io(monkeypatch)
@@ -1713,11 +1716,12 @@ class TestGridOrderedMaskStreaming:
 
         stream_mosaic_pipeline(
             sorted_scenes=self._sorted_scenes(4),
-            required_bands=["B04"],
+            bands=["B04"],
             coverage_mask=np.ones((4, 4), dtype=bool),
-            no_data_tolerance=0.01,
+            early_stop_missing_fraction=0.01,
             mosaic_method="mean",
             cloud_mask="SCL",
+            source=MPC,
             s2_scene_size=4,
             tile_size=4,
             tile_workers=1,
@@ -1837,7 +1841,7 @@ class TestBoundsOcmContext:
             resolution=20,
             start_year=2023,
             duration_days=1,
-            required_bands=["B04"],
+            bands=["B04"],
             cloud_mask="OCM",
         )
 
@@ -1908,9 +1912,9 @@ class TestBoundsOcmContext:
             resolution=20,
             start_year=2023,
             duration_days=1,
-            required_bands=["B04"],
+            bands=["B04"],
             cloud_mask="OCM",
-            no_data_tolerance=None,
+            early_stop_missing_fraction=None,
             min_coverage_fraction=None,
             tile_workers=8,
         )
@@ -2007,10 +2011,10 @@ class TestBoundsOcmContext:
             output_crs=32750,
             start_year=2023,
             duration_days=1,
-            required_bands=["B04"],
+            bands=["B04"],
             cloud_mask="SCL",
             min_coverage_fraction=None,
-            no_data_tolerance=None,
+            early_stop_missing_fraction=None,
             adaptive_tiling=True,
         )
 
@@ -2089,10 +2093,10 @@ class TestBoundsOcmContext:
             output_crs=32750,
             start_year=2023,
             duration_days=1,
-            required_bands=["B04"],
+            bands=["B04"],
             cloud_mask="SCL",
             min_coverage_fraction=None,
-            no_data_tolerance=None,
+            early_stop_missing_fraction=None,
             adaptive_tiling=True,
         )
 
@@ -2155,7 +2159,7 @@ class TestBoundsOcmContext:
             output_crs=32750,
             start_year=2023,
             duration_days=1,
-            required_bands=["B04"],
+            bands=["B04"],
             cloud_mask="SCL",
             min_coverage_fraction=None,
         )
@@ -2233,7 +2237,7 @@ class TestBoundsOcmContext:
             output_crs=32750,
             start_year=2023,
             duration_days=1,
-            required_bands=["B04"],
+            bands=["B04"],
             cloud_mask="SCL",
             min_coverage_fraction=None,
         )
@@ -2295,7 +2299,7 @@ class TestBoundsOcmContext:
             output_crs=32750,
             start_year=2023,
             duration_days=1,
-            required_bands=["B04"],
+            bands=["B04"],
             cloud_mask="SCL",
             min_coverage_fraction=None,
             tile_workers=2,
@@ -2358,7 +2362,7 @@ class TestBoundsOcmContext:
             output_crs=32750,
             start_year=2023,
             duration_days=1,
-            required_bands=["B04"],
+            bands=["B04"],
             cloud_mask="SCL",
             min_coverage_fraction=None,
             output_path=export_path,
@@ -2708,7 +2712,7 @@ class TestTiledBandMaterialisation:
     """Local tiled GeoTIFF materialisation helpers."""
 
     @pytest.mark.parametrize(
-        "mosaic_method,no_data_tolerance,observation_target,expected",
+        "mosaic_method,early_stop_missing_fraction,min_observations,expected",
         [
             ("mean", None, None, True),
             ("percentile", None, None, True),
@@ -2720,10 +2724,14 @@ class TestTiledBandMaterialisation:
         ],
     )
     def test_source_prewarm_policy(
-        self, mosaic_method, no_data_tolerance, observation_target, expected
+        self, mosaic_method, early_stop_missing_fraction, min_observations, expected
     ):
         assert (
-            should_prewarm_sources(mosaic_method, no_data_tolerance, observation_target)
+            should_prewarm_sources(
+                mosaic_method,
+                early_stop_missing_fraction,
+                min_observations,
+            )
             is expected
         )
 
@@ -2906,18 +2914,18 @@ class TestMosaicSharedParamsValidation:
 
     def test_grid_mode_rejects_invalid_band(self):
         with pytest.raises(ValueError, match="Invalid band"):
-            mosaic(grid_id="50HMH", start_year=2023, required_bands=["FOO"])
+            mosaic(grid_id="50HMH", start_year=2023, bands=["FOO"])
 
     def test_bounds_mode_rejects_invalid_band(self):
         with pytest.raises(ValueError, match="Invalid band"):
-            mosaic(start_year=2023, bounds=self.BOUNDS, required_bands=["FOO"])
+            mosaic(start_year=2023, bounds=self.BOUNDS, bands=["FOO"])
 
-    def test_bounds_mode_accepts_no_data_tolerance(self):
+    def test_bounds_mode_accepts_early_stop_missing_fraction(self):
         # Should fail later (no network) but not on validation
         with pytest.raises(
-            ValueError, match="No data threshold must be between 0 and 1"
+            ValueError, match="early_stop_missing_fraction must be between 0 and 1"
         ):
-            mosaic(start_year=2023, bounds=self.BOUNDS, no_data_tolerance=2.0)
+            mosaic(start_year=2023, bounds=self.BOUNDS, early_stop_missing_fraction=2.0)
 
     def test_bounds_mode_accepts_resolution(self):
         with pytest.raises(ValueError, match="resolution"):

@@ -142,8 +142,8 @@ def _search_and_sort_bounds_items(
     source: Source,
     additional_query: Optional[Dict[str, Any]],
     ignore_duplicate_items: bool,
-    sort_method: str,
-    sort_function: Optional[Callable[..., Any]],
+    scene_order: str,
+    scene_sort_fn: Optional[Callable[..., Any]],
 ) -> Tuple[ItemCollection, Any, List[_BoundsItemLike]]:
     """Search bounds/AOI scenes and return sorted STAC items."""
     if aoi_4326 is not None:
@@ -171,10 +171,10 @@ def _search_and_sort_bounds_items(
         )
 
     items_with_orbits = add_item_info(items)
-    if sort_function:
-        sorted_items = sort_function(items=items_with_orbits)
+    if scene_sort_fn:
+        sorted_items = scene_sort_fn(items=items_with_orbits)
     else:
-        sorted_items = sort_items(items=items_with_orbits, sort_method=sort_method)
+        sorted_items = sort_items(items=items_with_orbits, scene_order=scene_order)
     return (
         items,
         sorted_items,
@@ -194,7 +194,7 @@ def _stream_bounds_combo_masks(
     coverage_mask: npt.NDArray[Any],
     cloud_mask: str,
     mosaic_method: str,
-    no_data_tolerance: Optional[float],
+    early_stop_missing_fraction: Optional[float],
     possible_pixel_count: int,
     tile_workers: Optional[int],
     ocm_bounds_target: Bbox,
@@ -320,7 +320,7 @@ def _stream_bounds_combo_masks(
         good_pixel_tracker |= combo
 
         if (
-            no_data_tolerance is not None
+            early_stop_missing_fraction is not None
             and mosaic_method != MOSAIC_PERCENTILE
             and possible_pixel_count > 0
         ):
@@ -330,19 +330,22 @@ def _stream_bounds_combo_masks(
             logger.info(
                 f"Scene {scene_idx + 1}/{n_time} kept; no-data {no_data_pct:.1f}%"
             )
-            if no_data_sum < possible_pixel_count * no_data_tolerance:
+            if no_data_sum < possible_pixel_count * early_stop_missing_fraction:
                 logger.info(
-                    f"no_data_tolerance met after {len(kept_combo_masks)} kept "
-                    f"scenes ({scene_idx + 1}/{n_time} examined)"
+                    "early_stop_missing_fraction met after "
+                    f"{len(kept_combo_masks)} kept scenes "
+                    f"({scene_idx + 1}/{n_time} examined)"
                 )
                 break
 
     if mask_progress is not None:
-        # `first` mode and no_data_tolerance can break the loop early. Snap
-        # the bar to total so tqdm renders it as complete rather than red.
-        remaining = mask_progress.total - mask_progress.n
-        if remaining > 0:
-            mask_progress.update(remaining)
+        # `first` mode and early_stop_missing_fraction can break the loop early. Snap
+        # the bar to total so tqdm renders it as complete rather than red. Set ``n``
+        # directly and force a refresh — ``update`` honours min-interval throttling
+        # and a quick ``close`` after may skip the final redraw in tqdm.notebook.
+        if mask_progress.n < mask_progress.total:
+            mask_progress.n = mask_progress.total
+            mask_progress.refresh()
         mask_progress.close()
 
     if n_mask_fetch_failed:
@@ -366,7 +369,7 @@ def run_bounds_pipeline(
 ) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
     """Bounds/AOI-mode pipeline. Called from mosaic() for non-grid AOIs.
 
-    Searches the Planetary Computer STAC for Sentinel-2 L2A scenes intersecting
+    Searches the configured STAC source for Sentinel-2 L2A scenes intersecting
     ``bounds`` or ``aoi`` over the date window, streams per-scene cloud masks (skipping
     scenes that contribute no new pixels), then fetches user bands only for the
     kept scenes and aggregates them into a single mosaic on a UTM grid.
@@ -387,7 +390,7 @@ def run_bounds_pipeline(
         start_year, start_month, start_day, duration_years, duration_months,
             duration_days: Date window for the STAC search (start inclusive,
             end exclusive).
-        required_bands: Spectral bands to fetch (e.g. ``["B04", "B03", "B02"]``)
+        bands: Spectral bands to fetch (e.g. ``["B04", "B03", "B02"]``)
             or ``["visual"]`` for the 3-band uint8 TCI asset.
         mosaic_method, percentile: As for :func:`s2mosaic.mosaic`.
         output_dir: Directory to write the GeoTIFF using an auto-generated
@@ -405,10 +408,10 @@ def run_bounds_pipeline(
             / ``resolution`` during the WarpedVRT read.
         additional_query: Extra STAC query filters
             (e.g. ``{"eo:cloud_cover": {"lt": 50}}``).
-        no_data_tolerance: Stop early once the uncovered fraction within the
+        early_stop_missing_fraction: Stop early once the uncovered fraction within the
             coverage mask drops below this during scene selection. Set to
-            ``0.0`` (default) or ``None`` to examine every scene.
-        observation_target: Optional per-tile early-stop target for
+            ``None`` (default) or ``0.0`` to examine every scene.
+        min_observations: Optional per-tile early-stop target for
             ``mean`` and ``percentile``. When set, user-band aggregation stops
             reading later scenes for a tile once every coverable pixel has at
             least this many valid observations. This is not an output quality
@@ -416,7 +419,7 @@ def run_bounds_pipeline(
         min_coverage_fraction: Drop pixels covered by fewer than this fraction
             of overlapping scenes (scene-edge pixels). ``None`` disables.
         ignore_duplicate_items: Keep only the latest processing baseline per scene.
-        sort_method, sort_function: As for :func:`s2mosaic.mosaic`.
+        scene_order, scene_sort_fn: As for :func:`s2mosaic.mosaic`.
         cloud_mask: ``"OCM"`` (deep-learning, default) or ``"SCL"`` (L2A scene
             classification layer — cheaper, less accurate).
         ocm_batch_size, ocm_inference_dtype: Only used when ``cloud_mask="OCM"``.
@@ -437,9 +440,9 @@ def run_bounds_pipeline(
         RuntimeError: If scenes were found but every scene was fully
             cloud-masked or invalid.
     """
-    required_bands = request.required_bands
+    bands = request.bands
     additional_query = request.additional_query
-    assert required_bands is not None
+    assert bands is not None
     assert additional_query is not None
 
     bounds = request.bounds
@@ -454,10 +457,10 @@ def run_bounds_pipeline(
         f"from {request.start_year}-{request.start_month:02d}-{request.start_day:02d} "
         f"+ {request.duration_years}y {request.duration_months}m "
         f"{request.duration_days}d using {request.mosaic_method} method "
-        f"with bands {required_bands}"
+        f"with bands {bands}"
     )
 
-    is_visual = "visual" in required_bands
+    is_visual = "visual" in bands
 
     aoi_4326 = reproject_aoi(aoi, request.input_crs, 4326) if aoi is not None else None
     bounds_4326 = (
@@ -515,9 +518,9 @@ def run_bounds_pipeline(
         output_path=request.output_path,
         start_date=start_date,
         end_date=end_date,
-        sort_method=request.sort_method,
+        scene_order=request.scene_order,
         mosaic_method=request.mosaic_method,
-        required_bands=required_bands,
+        bands=bands,
         percentile=request.percentile,
         bounds=bounds_4326,
         aoi=aoi_4326,
@@ -539,8 +542,8 @@ def run_bounds_pipeline(
         source=source,
         additional_query=additional_query,
         ignore_duplicate_items=request.ignore_duplicate_items,
-        sort_method=request.sort_method,
-        sort_function=request.sort_function,
+        scene_order=request.scene_order,
+        scene_sort_fn=request.scene_sort_fn,
     )
 
     # Mask resolution depends on provider: OCM is fastest at coarser resolutions
@@ -626,7 +629,7 @@ def run_bounds_pipeline(
         coverage_mask=coverage_mask_ocm,
         cloud_mask=request.cloud_mask,
         mosaic_method=request.mosaic_method,
-        no_data_tolerance=request.no_data_tolerance,
+        early_stop_missing_fraction=request.early_stop_missing_fraction,
         possible_pixel_count=possible_pixel_count,
         tile_workers=request.tile_workers,
         ocm_bounds_target=ocm_bounds_target,
@@ -648,7 +651,7 @@ def run_bounds_pipeline(
     user_transform, w, h, _ = _target_grid(
         bounds_target, request.resolution, target_crs
     )
-    n_bands = 3 if is_visual else len(required_bands)
+    n_bands = 3 if is_visual else len(bands)
 
     def _to_user_shape(mask: npt.NDArray[Any]) -> npt.NDArray[Any]:
         if mask.shape == (h, w):
@@ -677,7 +680,7 @@ def run_bounds_pipeline(
     # (WarpedVRT-backed, or direct read from a local cached file), apply
     # the per-tile slice of the precomputed mask, and aggregate by method.
     # Peak RAM is one tile per worker rather than the full N-scene stack.
-    href_template, _, _ = get_band_template(required_bands)
+    href_template, _, _ = get_band_template(bands)
     kept_items = [items_list[i] for i in kept_indices]
     read_fn = make_bounds_tile_reader(
         items=kept_items,
@@ -691,7 +694,9 @@ def run_bounds_pipeline(
         resolution=request.resolution,
         resampling_method=request.resampling_method,
         prewarm=should_prewarm_sources(
-            request.mosaic_method, request.no_data_tolerance, request.observation_target
+            request.mosaic_method,
+            request.early_stop_missing_fraction,
+            request.min_observations,
         ),
     )
 
@@ -724,12 +729,24 @@ def run_bounds_pipeline(
         coverage_mask if request.min_coverage_fraction is not None else None
     )
 
+    # Adaptive sub-tile floor: largest source COG block among the user bands,
+    # so each tile read fetches whole source blocks rather than fringes. On
+    # AWS 10m bands this is 1024; on MPC always 512. (Falls back to
+    # source.default_block_size for unmeasured assets.)
+    min_tile_size = source.max_block_size_for_bands(bands)
+    logger.info(
+        "Adaptive tile min size: %d (source=%s, bands=%s)",
+        min_tile_size,
+        source.name,
+        bands,
+    )
+
     try:
         if export_path is not None:
             result = write_tile_aggregation_geotiff(
                 export_path=export_path,
                 profile=profile,
-                required_bands=required_bands,
+                bands=bands,
                 masks=masks_in_order,
                 read_fn=read_fn,
                 bands_count=n_bands,
@@ -737,8 +754,8 @@ def run_bounds_pipeline(
                 width=w,
                 coverage_mask=coverage_mask,
                 output_coverage_mask=output_coverage_mask,
-                no_data_tolerance=request.no_data_tolerance,
-                observation_target=request.observation_target,
+                early_stop_missing_fraction=request.early_stop_missing_fraction,
+                min_observations=request.min_observations,
                 mosaic_method=request.mosaic_method,
                 percentile=request.percentile,
                 tile_size=tile_size,
@@ -746,6 +763,7 @@ def run_bounds_pipeline(
                 out_dtype=np.dtype(np.uint8) if is_visual else np.dtype(np.uint16),
                 adaptive_tiling=request.adaptive_tiling,
                 show_progress=request.show_progress,
+                min_tile_size=min_tile_size,
             )
             write_output_sidecar(export_path, sidecar_metadata)
             return result
@@ -757,8 +775,8 @@ def run_bounds_pipeline(
             height=h,
             width=w,
             coverage_mask=coverage_mask,
-            no_data_tolerance=request.no_data_tolerance,
-            observation_target=request.observation_target,
+            early_stop_missing_fraction=request.early_stop_missing_fraction,
+            min_observations=request.min_observations,
             mosaic_method=request.mosaic_method,
             percentile=request.percentile,
             tile_size=tile_size,
@@ -766,12 +784,13 @@ def run_bounds_pipeline(
             out_dtype=np.dtype(np.uint8) if is_visual else np.dtype(np.uint16),
             adaptive_tiling=request.adaptive_tiling,
             show_progress=request.show_progress,
+            min_tile_size=min_tile_size,
         )
 
         return finalize_output(
             array=output_array,
             profile=profile,
-            required_bands=required_bands,
+            bands=bands,
             coverage_mask=output_coverage_mask,
             export_path=export_path,
         )

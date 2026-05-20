@@ -34,3 +34,7 @@ jobs:
 
       - name: Test
         run: uv run pytest tests/ -x -q
+
+      - name: Notebook smoke test
+        if: matrix.python-version == '3.11'
+        run: uv run pytest --nbmake examples/*.ipynb -q

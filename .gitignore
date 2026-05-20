@@ -172,3 +172,11 @@ uv.lock
 examples/output/*
 cache/*
 .claude/scheduled_tasks.lock
+
+# Profiling harness outputs (the code under profiling/ stays tracked)
+profiling/results/
+
+# Generated raster outputs
+*.tif
+*.tiff
+profiling/*

@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [2.0.0b1] - 2026-05-15
 
 ### Added
-- `source` parameter on `mosaic()` selects the STAC imagery source: `"MPC"` (default, Microsoft Planetary Computer with SAS-signed URLs) or `"AWS"` (Element 84 Earth Search on AWS Open Data — public S3, no auth). AWS is useful as a fallback during MPC outages and avoids SAS token rotation for bulk workloads. The `sentinel-2-l2a` collection is used on both providers (L1C, C1, and pre-C1 collections are not searched). Asset-name differences (`B04` vs `red`, `SCL` vs `scl`) are handled internally by the `s2mosaic.sources.Source` abstraction; on AWS, `sat:relative_orbit` is recovered from `s2:product_uri`'s `R\\d+` token, and `s2:mgrs_tile` from `grid:code` (`MGRS-50HMH` → `50HMH`). Element 84 returns 0 items when STAC `query` is combined with `intersects`, so grid-mode precision is restored by client-side post-filtering on `grid:code` after the search.
+- `source` parameter on `mosaic()` selects the STAC imagery source: `"AWS"` (default, Element 84 Earth Search on AWS Open Data — public S3, no auth) or `"MPC"` (Microsoft Planetary Computer with SAS-signed URLs). The `sentinel-2-l2a` collection is used on both providers (L1C, C1, and pre-C1 collections are not searched). Asset-name differences (`B04` vs `red`, `SCL` vs `scl`) are handled internally by the `s2mosaic.sources.Source` abstraction; on AWS, `sat:relative_orbit` is recovered from `s2:product_uri`'s `R\\d+` token, and `s2:mgrs_tile` from `grid:code` (`MGRS-50HMH` → `50HMH`). Element 84 returns 0 items when STAC `query` is combined with `intersects`, so grid-mode precision is restored by client-side post-filtering on `grid:code` after the search.
 - STAC `datetime` range strings are now produced via `strftime("%Y-%m-%dT00:00:00Z")` rather than `isoformat() + "Z"`, so both `date` and `datetime` inputs round-trip to valid RFC 3339. `define_dates()` returns `datetime`, so the previous `isoformat()` code happened to produce valid output in production — but only for that input shape. Element 84's pystac-client validation is stricter than MPC's and would reject the date-only form if it ever appeared.
 - `cloud_mask` parameter on `mosaic()` selects the cloud-mask provider: `"OCM"` (default, OmniCloudMask deep-learning model) or `"SCL"` (the L2A Scene Classification Layer that ships with each scene). SCL is much cheaper — useful on CPU-only machines and for bulk processing — at the cost of accuracy.
 - Bounds mode: pass `bounds=(minx, miny, maxx, maxy)` (with optional `bounds_crs` / `target_crs`) to mosaic an arbitrary rectangle, including AOIs that intersect Sentinel-2 tiles in different UTM zone projections — each scene is streamed through a rasterio `WarpedVRT` onto a common UTM grid.
@@ -16,14 +16,17 @@ All notable changes to this project will be documented in this file.
 - `@overload`s on `mosaic()` so the return type narrows to `Tuple[ndarray, dict]` when `output_dir` is omitted and to `Path` when it is set.
 - Unit tests covering masking, frequent-coverage, bounds reprojection, bounds validation, and percentile aggregation.
 - Transient per-scene fetch failures (network blips, expired SAS tokens, 5xx from MPC) are now retried with exponential backoff (3 attempts, 1/2/4s). If retries are exhausted, the scene is logged at WARNING and skipped instead of aborting the whole mosaic; a summary line reports `N/M scenes failed`. Cloud-mask inference errors are *not* swallowed — they still hard-stop so they can be diagnosed.
-- Per-tile `no_data_tolerance` short-circuit: each tile's per-scene time series walks scenes in priority order and stops once the tile's coverage of `coverage_mask` exceeds `1 - tolerance`. Clear tiles finish after one scene; cloudy tiles process more. Replaces the old global short-circuit, which stopped the whole pipeline for every method when one region of the mosaic was sufficiently covered.
+- Per-tile `early_stop_missing_fraction` short-circuit: each tile's per-scene time series walks scenes in priority order and stops once the tile's coverage of `coverage_mask` exceeds `1 - tolerance`. Clear tiles finish after one scene; cloudy tiles process more. Replaces the old global short-circuit, which stopped the whole pipeline for every method when one region of the mosaic was sufficiently covered.
 - STAC search results are now cached when `S2MOSAIC_DEBUG_CACHE` is set, so dev iteration survives transient PC outages.
 - `output_dir` exports now write a JSON sidecar beside the GeoTIFF with the normalized request metadata, source, date window, resolved CRS where relevant, and filename hash inputs.
 
 ### Changed
 - **Breaking:** `start_year` is now a required keyword-only argument on `mosaic()`. Callers passing it positionally (`mosaic("50HMH", 2023)`) must switch to keyword form (`mosaic("50HMH", start_year=2023)`). The type is now `int` (was `Optional[int]` with a runtime check). All README/notebook examples already use the keyword form.
 - **Breaking:** `percentile_value` renamed to `percentile` on `mosaic()`. Callers using `mosaic_method="percentile", percentile_value=N` must switch to `percentile=N`. Reverts the 1.0.0 rename — `percentile_value` was redundant alongside `mosaic_method="percentile"`, and the shorter name matches `numpy.percentile` (0–100 scale).
-- **Breaking:** `no_data_threshold` renamed to `no_data_tolerance` on `mosaic()`, and the default changed from `0.01` to `0.0`. The old name suggested a pixel-value cutoff; the parameter is actually an early-stop tolerance — stop walking scenes once the AOI no-data fraction drops below this. Default `0.0` (zero tolerance) examines every scene; pass an explicit `0.01` to restore the previous behaviour.
+- **Breaking:** `required_bands` renamed to `bands`, `observation_target` renamed to `min_observations`, `sort_method` renamed to `scene_order`, and `sort_function` renamed to `scene_sort_fn`.
+- **Breaking:** `no_data_threshold` renamed to `early_stop_missing_fraction` on `mosaic()`, and the default changed from `0.01` to `None`. The old name suggested a pixel-value cutoff; the parameter is actually an early-stop tolerance — stop walking scenes once the AOI no-data fraction drops below this. Default `None` examines every scene; `0.0` is accepted as an equivalent no-op, and callers can pass an explicit `0.01` to restore the previous behaviour.
+- **Breaking:** `source` now defaults to `"AWS"` instead of `"MPC"`.
+- **Breaking:** `min_coverage_fraction` now defaults to `None` instead of `0.1`, so scene-edge coverage trimming is opt-in.
 - **Breaking:** `coverage_threshold` renamed to `min_coverage_fraction` on `mosaic()`. Same semantics (drop pixels covered by less than this fraction of the AOI's max overlap count), clearer name — it's a minimum, expressed as a fraction.
 - `SceneFetchError` is now exported from the top-level `s2mosaic` package so callers can `except s2mosaic.SceneFetchError` to distinguish fetch failures from other exceptions.
 - Replaced `scipy.ndimage` with OpenCV (`cv2.dilate` / `cv2.resize`) for no-data mask dilation and band resampling — drops the SciPy dependency.
@@ -81,7 +84,7 @@ All notable changes to this project will be documented in this file.
 ## [0.3.0] - 2024-12-30
 
 ### Added
-- Custom `sort_function` option for user-defined scene ordering.
+- Custom `scene_sort_fn` option for user-defined scene ordering.
 
 ## [0.2.1] - 2024-12-22
 

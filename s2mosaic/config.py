@@ -12,10 +12,10 @@ from .geometry import Aoi, Bbox
 
 logger = logging.getLogger(__name__)
 
-SORT_VALID_DATA = "valid_data"
-SORT_OLDEST = "oldest"
-SORT_NEWEST = "newest"
-SORT_CUSTOM = "custom"
+SCENE_ORDER_VALID_DATA = "valid_data"
+SCENE_ORDER_OLDEST = "oldest"
+SCENE_ORDER_NEWEST = "newest"
+SCENE_ORDER_CUSTOM = "custom"
 MOSAIC_MEAN = "mean"
 MOSAIC_FIRST = "first"
 MOSAIC_PERCENTILE = "percentile"
@@ -23,7 +23,12 @@ MOSAIC_PERCENTILE = "percentile"
 CLOUD_MASK_OCM = "OCM"
 CLOUD_MASK_SCL = "SCL"
 
-VALID_SORT_METHODS = {SORT_VALID_DATA, SORT_OLDEST, SORT_NEWEST, SORT_CUSTOM}
+VALID_SCENE_ORDERS = {
+    SCENE_ORDER_VALID_DATA,
+    SCENE_ORDER_OLDEST,
+    SCENE_ORDER_NEWEST,
+    SCENE_ORDER_CUSTOM,
+}
 VALID_MOSAIC_METHODS = {MOSAIC_MEAN, MOSAIC_FIRST, MOSAIC_PERCENTILE}
 VALID_CLOUD_MASKS = {CLOUD_MASK_OCM, CLOUD_MASK_SCL}
 VALID_RESAMPLING_METHODS = {
@@ -54,7 +59,7 @@ VALID_BANDS = frozenset(
     }
 )
 
-DEFAULT_REQUIRED_BANDS: List[str] = ["B04", "B03", "B02", "B08"]
+DEFAULT_BANDS: List[str] = ["B04", "B03", "B02", "B08"]
 DEFAULT_ADDITIONAL_QUERY: Dict[str, Any] = {"eo:cloud_cover": {"lt": 100}}
 
 BOUNDS_MIN_AREA_M2 = 100
@@ -74,7 +79,7 @@ class MosaicRequest:
     duration_years: int = 0
     duration_months: int = 0
     duration_days: int = 0
-    required_bands: Optional[List[str]] = None
+    bands: Optional[List[str]] = None
     mosaic_method: str = MOSAIC_MEAN
     percentile: Optional[float] = None
     output_dir: Optional[Union[Path, str]] = None
@@ -84,13 +89,13 @@ class MosaicRequest:
     resolution: int = 10
     resampling_method: str = "nearest"
     additional_query: Optional[Dict[str, Any]] = None
-    source: str = "MPC"
-    no_data_tolerance: Optional[float] = 0.0
-    observation_target: Optional[int] = None
-    min_coverage_fraction: Optional[float] = 0.1
+    source: str = "AWS"
+    early_stop_missing_fraction: Optional[float] = None
+    min_observations: Optional[int] = None
+    min_coverage_fraction: Optional[float] = None
     ignore_duplicate_items: bool = True
-    sort_method: str = SORT_VALID_DATA
-    sort_function: Optional[Callable[..., Any]] = None
+    scene_order: str = SCENE_ORDER_VALID_DATA
+    scene_sort_fn: Optional[Callable[..., Any]] = None
     cloud_mask: str = CLOUD_MASK_OCM
     ocm_batch_size: int = 1
     ocm_inference_dtype: str = "bf16"
@@ -99,21 +104,21 @@ class MosaicRequest:
     show_progress: bool = False
 
     def normalized(self) -> "MosaicRequest":
-        required_bands, additional_query, sort_method, mosaic_method, percentile = (
+        bands, additional_query, scene_order, mosaic_method, percentile = (
             normalize_mosaic_inputs(
-                required_bands=self.required_bands,
+                bands=self.bands,
                 additional_query=self.additional_query,
-                sort_method=self.sort_method,
-                sort_function=self.sort_function,
+                scene_order=self.scene_order,
+                scene_sort_fn=self.scene_sort_fn,
                 mosaic_method=self.mosaic_method,
                 percentile=self.percentile,
             )
         )
         return replace(
             self,
-            required_bands=required_bands,
+            bands=bands,
             additional_query=additional_query,
-            sort_method=sort_method,
+            scene_order=scene_order,
             mosaic_method=mosaic_method,
             percentile=percentile,
         )
@@ -121,13 +126,13 @@ class MosaicRequest:
     def validate(self) -> None:
         if sum(x is not None for x in (self.grid_id, self.bounds, self.aoi)) != 1:
             raise ValueError("Exactly one of grid_id, bounds, or aoi must be provided")
-        if self.required_bands is None:
+        if self.bands is None:
             raise ValueError("MosaicRequest must be normalized before validation")
         validate_inputs(
-            sort_method=self.sort_method,
+            scene_order=self.scene_order,
             mosaic_method=self.mosaic_method,
-            no_data_tolerance=self.no_data_tolerance,
-            required_bands=self.required_bands,
+            early_stop_missing_fraction=self.early_stop_missing_fraction,
+            bands=self.bands,
             grid_id=self.grid_id,
             percentile=self.percentile,
             resampling_method=self.resampling_method,
@@ -136,7 +141,7 @@ class MosaicRequest:
             input_crs=self.input_crs,
             resolution=self.resolution,
             cloud_mask=self.cloud_mask,
-            observation_target=self.observation_target,
+            min_observations=self.min_observations,
             tile_workers=self.tile_workers,
             adaptive_tiling=self.adaptive_tiling,
             min_coverage_fraction=self.min_coverage_fraction,
@@ -145,19 +150,19 @@ class MosaicRequest:
 
 
 def normalize_mosaic_inputs(
-    required_bands: Optional[List[str]],
+    bands: Optional[List[str]],
     additional_query: Optional[Dict[str, Any]],
-    sort_method: str,
-    sort_function: Optional[Any],
+    scene_order: str,
+    scene_sort_fn: Optional[Any],
     mosaic_method: str,
     percentile: Optional[float],
 ) -> Tuple[List[str], Dict[str, Any], str, str, Optional[float]]:
-    if required_bands is None:
-        required_bands = list(DEFAULT_REQUIRED_BANDS)
+    if bands is None:
+        bands = list(DEFAULT_BANDS)
     if additional_query is None:
         additional_query = dict(DEFAULT_ADDITIONAL_QUERY)
-    if sort_function is not None:
-        sort_method = SORT_CUSTOM
+    if scene_sort_fn is not None:
+        scene_order = SCENE_ORDER_CUSTOM
     if mosaic_method == "median":
         if percentile is not None:
             raise ValueError(
@@ -166,19 +171,19 @@ def normalize_mosaic_inputs(
         mosaic_method = MOSAIC_PERCENTILE
         percentile = 50.0
     return (
-        required_bands,
+        bands,
         additional_query,
-        sort_method,
+        scene_order,
         mosaic_method,
         percentile,
     )
 
 
 def validate_inputs(
-    sort_method: str,
+    scene_order: str,
     mosaic_method: str,
-    no_data_tolerance: Union[float, None],
-    required_bands: List[str],
+    early_stop_missing_fraction: Union[float, None],
+    bands: List[str],
     grid_id: Optional[str],
     percentile: Optional[float],
     resampling_method: str = "nearest",
@@ -186,12 +191,12 @@ def validate_inputs(
     input_crs: Optional[int] = None,
     resolution: Optional[int] = None,
     cloud_mask: str = CLOUD_MASK_OCM,
-    observation_target: Optional[int] = None,
+    min_observations: Optional[int] = None,
     tile_workers: Optional[int] = None,
     adaptive_tiling: bool = True,
     aoi: Optional[Polygon] = None,
     min_coverage_fraction: Optional[float] = None,
-    source: str = "MPC",
+    source: str = "AWS",
 ) -> None:
     from .sources import VALID_SOURCES
 
@@ -227,9 +232,9 @@ def validate_inputs(
         raise ValueError(
             f"Invalid cloud_mask: {cloud_mask}. Must be one of {VALID_CLOUD_MASKS}"
         )
-    if sort_method not in VALID_SORT_METHODS:
+    if scene_order not in VALID_SCENE_ORDERS:
         raise ValueError(
-            f"Invalid sort method: {sort_method}. Must be one of {VALID_SORT_METHODS}"
+            f"Invalid scene_order: {scene_order}. Must be one of {VALID_SCENE_ORDERS}"
         )
     if mosaic_method not in VALID_MOSAIC_METHODS:
         raise ValueError(
@@ -240,25 +245,27 @@ def validate_inputs(
             f"Invalid resampling method: {resampling_method}. "
             f"Must be one of {VALID_RESAMPLING_METHODS}"
         )
-    if no_data_tolerance is not None and not (0.0 <= no_data_tolerance <= 1.0):
+    if early_stop_missing_fraction is not None and not (
+        0.0 <= early_stop_missing_fraction <= 1.0
+    ):
         raise ValueError(
-            f"No data threshold must be between 0 and 1 or None, "
-            f"got {no_data_tolerance}"
+            f"early_stop_missing_fraction must be between 0 and 1 or None, "
+            f"got {early_stop_missing_fraction}"
         )
     if min_coverage_fraction is not None and not (0.0 <= min_coverage_fraction <= 1.0):
         raise ValueError(
             f"min_coverage_fraction must be between 0 and 1 or None, "
             f"got {min_coverage_fraction}"
         )
-    if observation_target is not None:
+    if min_observations is not None:
         if (
-            isinstance(observation_target, bool)
-            or not isinstance(observation_target, int)
-            or observation_target < 1
+            isinstance(min_observations, bool)
+            or not isinstance(min_observations, int)
+            or min_observations < 1
         ):
             raise ValueError(
-                "observation_target must be a positive integer or None, "
-                f"got {observation_target}"
+                "min_observations must be a positive integer or None, "
+                f"got {min_observations}"
             )
     if tile_workers is not None:
         if (
@@ -271,12 +278,12 @@ def validate_inputs(
             )
     if not isinstance(adaptive_tiling, bool):
         raise ValueError(f"adaptive_tiling must be a bool, got {adaptive_tiling}")
-    for band in required_bands:
+    for band in bands:
         if band not in VALID_BANDS:
             raise ValueError(
                 f"Invalid band: {band}, must be one of {sorted(VALID_BANDS)}"
             )
-    if "visual" in required_bands and len(required_bands) > 1:
+    if "visual" in bands and len(bands) > 1:
         raise ValueError("Cannot use visual band with other bands, must be used alone")
 
     if mosaic_method != MOSAIC_PERCENTILE and percentile is not None:

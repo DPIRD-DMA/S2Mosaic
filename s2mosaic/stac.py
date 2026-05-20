@@ -13,11 +13,12 @@ from pystac_client.stac_api_io import StacApiIO
 from shapely.geometry.polygon import Polygon
 from urllib3 import Retry
 
-from .config import SORT_NEWEST, SORT_OLDEST, SORT_VALID_DATA
+from .config import SCENE_ORDER_NEWEST, SCENE_ORDER_OLDEST, SCENE_ORDER_VALID_DATA
 from .helpers import pickle_cache
 from .sources import Source
 
 logger = logging.getLogger(__name__)
+STAC_READ_TIMEOUT_SECONDS = 30
 
 # Column names for the DataFrame produced by add_item_info().
 ITEM_COL = "item"
@@ -132,7 +133,10 @@ def search_for_items(
             status_forcelist=[502, 503, 504],
             allowed_methods=None,
         )
-        stac_api_io = StacApiIO(max_retries=retry)
+        stac_api_io = StacApiIO(
+            max_retries=retry,
+            timeout=STAC_READ_TIMEOUT_SECONDS,
+        )
         catalog = source.open_catalog(stac_io=stac_api_io)
         items = catalog.search(**query).item_collection()
         logger.info(f"Found {len(items)}")
@@ -160,7 +164,7 @@ def search_for_items(
     return pickle_cache("stac_search", cache_key, _do_search)
 
 
-def sort_items(items: DataFrame, sort_method: str) -> DataFrame:
+def sort_items(items: DataFrame, scene_order: str) -> DataFrame:
     # The valid_data branch round-robins by relative orbit so the early-stopped
     # mosaic blends scenes from different overpasses within a single MGRS tile.
     # In bounds mode an AOI may pull scenes from several MGRS tiles, where
@@ -168,7 +172,7 @@ def sort_items(items: DataFrame, sort_method: str) -> DataFrame:
     # the round-robin still produces a valid sort but is no longer "balance
     # acquisitions across passes". Acceptable today; revisit if bounds-mode
     # output quality becomes a concern.
-    if sort_method == SORT_VALID_DATA:
+    if scene_order == SCENE_ORDER_VALID_DATA:
         items_sorted = items.sort_values(GOOD_DATA_PCT_COL, ascending=False)
         orbits = items_sorted[ORBIT_COL].unique()
         orbit_groups = {
@@ -185,16 +189,16 @@ def sort_items(items: DataFrame, sort_method: str) -> DataFrame:
 
         items_sorted = pd.DataFrame(result).reset_index(drop=True)
 
-    elif sort_method == SORT_OLDEST:
+    elif scene_order == SCENE_ORDER_OLDEST:
         items_sorted = items.sort_values(DATETIME_COL, ascending=True).reset_index(
             drop=True
         )
-    elif sort_method == SORT_NEWEST:
+    elif scene_order == SCENE_ORDER_NEWEST:
         items_sorted = items.sort_values(DATETIME_COL, ascending=False).reset_index(
             drop=True
         )
     else:
-        raise ValueError("Invalid sort method, must be valid_data, oldest or newest")
+        raise ValueError("Invalid scene_order, must be valid_data, oldest or newest")
 
     return items_sorted
 

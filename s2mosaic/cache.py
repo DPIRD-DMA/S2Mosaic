@@ -6,7 +6,7 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar, Union
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, TypeVar, Union
 
 import numpy.typing as npt
 import rasterio as rio
@@ -47,7 +47,7 @@ def iter_ordered_fetches(
     fetch_fn: Callable[[int, Any], T],
     max_workers: int,
     on_complete: Optional[Callable[[int], None]] = None,
-) -> Iterator[Tuple[int, Union[T, Exception]]]:
+) -> Generator[Tuple[int, Union[T, Exception]], None, None]:
     """Fetch items concurrently while yielding results in input order.
 
     The next fetch is submitted before yielding each completed result so

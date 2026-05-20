@@ -134,7 +134,7 @@ def with_scene_retry(
 
 
 def get_band_template(
-    required_bands: List[str],
+    bands: List[str],
 ) -> Tuple[List[Tuple[str, int]], int, List[int]]:
     """Return per-band STAC asset/raster-band template + sizes.
 
@@ -149,7 +149,7 @@ def get_band_template(
     ``"visual"`` is the 3-band TCI asset; spectral requests are one asset
     per band, each reading raster band 1.
     """
-    is_visual = "visual" in required_bands
+    is_visual = "visual" in bands
     if is_visual:
         href_template: List[Tuple[str, int]] = [
             ("visual", 1),
@@ -158,8 +158,8 @@ def get_band_template(
         ]
         bands_count = 3
     else:
-        href_template = [(band, 1) for band in required_bands]
-        bands_count = len(required_bands)
+        href_template = [(band, 1) for band in bands]
+        bands_count = len(bands)
     href_band_indices = [band_idx for _, band_idx in href_template]
     return href_template, bands_count, href_band_indices
 

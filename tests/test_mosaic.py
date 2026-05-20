@@ -33,29 +33,29 @@ class TestMosaicInputValidation:
         with pytest.raises(ValueError, match="Grid .* is invalid"):
             mosaic(grid_id="12345", start_year=2023)
 
-    def test_invalid_sort_method(self):
-        """Test that invalid sort methods are rejected"""
-        with pytest.raises(ValueError, match="Invalid sort method"):
-            mosaic(grid_id="50HMH", start_year=2023, sort_method="invalid_method")
+    def test_invalid_scene_order(self):
+        """Test that invalid scene orders are rejected"""
+        with pytest.raises(ValueError, match="Invalid scene_order"):
+            mosaic(grid_id="50HMH", start_year=2023, scene_order="invalid_method")
 
     def test_invalid_mosaic_method(self):
         """Test that invalid mosaic methods are rejected"""
         with pytest.raises(ValueError, match="Invalid mosaic method"):
             mosaic(grid_id="50HMH", start_year=2023, mosaic_method="invalid_method")
 
-    def test_invalid_no_data_tolerance_negative(self):
-        """Test that negative no_data_tolerance is rejected"""
+    def test_invalid_early_stop_missing_fraction_negative(self):
+        """Test that negative early_stop_missing_fraction is rejected"""
         with pytest.raises(
-            ValueError, match="No data threshold must be between 0 and 1"
+            ValueError, match="early_stop_missing_fraction must be between 0 and 1"
         ):
-            mosaic(grid_id="50HMH", start_year=2023, no_data_tolerance=-0.1)
+            mosaic(grid_id="50HMH", start_year=2023, early_stop_missing_fraction=-0.1)
 
-    def test_invalid_no_data_tolerance_greater_than_one(self):
-        """Test that no_data_tolerance > 1 is rejected"""
+    def test_invalid_early_stop_missing_fraction_greater_than_one(self):
+        """Test that early_stop_missing_fraction > 1 is rejected"""
         with pytest.raises(
-            ValueError, match="No data threshold must be between 0 and 1"
+            ValueError, match="early_stop_missing_fraction must be between 0 and 1"
         ):
-            mosaic(grid_id="50HMH", start_year=2023, no_data_tolerance=1.5)
+            mosaic(grid_id="50HMH", start_year=2023, early_stop_missing_fraction=1.5)
 
     def test_invalid_band(self):
         """Test that invalid band names are rejected"""
@@ -63,13 +63,13 @@ class TestMosaicInputValidation:
             mosaic(
                 grid_id="50HMH",
                 start_year=2023,
-                required_bands=["B04", "INVALID_BAND"],
+                bands=["B04", "INVALID_BAND"],
             )
 
     def test_visual_band_with_other_bands(self):
         """Test that visual band cannot be used with other bands"""
         with pytest.raises(ValueError, match="Cannot use visual band with other bands"):
-            mosaic(grid_id="50HMH", start_year=2023, required_bands=["visual", "B04"])
+            mosaic(grid_id="50HMH", start_year=2023, bands=["visual", "B04"])
 
     def test_percentile_without_percentile_method(self):
         """Test that percentile parameter requires percentile method"""
@@ -145,7 +145,7 @@ class TestMosaicExportPath:
         result = mosaic(
             grid_id="50HMH",
             start_year=2023,
-            required_bands=["B04"],
+            bands=["B04"],
             output_path=output_path,
             overwrite=False,
         )
@@ -161,7 +161,7 @@ class TestMosaicExportPath:
         result = mosaic(
             bounds=(115.83, -31.97, 115.91, -31.94),
             start_year=2023,
-            required_bands=["B04"],
+            bands=["B04"],
             output_path=output_path,
             overwrite=False,
         )
@@ -178,11 +178,11 @@ class TestMosaicValidInputs:
     """
 
     DEFAULT_KWARGS = {
-        "sort_method": "valid_data",
+        "scene_order": "valid_data",
         "mosaic_method": "mean",
-        "no_data_tolerance": 0.01,
-        "observation_target": None,
-        "required_bands": ["B04", "B03", "B02", "B08"],
+        "early_stop_missing_fraction": 0.01,
+        "min_observations": None,
+        "bands": ["B04", "B03", "B02", "B08"],
         "grid_id": "50HMH",
         "percentile": None,
     }
@@ -194,8 +194,8 @@ class TestMosaicValidInputs:
         self._validate()
 
     @pytest.mark.parametrize("method", ["valid_data", "oldest", "newest"])
-    def test_valid_sort_methods(self, method):
-        self._validate(sort_method=method)
+    def test_valid_scene_orders(self, method):
+        self._validate(scene_order=method)
 
     @pytest.mark.parametrize("method", ["mean", "first"])
     def test_valid_mosaic_methods(self, method):
@@ -205,17 +205,17 @@ class TestMosaicValidInputs:
         self._validate(mosaic_method="percentile", percentile=50.0)
 
     @pytest.mark.parametrize("threshold", [0.0, 0.01, 0.5, 1.0, None])
-    def test_valid_no_data_tolerances(self, threshold):
-        self._validate(no_data_tolerance=threshold)
+    def test_valid_early_stop_missing_fractions(self, threshold):
+        self._validate(early_stop_missing_fraction=threshold)
 
     @pytest.mark.parametrize("target", [1, 2, 10, None])
-    def test_valid_observation_targets(self, target):
-        self._validate(observation_target=target)
+    def test_valid_min_observations(self, target):
+        self._validate(min_observations=target)
 
     @pytest.mark.parametrize("target", [0, -1, 1.5, "2", True])
-    def test_invalid_observation_targets(self, target):
-        with pytest.raises(ValueError, match="observation_target"):
-            self._validate(observation_target=target)
+    def test_invalid_min_observations(self, target):
+        with pytest.raises(ValueError, match="min_observations"):
+            self._validate(min_observations=target)
 
     @pytest.mark.parametrize(
         "bands",
@@ -241,7 +241,7 @@ class TestMosaicValidInputs:
         ],
     )
     def test_valid_bands(self, bands):
-        self._validate(required_bands=bands)
+        self._validate(bands=bands)
 
 
 @pytest.mark.slow
@@ -277,7 +277,7 @@ class TestMosaicEndToEnd:
             start_month=6,
             start_day=1,
             duration_days=7,
-            required_bands=["B04", "B03", "B02"],
+            bands=["B04", "B03", "B02"],
         )
 
         # Check if result is a tuple
@@ -335,7 +335,7 @@ class TestMosaicEndToEnd:
             start_day=1,
             duration_days=7,
             output_dir=temp_output_dir,
-            required_bands=["B04", "B03", "B02"],
+            bands=["B04", "B03", "B02"],
         )
 
         assert isinstance(result, Path)
@@ -353,7 +353,7 @@ class TestMosaicEndToEnd:
             start_day=1,
             duration_days=7,
             output_dir=temp_output_dir,
-            required_bands=["B04", "B03", "B02"],
+            bands=["B04", "B03", "B02"],
         )
 
         # Get file modification time
@@ -367,7 +367,7 @@ class TestMosaicEndToEnd:
             start_day=1,
             duration_days=7,
             output_dir=temp_output_dir,
-            required_bands=["B04", "B03", "B02"],
+            bands=["B04", "B03", "B02"],
             overwrite=False,
         )
 
@@ -375,8 +375,8 @@ class TestMosaicEndToEnd:
         assert result1 == result2
         assert result2.stat().st_mtime == original_mtime
 
-    @pytest.mark.parametrize("sort_method", ["valid_data", "oldest", "newest"])
-    def test_mosaic_different_sort_methods(self, sort_method):
+    @pytest.mark.parametrize("scene_order", ["valid_data", "oldest", "newest"])
+    def test_mosaic_different_scene_orders(self, scene_order):
         """Test mosaic with different sort methods"""
         result = mosaic(
             grid_id="50HMH",
@@ -384,8 +384,8 @@ class TestMosaicEndToEnd:
             start_month=6,
             start_day=1,
             duration_days=7,
-            sort_method=sort_method,
-            required_bands=["B04"],
+            scene_order=scene_order,
+            bands=["B04"],
         )
 
         assert isinstance(result, tuple)
@@ -404,7 +404,7 @@ class TestMosaicEndToEnd:
             start_day=1,
             duration_days=7,
             mosaic_method=mosaic_method,
-            required_bands=["B04"],
+            bands=["B04"],
         )
 
         assert isinstance(result, tuple)
@@ -422,7 +422,7 @@ class TestMosaicEndToEnd:
             duration_days=7,
             mosaic_method="percentile",
             percentile=percentile,
-            required_bands=["B04"],
+            bands=["B04"],
         )
 
         assert isinstance(result, tuple)
@@ -437,7 +437,7 @@ class TestMosaicEndToEnd:
             start_month=6,
             start_day=1,
             duration_days=7,
-            required_bands=["visual"],
+            bands=["visual"],
         )
 
         assert isinstance(result, tuple)
@@ -456,7 +456,7 @@ class TestMosaicEndToEnd:
             start_month=6,
             start_day=1,
             duration_days=duration_days,
-            required_bands=["B04"],
+            bands=["B04"],
         )
         assert isinstance(result, tuple)
         array, profile = result
@@ -471,7 +471,7 @@ class TestMosaicEndToEnd:
             start_month=start_month,
             start_day=1,
             duration_months=1,
-            required_bands=["B04"],
+            bands=["B04"],
             additional_query={"eo:cloud_cover": {"lt": cloud_cover_lt}},
         )
         assert isinstance(result, tuple)
@@ -488,13 +488,13 @@ class TestMosaicEndToEnd:
                 start_month=6,
                 start_day=1,
                 duration_days=1,  # Single day
-                required_bands=["B04"],
+                bands=["B04"],
                 additional_query={
                     "eo:cloud_cover": {"lt": 0.1}
                 },  # Very low cloud cover
             )
 
-    def test_mosaic_custom_sort_function(self):
+    def test_mosaic_custom_scene_sort_fn(self):
         """Test mosaic with custom sort function"""
 
         def custom_sort(items):
@@ -507,8 +507,8 @@ class TestMosaicEndToEnd:
             start_month=6,
             start_day=1,
             duration_days=7,
-            sort_function=custom_sort,
-            required_bands=["B04"],
+            scene_sort_fn=custom_sort,
+            bands=["B04"],
         )
 
         assert isinstance(result, tuple)
@@ -524,7 +524,7 @@ class TestMosaicEndToEnd:
             start_month=6,
             start_day=1,
             duration_days=7,
-            required_bands=["B04", "B03", "B02"],
+            bands=["B04", "B03", "B02"],
             cloud_mask=cloud_mask,
         )
         assert isinstance(result, tuple)
@@ -555,9 +555,9 @@ class TestMosaicFileNaming:
             start_day=1,
             duration_days=7,
             output_dir=temp_output_dir,
-            sort_method="oldest",
+            scene_order="oldest",
             mosaic_method="mean",
-            required_bands=["B04", "B03", "B02"],
+            bands=["B04", "B03", "B02"],
         )
 
         expected_pattern = "50HMH_2023-06-01_to_2023-06-08_oldest_mean_B04_B03_B02.tif"
@@ -572,9 +572,9 @@ class TestMosaicFileNaming:
             start_day=15,
             duration_months=1,
             output_dir=temp_output_dir,
-            sort_method="newest",
+            scene_order="newest",
             mosaic_method="first",
-            required_bands=["visual"],
+            bands=["visual"],
         )
 
         expected_pattern = "50HMH_2022-12-15_to_2023-01-15_newest_first_visual.tif"
@@ -627,7 +627,7 @@ class TestMosaicBoundsEndToEnd:
         arr, profile = mosaic(
             bounds=self.AOI_SMALL,
             **self.DATE_KW,
-            required_bands=["B04", "B03", "B02"],
+            bands=["B04", "B03", "B02"],
             mosaic_method="percentile",
             percentile=50,
             resolution=resolution,
@@ -648,7 +648,7 @@ class TestMosaicBoundsEndToEnd:
         arr, profile = mosaic(
             bounds=self.AOI_SMALL,
             **self.DATE_KW,
-            required_bands=["B04"],
+            bands=["B04"],
             mosaic_method=method,
             additional_query=self.QUERY,
             **kw,
@@ -663,7 +663,7 @@ class TestMosaicBoundsEndToEnd:
             start_month=6,
             start_day=1,
             duration_months=2,
-            required_bands=["B04"],
+            bands=["B04"],
             mosaic_method="percentile",
             additional_query=self.QUERY,
         )
@@ -683,13 +683,13 @@ class TestMosaicBoundsEndToEnd:
 
     # --- Sort methods ---
     @pytest.mark.parametrize("sort", ["valid_data", "oldest", "newest"])
-    def test_sort_methods(self, sort):
+    def test_scene_orders(self, sort):
         arr, profile = mosaic(
             bounds=self.AOI_SMALL,
             **self.DATE_KW,
-            required_bands=["B04"],
+            bands=["B04"],
             mosaic_method="first",
-            sort_method=sort,
+            scene_order=sort,
             additional_query=self.QUERY,
         )
         self._assert_basic_geotiff(arr, profile, expect_bands=1)
@@ -710,7 +710,7 @@ class TestMosaicBoundsEndToEnd:
         arr, profile = mosaic(
             bounds=self.AOI_SMALL,
             **self.DATE_KW,
-            required_bands=bands,
+            bands=bands,
             mosaic_method="percentile",
             percentile=50,
             additional_query=self.QUERY,
@@ -725,7 +725,7 @@ class TestMosaicBoundsEndToEnd:
         arr, profile = mosaic(
             bounds=self.AOI_SMALL,
             **self.DATE_KW,
-            required_bands=["B04", "B03", "B02"],
+            bands=["B04", "B03", "B02"],
             mosaic_method="percentile",
             percentile=50,
             resolution=30,  # forces actual resampling
@@ -743,7 +743,7 @@ class TestMosaicBoundsEndToEnd:
         arr, profile = mosaic(
             bounds=self.AOI_SMALL,
             **self.DATE_KW,
-            required_bands=["visual"],
+            bands=["visual"],
             mosaic_method="first",
             additional_query=self.QUERY,
         )
@@ -754,7 +754,7 @@ class TestMosaicBoundsEndToEnd:
         arr, profile = mosaic(
             bounds=self.AOI_CROSS_TILE,
             **self.DATE_KW,
-            required_bands=["B04", "B03", "B02"],
+            bands=["B04", "B03", "B02"],
             mosaic_method="percentile",
             percentile=50,
             additional_query=self.QUERY,
@@ -767,7 +767,7 @@ class TestMosaicBoundsEndToEnd:
         arr, profile = mosaic(
             bounds=self.AOI_SMALL,
             **self.DATE_KW,
-            required_bands=["B04"],
+            bands=["B04"],
             mosaic_method="percentile",
             percentile=50,
             min_coverage_fraction=threshold,
@@ -775,17 +775,17 @@ class TestMosaicBoundsEndToEnd:
         )
         self._assert_basic_geotiff(arr, profile, expect_bands=1)
 
-    # --- no_data_tolerance (early termination) ---
+    # --- early_stop_missing_fraction (early termination) ---
     @pytest.mark.parametrize("threshold", [None, 0.001, 0.5])
-    def test_no_data_tolerance(self, threshold):
+    def test_early_stop_missing_fraction(self, threshold):
         # Longer duration so we exercise multi-scene early termination
         date_kw = {**self.DATE_KW, "duration_days": 30}
         arr, profile = mosaic(
             bounds=self.AOI_SMALL,
             **date_kw,
-            required_bands=["B04"],
+            bands=["B04"],
             mosaic_method="first",  # early termination is meaningful
-            no_data_tolerance=threshold,
+            early_stop_missing_fraction=threshold,
             additional_query=self.QUERY,
         )
         self._assert_basic_geotiff(arr, profile, expect_bands=1)
@@ -796,7 +796,7 @@ class TestMosaicBoundsEndToEnd:
         arr, profile = mosaic(
             bounds=self.AOI_SMALL,
             **self.DATE_KW,
-            required_bands=["B04"],
+            bands=["B04"],
             mosaic_method="percentile",
             percentile=50,
             output_crs=3857,
@@ -814,7 +814,7 @@ class TestMosaicBoundsEndToEnd:
             bounds=utm_bounds,
             input_crs=32750,
             **self.DATE_KW,
-            required_bands=["B04"],
+            bands=["B04"],
             mosaic_method="percentile",
             percentile=50,
             additional_query=self.QUERY,
@@ -828,7 +828,7 @@ class TestMosaicBoundsEndToEnd:
             bounds=self.AOI_SMALL,
             **self.DATE_KW,
             output_dir=tmp_path,
-            required_bands=["B04"],
+            bands=["B04"],
             mosaic_method="percentile",
             percentile=50,
             additional_query=self.QUERY,
@@ -843,7 +843,7 @@ class TestMosaicBoundsEndToEnd:
             bounds=self.AOI_SMALL,
             **self.DATE_KW,
             output_dir=tmp_path,
-            required_bands=["B04"],
+            bands=["B04"],
             mosaic_method="percentile",
             percentile=50,
             additional_query=self.QUERY,
@@ -861,7 +861,7 @@ class TestMosaicBoundsEndToEnd:
             mosaic(
                 bounds=self.AOI_SMALL,
                 **date_kw,
-                required_bands=["B04"],
+                bands=["B04"],
                 additional_query={"eo:cloud_cover": {"lt": 0.001}},
             )
 
@@ -872,7 +872,7 @@ class TestMosaicBoundsEndToEnd:
         arr, profile = mosaic(
             bounds=self.AOI_SMALL,
             **self.DATE_KW,
-            required_bands=["B04", "B03", "B02"],
+            bands=["B04", "B03", "B02"],
             mosaic_method="percentile",
             percentile=50,
             additional_query=self.QUERY,
@@ -885,7 +885,7 @@ class TestMosaicBoundsEndToEnd:
         arr, profile = mosaic(
             bounds=self.AOI_SMALL,
             **self.DATE_KW,
-            required_bands=["B04"],
+            bands=["B04"],
             mosaic_method="first",
             additional_query=self.QUERY,
             cloud_mask="SCL",
@@ -897,7 +897,7 @@ class TestMosaicBoundsEndToEnd:
         arr, profile = mosaic(
             bounds=self.AOI_SMALL,
             **self.DATE_KW,
-            required_bands=["visual"],
+            bands=["visual"],
             mosaic_method="first",
             additional_query=self.QUERY,
             cloud_mask="SCL",
@@ -909,7 +909,7 @@ class TestMosaicBoundsEndToEnd:
         arr, profile = mosaic(
             bounds=self.AOI_CROSS_TILE,
             **self.DATE_KW,
-            required_bands=["B04"],
+            bands=["B04"],
             mosaic_method="percentile",
             percentile=50,
             additional_query=self.QUERY,
@@ -924,7 +924,7 @@ class TestMosaicBoundsEndToEnd:
         kw = dict(
             bounds=self.AOI_SMALL,
             **self.DATE_KW,
-            required_bands=["B04"],
+            bands=["B04"],
             mosaic_method="percentile",
             percentile=50,
             additional_query=self.QUERY,
@@ -942,7 +942,7 @@ class TestMosaicBoundsEndToEnd:
         kw = dict(
             bounds=self.AOI_SMALL,
             **self.DATE_KW,
-            required_bands=["B04"],
+            bands=["B04"],
             mosaic_method="percentile",
             percentile=50,
             additional_query=self.QUERY,

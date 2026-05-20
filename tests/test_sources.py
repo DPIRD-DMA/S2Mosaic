@@ -121,11 +121,11 @@ class TestValidateInputsRejectsBadSource:
     """validate_inputs should reject sources not in VALID_SOURCES."""
 
     BASE_KWARGS = {
-        "sort_method": "valid_data",
+        "scene_order": "valid_data",
         "mosaic_method": "mean",
-        "no_data_tolerance": 0.0,
-        "observation_target": None,
-        "required_bands": ["B04"],
+        "early_stop_missing_fraction": None,
+        "min_observations": None,
+        "bands": ["B04"],
         "grid_id": "50HMH",
         "percentile": None,
     }
@@ -141,12 +141,12 @@ class TestValidateInputsRejectsBadSource:
 
 
 class TestMosaicPublicApiSource:
-    def test_mosaic_signature_has_source_param_defaulting_to_mpc(self):
+    def test_mosaic_signature_has_source_param_defaulting_to_aws(self):
         import inspect
 
         sig = inspect.signature(mosaic)
         assert "source" in sig.parameters
-        assert sig.parameters["source"].default == SOURCE_MPC
+        assert sig.parameters["source"].default == SOURCE_AWS
 
     def test_mosaic_rejects_invalid_source_string(self):
         with pytest.raises(ValueError, match="GCS"):
@@ -175,13 +175,13 @@ class TestSourceThreadsThroughBoundsPipeline:
                 bounds=(115.83, -31.97, 115.91, -31.94),
                 start_year=2023,
                 duration_days=1,
-                required_bands=["B04"],
+                bands=["B04"],
                 source=SOURCE_AWS,
             )
 
         assert captured["source"] is AWS
 
-    def test_mpc_source_reaches_bounds_search_by_default(self, monkeypatch):
+    def test_aws_source_reaches_bounds_search_by_default(self, monkeypatch):
         captured = {}
 
         def fake_search(*, bbox_4326, start_date, end_date, source, **_):
@@ -197,10 +197,10 @@ class TestSourceThreadsThroughBoundsPipeline:
                 bounds=(115.83, -31.97, 115.91, -31.94),
                 start_year=2023,
                 duration_days=1,
-                required_bands=["B04"],
+                bands=["B04"],
             )
 
-        assert captured["source"] is MPC
+        assert captured["source"] is AWS
 
 
 class TestSourceThreadsThroughGridPipeline:
@@ -222,7 +222,7 @@ class TestSourceThreadsThroughGridPipeline:
                 grid_id="50HMH",
                 start_year=2023,
                 duration_days=1,
-                required_bands=["B04"],
+                bands=["B04"],
                 source=SOURCE_AWS,
             )
 

@@ -63,6 +63,7 @@ dev = [
     "jupyter>=1.1.1",
     "matplotlib>=3.10.9",
     "mypy>=1.19",
+    "nbmake>=1.5.5",
     "pre-commit>=4.0",
     "pytest>=8.4.0",
     "ruff>=0.12.2",

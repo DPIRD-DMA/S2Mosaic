@@ -2,7 +2,7 @@
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -46,10 +46,10 @@ def run_grid_pipeline(
     source: Source,
 ) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
     """Grid-id mode pipeline. Called from mosaic() for full-MGRS mosaics."""
-    required_bands = request.required_bands
+    bands = request.bands
     additional_query = request.additional_query
     assert request.grid_id is not None
-    assert required_bands is not None
+    assert bands is not None
     assert additional_query is not None
 
     logger.info(
@@ -57,7 +57,7 @@ def run_grid_pipeline(
         f"from {request.start_year}-{request.start_month:02d}-{request.start_day:02d} "
         f"to {request.duration_years} years, {request.duration_months} months, "
         f"{request.duration_days} days later using {request.mosaic_method} method "
-        f"with bands {required_bands}."
+        f"with bands {bands}."
     )
 
     start_date, end_date = define_dates(
@@ -89,9 +89,9 @@ def run_grid_pipeline(
         grid_id=request.grid_id,
         start_date=start_date,
         end_date=end_date,
-        sort_method=request.sort_method,
+        scene_order=request.scene_order,
         mosaic_method=request.mosaic_method,
-        required_bands=required_bands,
+        bands=bands,
         percentile=request.percentile,
         source_name=source.name,
         resolution=request.resolution,
@@ -136,16 +136,16 @@ def run_grid_pipeline(
         )
 
     items_with_orbits = add_item_info(items)
-    if request.sort_function:
-        sorted_items = request.sort_function(items=items_with_orbits)
+    if request.scene_sort_fn:
+        sorted_items = request.scene_sort_fn(items=items_with_orbits)
     else:
         sorted_items = sort_items(
             items=items_with_orbits,
-            sort_method=request.sort_method,
+            scene_order=request.scene_order,
         )
 
     logger.info(
-        f"Sorted {len(sorted_items)} scenes using {request.sort_method} method."
+        f"Sorted {len(sorted_items)} scenes using {request.scene_order} method."
     )
 
     output_coverage_mask = (
@@ -153,10 +153,10 @@ def run_grid_pipeline(
     )
     mosaic, profile = stream_mosaic_pipeline(
         sorted_scenes=sorted_items,
-        required_bands=required_bands,
-        no_data_tolerance=request.no_data_tolerance,
+        bands=bands,
+        early_stop_missing_fraction=request.early_stop_missing_fraction,
         source=source,
-        observation_target=request.observation_target,
+        min_observations=request.min_observations,
         export_path=export_path,
         output_coverage_mask=output_coverage_mask,
         mosaic_method=request.mosaic_method,
@@ -179,7 +179,7 @@ def run_grid_pipeline(
     return finalize_output(
         array=mosaic,
         profile=profile,
-        required_bands=required_bands,
+        bands=bands,
         coverage_mask=output_coverage_mask,
         export_path=export_path,
     )
@@ -187,11 +187,11 @@ def run_grid_pipeline(
 
 def stream_mosaic_pipeline(
     sorted_scenes: pd.DataFrame,
-    required_bands: List[str],
+    bands: List[str],
     coverage_mask: npt.NDArray[Any],
-    no_data_tolerance: Union[float, None],
+    early_stop_missing_fraction: Union[float, None],
     source: Optional[Source] = None,
-    observation_target: Optional[int] = None,
+    min_observations: Optional[int] = None,
     export_path: Optional[Path] = None,
     output_coverage_mask: Optional[npt.NDArray[Any]] = None,
     mosaic_method: str = "mean",
@@ -214,15 +214,15 @@ def stream_mosaic_pipeline(
     set is per-worker (a few hundred MB), so 34-scene full-MGRS percentile
     mosaics that previously needed ~65 GB of RAM now fit in a few GB.
 
-    ``observation_target`` is an optional per-tile early-stop target for
+    ``min_observations`` is an optional per-tile early-stop target for
     ``mean`` and ``percentile``: each tile walks scenes in priority order and
     stops once every coverable pixel has at least that many valid observations.
     ``first`` always stops once every coverable pixel has its first observation.
     """
     if source is None:
-        from ..sources import MPC
+        from ..sources import AWS
 
-        source = MPC
+        source = AWS
     ocm_resolution = pick_ocm_resolution(resolution)
     logger.info(f"OCM resolution: {ocm_resolution}m")
     possible_pixel_count = coverage_mask.sum()
@@ -230,8 +230,8 @@ def stream_mosaic_pipeline(
 
     items: List[Any] = sorted_scenes[ITEM_COL].tolist()
     n_scenes = len(items)
-    is_visual = "visual" in required_bands
-    href_template, bands_count, _ = get_band_template(required_bands)
+    is_visual = "visual" in bands
+    href_template, bands_count, _ = get_band_template(bands)
 
     # Phase 1: compute per-scene combo masks in sorted order with bounded
     # prefetch. This keeps early-stop decisions deterministic while allowing
@@ -274,7 +274,9 @@ def stream_mosaic_pipeline(
         if _pb is not None:
             _pb.update(1)
 
-    mask_iter: Iterator[Tuple[int, Union[Optional[npt.NDArray[Any]], Exception]]]
+    mask_iter: Generator[
+        Tuple[int, Union[Optional[npt.NDArray[Any]], Exception]], None, None
+    ]
     mask_iter = iter_ordered_fetches(
         items=items,
         fetch_fn=_fetch_mask,
@@ -329,25 +331,34 @@ def stream_mosaic_pipeline(
             good_pixel_tracker |= combo
 
             if (
-                no_data_tolerance is not None
+                early_stop_missing_fraction is not None
                 and mosaic_method != MOSAIC_PERCENTILE
                 and possible_pixel_count > 0
             ):
                 completed = int((coverage_mask & good_pixel_tracker).sum())
                 no_data_sum = int(possible_pixel_count) - completed
-                if no_data_sum < possible_pixel_count * no_data_tolerance:
+                if no_data_sum < possible_pixel_count * early_stop_missing_fraction:
                     logger.info(
-                        "no_data_tolerance met after %d kept scenes (%d/%d examined)",
+                        "early_stop_missing_fraction met after %d kept scenes "
+                        "(%d/%d examined)",
                         sum(1 for m in masks if m is not None),
                         scene_idx + 1,
                         n_scenes,
                     )
                     break
     finally:
+        # Close the prefetch iterator first so its on_complete callbacks
+        # (running in worker threads) can't fire ``update(1)`` after we snap
+        # and close the bar.
+        mask_iter.close()
         if mask_progress is not None:
-            remaining = mask_progress.total - mask_progress.n
-            if remaining > 0:
-                mask_progress.update(remaining)
+            # Early-stop paths (FIRST coverage filled, early_stop_missing_fraction
+            # met) leave the bar short. Snap to total and force a refresh — setting
+            # ``n`` directly bypasses ``update``'s min-interval throttling so the
+            # final 100% state actually renders before ``close``.
+            if mask_progress.n < mask_progress.total:
+                mask_progress.n = mask_progress.total
+                mask_progress.refresh()
             mask_progress.close()
 
     n_succeeded = sum(1 for m in masks if m is not None)
@@ -378,7 +389,7 @@ def stream_mosaic_pipeline(
         resolution=resolution,
         resampling_method=resampling_method,
         prewarm=should_prewarm_sources(
-            mosaic_method, no_data_tolerance, observation_target
+            mosaic_method, early_stop_missing_fraction, min_observations
         ),
     )
 
@@ -392,11 +403,24 @@ def stream_mosaic_pipeline(
         last_profile["dtype"] = out_dtype
         last_profile["count"] = bands_count
 
+        # Pick the smallest adaptive sub-tile that still aligns with source
+        # COG blocks for every band being read. AWS Earth Search uses
+        # 1024-pixel blocks for 10m bands while MPC uses 512 throughout —
+        # going below the max source block only wastes the fringe of each
+        # block-aligned read without reducing bytes-on-wire.
+        min_tile_size = source.max_block_size_for_bands(bands)
+        logger.info(
+            "Adaptive tile min size: %d (source=%s, bands=%s)",
+            min_tile_size,
+            source.name,
+            bands,
+        )
+
         if export_path is not None:
             write_tile_aggregation_geotiff(
                 export_path=export_path,
                 profile=last_profile,
-                required_bands=required_bands,
+                bands=bands,
                 masks=masks,
                 read_fn=read_fn,
                 bands_count=bands_count,
@@ -404,8 +428,8 @@ def stream_mosaic_pipeline(
                 width=s2_scene_size,
                 coverage_mask=coverage_mask,
                 output_coverage_mask=output_coverage_mask,
-                no_data_tolerance=no_data_tolerance,
-                observation_target=observation_target,
+                early_stop_missing_fraction=early_stop_missing_fraction,
+                min_observations=min_observations,
                 mosaic_method=mosaic_method,
                 percentile=percentile,
                 tile_size=tile_size,
@@ -413,6 +437,7 @@ def stream_mosaic_pipeline(
                 out_dtype=out_dtype,
                 adaptive_tiling=adaptive_tiling,
                 show_progress=show_progress,
+                min_tile_size=min_tile_size,
             )
             return None, last_profile
 
@@ -423,8 +448,8 @@ def stream_mosaic_pipeline(
             height=s2_scene_size,
             width=s2_scene_size,
             coverage_mask=coverage_mask,
-            no_data_tolerance=no_data_tolerance,
-            observation_target=observation_target,
+            early_stop_missing_fraction=early_stop_missing_fraction,
+            min_observations=min_observations,
             mosaic_method=mosaic_method,
             percentile=percentile,
             tile_size=tile_size,
@@ -432,6 +457,7 @@ def stream_mosaic_pipeline(
             out_dtype=out_dtype,
             adaptive_tiling=adaptive_tiling,
             show_progress=show_progress,
+            min_tile_size=min_tile_size,
         )
         return out, last_profile
     finally:

@@ -8,7 +8,7 @@ from .config import MosaicRequest
 from .geometry import Aoi, Bbox
 from .pipelines.bounds import run_bounds_pipeline
 from .pipelines.grid import run_grid_pipeline
-from .sources import SOURCE_MPC, get_source
+from .sources import SOURCE_AWS, get_source
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ def mosaic(
     duration_years: int = ...,
     duration_months: int = ...,
     duration_days: int = ...,
-    required_bands: Optional[List[str]] = ...,
+    bands: Optional[List[str]] = ...,
     mosaic_method: str = ...,
     percentile: Optional[float] = ...,
     output_dir: None = None,
@@ -37,12 +37,12 @@ def mosaic(
     resampling_method: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
     source: str = ...,
-    no_data_tolerance: Union[float, None] = ...,
-    observation_target: Optional[int] = ...,
+    early_stop_missing_fraction: Union[float, None] = ...,
+    min_observations: Optional[int] = ...,
     min_coverage_fraction: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
-    sort_method: str = ...,
-    sort_function: Optional[Callable[..., Any]] = ...,
+    scene_order: str = ...,
+    scene_sort_fn: Optional[Callable[..., Any]] = ...,
     cloud_mask: str = ...,
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
@@ -65,7 +65,7 @@ def mosaic(
     duration_years: int = ...,
     duration_months: int = ...,
     duration_days: int = ...,
-    required_bands: Optional[List[str]] = ...,
+    bands: Optional[List[str]] = ...,
     mosaic_method: str = ...,
     percentile: Optional[float] = ...,
     output_dir: Union[Path, str],
@@ -76,12 +76,12 @@ def mosaic(
     resampling_method: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
     source: str = ...,
-    no_data_tolerance: Union[float, None] = ...,
-    observation_target: Optional[int] = ...,
+    early_stop_missing_fraction: Union[float, None] = ...,
+    min_observations: Optional[int] = ...,
     min_coverage_fraction: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
-    sort_method: str = ...,
-    sort_function: Optional[Callable[..., Any]] = ...,
+    scene_order: str = ...,
+    scene_sort_fn: Optional[Callable[..., Any]] = ...,
     cloud_mask: str = ...,
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
@@ -104,7 +104,7 @@ def mosaic(
     duration_years: int = ...,
     duration_months: int = ...,
     duration_days: int = ...,
-    required_bands: Optional[List[str]] = ...,
+    bands: Optional[List[str]] = ...,
     mosaic_method: str = ...,
     percentile: Optional[float] = ...,
     output_dir: None = None,
@@ -115,12 +115,12 @@ def mosaic(
     resampling_method: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
     source: str = ...,
-    no_data_tolerance: Union[float, None] = ...,
-    observation_target: Optional[int] = ...,
+    early_stop_missing_fraction: Union[float, None] = ...,
+    min_observations: Optional[int] = ...,
     min_coverage_fraction: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
-    sort_method: str = ...,
-    sort_function: Optional[Callable[..., Any]] = ...,
+    scene_order: str = ...,
+    scene_sort_fn: Optional[Callable[..., Any]] = ...,
     cloud_mask: str = ...,
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
@@ -142,7 +142,7 @@ def mosaic(
     duration_years: int = 0,
     duration_months: int = 0,
     duration_days: int = 0,
-    required_bands: Optional[List[str]] = None,
+    bands: Optional[List[str]] = None,
     mosaic_method: str = "mean",
     percentile: Optional[float] = None,
     output_dir: Optional[Union[Path, str]] = None,
@@ -152,13 +152,13 @@ def mosaic(
     resolution: int = 10,
     resampling_method: str = "nearest",
     additional_query: Optional[Dict[str, Any]] = None,
-    source: str = SOURCE_MPC,
-    no_data_tolerance: Union[float, None] = 0.0,
-    observation_target: Optional[int] = None,
-    min_coverage_fraction: Optional[float] = 0.1,
+    source: str = SOURCE_AWS,
+    early_stop_missing_fraction: Union[float, None] = None,
+    min_observations: Optional[int] = None,
+    min_coverage_fraction: Optional[float] = None,
     ignore_duplicate_items: bool = True,
-    sort_method: str = "valid_data",
-    sort_function: Optional[Callable[..., Any]] = None,
+    scene_order: str = "valid_data",
+    scene_sort_fn: Optional[Callable[..., Any]] = None,
     cloud_mask: str = "OCM",
     ocm_batch_size: int = 1,
     ocm_inference_dtype: str = "bf16",
@@ -195,7 +195,7 @@ def mosaic(
         duration_years (int, optional): Duration in years to add to the start date. Defaults to 0.
         duration_months (int, optional): Duration in months to add to the start date. Defaults to 0.
         duration_days (int, optional): Duration in days to add to the start date. Defaults to 0.
-        required_bands (List[str], optional): List of required spectral bands.
+        bands (List[str], optional): List of spectral bands.
             Defaults to ["B04", "B03", "B02", "B08"] (Red, Green, Blue, NIR).
         mosaic_method (str, optional): Method to create the mosaic. Options are "mean", "first", "median" or "percentile". Defaults to "mean".
         percentile (Optional[float], optional): Percentile to calculate
@@ -217,26 +217,26 @@ def mosaic(
             "bilinear", "cubic", "average", and "lanczos". Defaults to "nearest".
         additional_query (Dict[str, Any], optional): Additional query parameters for STAC API.
             Defaults to {"eo:cloud_cover": {"lt": 100}}.
-        source (str, optional): STAC imagery source. ``"MPC"`` (default) uses
-            Microsoft Planetary Computer (SAS-signed URLs); ``"AWS"`` uses
-            Element 84 Earth Search on AWS Open Data (public S3, no auth).
-            Defaults to "MPC".
-        no_data_tolerance (float, optional): Early-stop fraction for scene
+        source (str, optional): STAC imagery source. ``"AWS"`` (default) uses
+            Element 84 Earth Search on AWS Open Data (public S3, no auth);
+            ``"MPC"`` uses Microsoft Planetary Computer (SAS-signed URLs).
+            Defaults to "AWS".
+        early_stop_missing_fraction (float, optional): Early-stop fraction for scene
             ingestion. Stops reading further scenes once the AOI's no-data
-            fraction drops below this value. Set to ``0.0`` (default) or
-            ``None`` to examine every available scene. Ignored for
-            ``percentile`` mosaic methods. Defaults to 0.0.
-        observation_target (int, optional): Per-tile early-stop target
+            fraction drops below this value. Set to ``None`` (default) or
+            ``0.0`` to examine every available scene. Ignored for
+            ``percentile`` mosaic methods. Defaults to None.
+        min_observations (int, optional): Per-tile early-stop target
             for ``mean`` and ``percentile``. When set, aggregation stops
             reading later scenes for a tile once every coverable pixel has at
             least this many valid observations. This is not an output quality
             filter. Defaults to None.
         min_coverage_fraction (float, optional): Drop pixels covered by fewer
             than this fraction of overlapping scenes. Set to None to disable.
-            Defaults to 0.1.
+            Defaults to None.
         ignore_duplicate_items (bool, optional): Whether to remove duplicate scenes based on their IDs. Defaults to True.
-        sort_method (str, optional): Method to sort scenes. Options are "valid_data", "oldest", or "newest". Defaults to "valid_data".
-        sort_function (Callable, optional): Custom sorting function. If provided, overrides sort_method.
+        scene_order (str, optional): Scene ordering. Options are "valid_data", "oldest", or "newest". Defaults to "valid_data".
+        scene_sort_fn (Callable, optional): Custom sorting function. If provided, overrides scene_order.
         cloud_mask (str, optional): Cloud-mask provider. ``"OCM"`` (default) runs the
             OmniCloudMask deep-learning model on R+G+NIR; ``"SCL"`` reads the L2A
             Scene Classification Layer published with the scene. SCL is much cheaper
@@ -266,7 +266,7 @@ def mosaic(
 
     Note:
         - The function uses the STAC API to search for Sentinel-2 scenes.
-        - If 'visual' is included in required_bands, it will be replaced with 'Red', 'Green', 'Blue' in the output.
+        - If 'visual' is included in bands, it will be replaced with 'Red', 'Green', 'Blue' in the output.
         - The time range for scene selection is inclusive of the start date and exclusive of the end date.
     """  # noqa: E501
     request = MosaicRequest(
@@ -280,7 +280,7 @@ def mosaic(
         duration_years=duration_years,
         duration_months=duration_months,
         duration_days=duration_days,
-        required_bands=required_bands,
+        bands=bands,
         mosaic_method=mosaic_method,
         percentile=percentile,
         output_dir=output_dir,
@@ -291,12 +291,12 @@ def mosaic(
         resampling_method=resampling_method,
         additional_query=additional_query,
         source=source,
-        no_data_tolerance=no_data_tolerance,
-        observation_target=observation_target,
+        early_stop_missing_fraction=early_stop_missing_fraction,
+        min_observations=min_observations,
         min_coverage_fraction=min_coverage_fraction,
         ignore_duplicate_items=ignore_duplicate_items,
-        sort_method=sort_method,
-        sort_function=sort_function,
+        scene_order=scene_order,
+        scene_sort_fn=scene_sort_fn,
         cloud_mask=cloud_mask,
         ocm_batch_size=ocm_batch_size,
         ocm_inference_dtype=ocm_inference_dtype,

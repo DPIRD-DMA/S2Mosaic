@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Iterable, Optional
 
 import pystac_client
 from pystac_client.stac_api_io import StacApiIO
@@ -50,6 +50,12 @@ class Source:
     # Map of canonical band/asset name -> provider's STAC asset key.
     # Lookups fall through to the canonical name when not in the map.
     band_assets: Dict[str, str] = field(default_factory=dict)
+    # Per-asset internal COG block size (square). Used by the tile-aggregation
+    # path to pick output tile sizes that align with source blocks so each
+    # tile read fetches whole blocks rather than fringes. Unlisted assets
+    # fall back to ``default_block_size``.
+    asset_block_sizes: Dict[str, int] = field(default_factory=dict)
+    default_block_size: int = 512
     # Builder for a STAC ``query`` clause restricting to a single MGRS tile.
     # Returns ``None`` for providers that don't expose a single-field MGRS
     # property (callers then rely on the ``intersects`` geometry filter alone).
@@ -57,6 +63,23 @@ class Source:
 
     def asset_name(self, canonical: str) -> str:
         return self.band_assets.get(canonical, canonical)
+
+    def block_size(self, canonical: str) -> int:
+        """Internal COG block size for ``canonical`` band on this source."""
+        return self.asset_block_sizes.get(canonical, self.default_block_size)
+
+    def max_block_size_for_bands(self, bands: Iterable[str]) -> int:
+        """Largest block size across ``bands``.
+
+        When the aggregation reads several bands per tile, the smallest
+        useful output tile is the *largest* source block among those bands:
+        anything smaller still fetches whole source blocks and wastes the
+        fringe. Returning the max gives the tile sizer a safe lower bound.
+        """
+        sizes = [self.block_size(b) for b in bands]
+        if not sizes:
+            return self.default_block_size
+        return max(sizes)
 
     def mgrs_query(self, grid_id: str) -> Optional[Dict[str, Any]]:
         if self._mgrs_query is None:
@@ -123,6 +146,20 @@ AWS = Source(
         "SCL": "scl",
         # "visual" is the same key on both providers.
     },
+    # Element 84's Sentinel-2 L2A COGs use 1024-pixel blocks for the
+    # native-10m bands (verified for B02/B03/B04/B08/visual) and 512-pixel
+    # blocks for SCL. Bands not yet measured fall back to default_block_size
+    # (512), which is safe — a smaller default just means the adaptive tiler
+    # is allowed to split tiles further than strictly optimal.
+    asset_block_sizes={
+        "B02": 1024,
+        "B03": 1024,
+        "B04": 1024,
+        "B08": 1024,
+        "visual": 1024,
+        "SCL": 512,
+    },
+    default_block_size=512,
     # ``_mgrs_query=None``: see ``_aws_mgrs_query`` docstring — Earth Search
     # rejects ``query`` combined with ``intersects``. Grid-mode tile precision
     # is restored by ``search_for_items``'s post-filter on ``grid:code``.

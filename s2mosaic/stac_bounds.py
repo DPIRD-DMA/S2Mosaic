@@ -11,7 +11,7 @@ from urllib3 import Retry
 
 from .geometry import Aoi, Bbox
 from .sources import Source
-from .stac import filter_latest_processing_baselines
+from .stac import STAC_READ_TIMEOUT_SECONDS, filter_latest_processing_baselines
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,10 @@ def _search_for_items_by_geometry(
         status_forcelist=[502, 503, 504],
         allowed_methods=None,
     )
-    stac_api_io = StacApiIO(max_retries=retry)
+    stac_api_io = StacApiIO(
+        max_retries=retry,
+        timeout=STAC_READ_TIMEOUT_SECONDS,
+    )
     catalog = source.open_catalog(stac_io=stac_api_io)
     items = catalog.search(**query).item_collection()
     logger.info(f"Found {len(items)} items for {search_label}")
