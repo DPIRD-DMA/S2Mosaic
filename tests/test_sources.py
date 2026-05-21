@@ -13,6 +13,7 @@ sys.path.insert(0, str(project_root))
 from s2mosaic import SOURCE_AWS, SOURCE_MPC, mosaic
 from s2mosaic.config import validate_inputs
 from s2mosaic.sources import AWS, MPC, VALID_SOURCES, Source, get_source
+from s2mosaic.stac import STAC_RETRY_STATUS_CODES
 
 
 class TestSourceConstants:
@@ -115,6 +116,9 @@ class TestSourceCatalogConfig:
         # Element 84 hosts both L1C and L2A; we explicitly use L2A.
         assert AWS.stac_url == "https://earth-search.aws.element84.com/v1"
         assert AWS.collection_id == "sentinel-2-l2a"
+
+    def test_stac_retry_policy_includes_rate_limit_and_server_errors(self):
+        assert {408, 429, 500, 502, 503, 504}.issubset(STAC_RETRY_STATUS_CODES)
 
 
 class TestValidateInputsRejectsBadSource:

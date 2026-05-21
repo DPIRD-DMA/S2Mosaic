@@ -19,6 +19,7 @@ from .sources import Source
 
 logger = logging.getLogger(__name__)
 STAC_READ_TIMEOUT_SECONDS = 30
+STAC_RETRY_STATUS_CODES = [408, 429, 500, 502, 503, 504]
 
 # Column names for the DataFrame produced by add_item_info().
 ITEM_COL = "item"
@@ -130,8 +131,9 @@ def search_for_items(
         retry = Retry(
             total=5,
             backoff_factor=1,
-            status_forcelist=[502, 503, 504],
+            status_forcelist=STAC_RETRY_STATUS_CODES,
             allowed_methods=None,
+            respect_retry_after_header=True,
         )
         stac_api_io = StacApiIO(
             max_retries=retry,

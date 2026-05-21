@@ -11,7 +11,11 @@ from urllib3 import Retry
 
 from .geometry import Aoi, Bbox
 from .sources import Source
-from .stac import STAC_READ_TIMEOUT_SECONDS, filter_latest_processing_baselines
+from .stac import (
+    STAC_READ_TIMEOUT_SECONDS,
+    STAC_RETRY_STATUS_CODES,
+    filter_latest_processing_baselines,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,8 +95,9 @@ def _search_for_items_by_geometry(
     retry = Retry(
         total=5,
         backoff_factor=1,
-        status_forcelist=[502, 503, 504],
+        status_forcelist=STAC_RETRY_STATUS_CODES,
         allowed_methods=None,
+        respect_retry_after_header=True,
     )
     stac_api_io = StacApiIO(
         max_retries=retry,

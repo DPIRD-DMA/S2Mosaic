@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 import numpy.typing as npt
 from pystac.item_collection import ItemCollection
+from rasterio.errors import RasterioIOError
 from rasterio.crs import CRS
 from tqdm.auto import tqdm
 
@@ -123,9 +124,14 @@ def _fetch_one_ocm(
 
     def _read_band(band_name: str) -> npt.NDArray[Any]:
         href = source.sign(item.assets[source.asset_name(band_name)].href)
-        return _read_warpvrt(
-            href, 1, transform, width, height, target_crs_obj, rio_resampling
-        )
+        try:
+            return _read_warpvrt(
+                href, 1, transform, width, height, target_crs_obj, rio_resampling
+            )
+        except RasterioIOError as exc:
+            raise RasterioIOError(
+                f"OCM band {band_name} read failed for scene {item.id}"
+            ) from exc
 
     with ThreadPoolExecutor(max_workers=len(_OCM_BANDS)) as executor:
         bands = list(executor.map(_read_band, _OCM_BANDS))

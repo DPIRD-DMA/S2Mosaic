@@ -95,6 +95,18 @@ class SceneFetchError(Exception):
     """
 
 
+def _exception_chain_summary(exc: BaseException) -> str:
+    """Compactly format an exception plus its Python cause/context chain."""
+    parts = []
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts.append(f"{type(current).__name__}: {current}")
+        current = current.__cause__ or current.__context__
+    return " <- ".join(parts)
+
+
 def with_scene_retry(
     attempts: int = 3,
     base_delay: float = 1.0,
@@ -120,12 +132,14 @@ def with_scene_retry(
                         delay = base_delay * (2**attempt)
                         logger.warning(
                             f"{fn.__name__} attempt {attempt + 1}/{attempts} "
-                            f"failed: {e}; retrying in {delay:.1f}s"
+                            f"failed: {_exception_chain_summary(e)}; "
+                            f"retrying in {delay:.1f}s"
                         )
                         time.sleep(delay)
             assert last_exc is not None
             raise SceneFetchError(
-                f"{fn.__name__} failed after {attempts} attempts: {last_exc}"
+                f"{fn.__name__} failed after {attempts} attempts: "
+                f"{_exception_chain_summary(last_exc)}"
             ) from last_exc
 
         return wrapper

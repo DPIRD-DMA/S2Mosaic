@@ -64,7 +64,7 @@ DEFAULT_ADDITIONAL_QUERY: Dict[str, Any] = {"eo:cloud_cover": {"lt": 100}}
 
 BOUNDS_MIN_AREA_M2 = 100
 BOUNDS_MIN_DIM_M = 10
-BOUNDS_LARGE_AREA_WARNING_M2 = 200_000 * 200_000
+BOUNDS_LARGE_PIXEL_WARNING_COUNT = 20_000 * 20_000
 
 
 @dataclass(frozen=True)
@@ -222,12 +222,13 @@ def validate_inputs(
         if aoi.area <= 0:
             raise ValueError("aoi must have a positive area")
 
-    bounds_to_validate = bounds if bounds is not None else aoi.bounds if aoi else None
-    if bounds_to_validate is not None:
-        _validate_bounds(bounds_to_validate, input_crs)
-
     if resolution is not None and resolution <= 0:
         raise ValueError(f"resolution must be positive, got {resolution}")
+
+    bounds_to_validate = bounds if bounds is not None else aoi.bounds if aoi else None
+    if bounds_to_validate is not None:
+        _validate_bounds(bounds_to_validate, input_crs, resolution)
+
     if cloud_mask not in VALID_CLOUD_MASKS:
         raise ValueError(
             f"Invalid cloud_mask: {cloud_mask}. Must be one of {VALID_CLOUD_MASKS}"
@@ -298,7 +299,9 @@ def validate_inputs(
             raise ValueError(f"percentile must be between 0 and 100, got {percentile}")
 
 
-def _validate_bounds(bounds_to_validate: Bbox, input_crs: Optional[int]) -> None:
+def _validate_bounds(
+    bounds_to_validate: Bbox, input_crs: Optional[int], resolution: Optional[int]
+) -> None:
     if len(bounds_to_validate) != 4:
         raise ValueError("bounds must be (minx, miny, maxx, maxy)")
     minx, miny, maxx, maxy = bounds_to_validate
@@ -336,11 +339,23 @@ def _validate_bounds(bounds_to_validate: Bbox, input_crs: Optional[int]) -> None
             f"square metres, got area={area_m2:.2f}m^2 "
             f"(width={width_m:.2f}m height={height_m:.2f}m)"
         )
-    if area_m2 > BOUNDS_LARGE_AREA_WARNING_M2:
+    if resolution is None:
+        return
+
+    output_width_px = int(np.ceil(width_m / resolution))
+    output_height_px = int(np.ceil(height_m / resolution))
+    output_pixels = output_width_px * output_height_px
+    if output_pixels > BOUNDS_LARGE_PIXEL_WARNING_COUNT:
         logger.warning(
-            "Bounds area is larger than 200km x 200km; this may require "
+            "Bounds output is larger than a 20,000 x 20,000 pixel raster; "
+            "this may require "
             "substantial time, memory, and network I/O "
-            "(area=%.2fkm^2 width=%.2fkm height=%.2fkm)",
+            "(pixels=%d width_px=%d height_px=%d resolution=%sm "
+            "area=%.2fkm^2 width=%.2fkm height=%.2fkm)",
+            output_pixels,
+            output_width_px,
+            output_height_px,
+            resolution,
             area_m2 / 1_000_000,
             width_m / 1000,
             height_m / 1000,

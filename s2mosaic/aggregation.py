@@ -2,6 +2,7 @@
 
 import logging
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
@@ -618,37 +619,45 @@ def write_tile_aggregation_geotiff(
         nodata=nodata_value,
         compress="lzw",
     )
-    logger.info("Writing streamed GeoTIFF to %s", export_path)
-    with rio.open(export_path, "w", **write_profile) as dst:
-        dst.descriptions = band_descriptions
-        for spec, tile_data in iter_tile_aggregation(
-            masks=masks,
-            read_fn=read_fn,
-            bands_count=bands_count,
-            height=height,
-            width=width,
-            coverage_mask=coverage_mask,
-            early_stop_missing_fraction=early_stop_missing_fraction,
-            mosaic_method=mosaic_method,
-            percentile=percentile,
-            tile_size=tile_size,
-            tile_workers=tile_workers,
-            out_dtype=out_dtype,
-            min_observations=min_observations,
-            adaptive_tiling=adaptive_tiling,
-            tile_specs=tile_specs,
-            show_progress=show_progress,
-            min_tile_size=min_tile_size,
-        ):
-            r, c, h, w = spec
-            if output_coverage_mask is not None:
-                coverage_tile = output_coverage_mask[r : r + h, c : c + w]
-                np.multiply(
-                    tile_data,
-                    coverage_tile[None, :, :],
-                    out=tile_data,
-                    casting="unsafe",
-                )
-            window_cls: Any = Window
-            dst.write(tile_data, window=window_cls(c, r, w, h))
+    tmp_path = export_path.with_suffix(
+        f".tmp.{os.getpid()}.{threading.get_ident()}{export_path.suffix}"
+    )
+    logger.info("Writing streamed GeoTIFF to %s via %s", export_path, tmp_path)
+    try:
+        with rio.open(tmp_path, "w", **write_profile) as dst:
+            dst.descriptions = band_descriptions
+            for spec, tile_data in iter_tile_aggregation(
+                masks=masks,
+                read_fn=read_fn,
+                bands_count=bands_count,
+                height=height,
+                width=width,
+                coverage_mask=coverage_mask,
+                early_stop_missing_fraction=early_stop_missing_fraction,
+                mosaic_method=mosaic_method,
+                percentile=percentile,
+                tile_size=tile_size,
+                tile_workers=tile_workers,
+                out_dtype=out_dtype,
+                min_observations=min_observations,
+                adaptive_tiling=adaptive_tiling,
+                tile_specs=tile_specs,
+                show_progress=show_progress,
+                min_tile_size=min_tile_size,
+            ):
+                r, c, h, w = spec
+                if output_coverage_mask is not None:
+                    coverage_tile = output_coverage_mask[r : r + h, c : c + w]
+                    np.multiply(
+                        tile_data,
+                        coverage_tile[None, :, :],
+                        out=tile_data,
+                        casting="unsafe",
+                    )
+                window_cls: Any = Window
+                dst.write(tile_data, window=window_cls(c, r, w, h))
+        tmp_path.replace(export_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
     return export_path

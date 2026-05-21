@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import rasterio as rio
+from rasterio.crs import CRS
 from rasterio.enums import Resampling
 from rasterio.errors import RasterioIOError
 from rasterio.transform import from_origin
@@ -30,7 +31,7 @@ from s2mosaic.geometry import (
     pick_utm_epsg,
     reproject_bbox,
 )
-from s2mosaic.readers import make_bounds_tile_reader
+from s2mosaic.readers import make_bounds_tile_reader, make_grid_tile_reader
 from s2mosaic.helpers import (
     SceneFetchError,
     _load_s2_grid,
@@ -66,7 +67,13 @@ from s2mosaic.aggregation import (
 )
 from s2mosaic.cache import _read_with_retry, _write_tiled_copy, iter_ordered_fetches
 from s2mosaic.pipelines.grid import stream_mosaic_pipeline
-from s2mosaic.readers import _HandleCache, should_prewarm_sources
+from s2mosaic.readers import (
+    BoundsTileReader,
+    GridTileReader,
+    _HandleCache,
+    _lazy_signed_url,
+    should_prewarm_sources,
+)
 from s2mosaic.sources import MPC
 from s2mosaic.stac import (
     DATETIME_COL,
@@ -834,6 +841,7 @@ class TestRunTileAggregation:
 
         assert result == export_path
         assert reads
+        assert not list(tmp_path.glob("streamed.tmp.*.tif"))
         with rio.open(export_path) as src:
             assert src.count == 1
             assert src.nodata == 0
@@ -841,6 +849,133 @@ class TestRunTileAggregation:
             np.testing.assert_array_equal(
                 src.read(1), np.full((self.H, self.W), 20, dtype=np.uint16)
             )
+
+    def test_write_tile_aggregation_geotiff_commits_final_path_after_close(
+        self, tmp_path
+    ):
+        export_path = tmp_path / "committed.tif"
+        final_path_seen_during_stream = []
+
+        def read_fn(scene_idx, band_idx, spec):
+            final_path_seen_during_stream.append(export_path.exists())
+            _, _, h, w = spec
+            return np.full((h, w), 10, dtype=np.uint16)
+
+        write_tile_aggregation_geotiff(
+            export_path=export_path,
+            profile={
+                "driver": "GTiff",
+                "dtype": np.dtype(np.uint16),
+                "width": self.W,
+                "height": self.H,
+                "count": 1,
+                "crs": None,
+                "transform": from_origin(0, self.H, 1, 1),
+            },
+            bands=["B04"],
+            masks=[np.ones((self.H, self.W), dtype=bool)],
+            read_fn=read_fn,
+            bands_count=1,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            output_coverage_mask=None,
+            early_stop_missing_fraction=None,
+            mosaic_method="mean",
+            percentile=None,
+            tile_size=3,
+            tile_workers=1,
+            out_dtype=np.dtype(np.uint16),
+        )
+
+        assert final_path_seen_during_stream
+        assert final_path_seen_during_stream == [False] * len(
+            final_path_seen_during_stream
+        )
+        assert export_path.exists()
+        assert not list(tmp_path.glob("committed.tmp.*.tif"))
+
+    def test_write_tile_aggregation_geotiff_cleans_temp_on_error(self, tmp_path):
+        export_path = tmp_path / "failed.tif"
+
+        def read_fn(scene_idx, band_idx, spec):
+            raise RuntimeError("boom")
+
+        with pytest.raises(RuntimeError, match="boom"):
+            write_tile_aggregation_geotiff(
+                export_path=export_path,
+                profile={
+                    "driver": "GTiff",
+                    "dtype": np.dtype(np.uint16),
+                    "width": self.W,
+                    "height": self.H,
+                    "count": 1,
+                    "crs": None,
+                    "transform": from_origin(0, self.H, 1, 1),
+                },
+                bands=["B04"],
+                masks=[np.ones((self.H, self.W), dtype=bool)],
+                read_fn=read_fn,
+                bands_count=1,
+                height=self.H,
+                width=self.W,
+                coverage_mask=np.ones((self.H, self.W), dtype=bool),
+                output_coverage_mask=None,
+                early_stop_missing_fraction=None,
+                mosaic_method="mean",
+                percentile=None,
+                tile_size=3,
+                tile_workers=1,
+                out_dtype=np.dtype(np.uint16),
+            )
+
+        assert not export_path.exists()
+        assert not list(tmp_path.glob("failed.tmp.*.tif"))
+
+    def test_write_tile_aggregation_geotiff_preserves_existing_output_on_error(
+        self, tmp_path
+    ):
+        export_path = tmp_path / "existing.tif"
+        profile = {
+            "driver": "GTiff",
+            "dtype": np.dtype(np.uint16),
+            "width": self.W,
+            "height": self.H,
+            "count": 1,
+            "crs": None,
+            "transform": from_origin(0, self.H, 1, 1),
+        }
+        with rio.open(export_path, "w", **profile) as dst:
+            dst.write(np.full((1, self.H, self.W), 7, dtype=np.uint16))
+
+        def read_fn(scene_idx, band_idx, spec):
+            raise RuntimeError("boom")
+
+        with pytest.raises(RuntimeError, match="boom"):
+            write_tile_aggregation_geotiff(
+                export_path=export_path,
+                profile=profile,
+                bands=["B04"],
+                masks=[np.ones((self.H, self.W), dtype=bool)],
+                read_fn=read_fn,
+                bands_count=1,
+                height=self.H,
+                width=self.W,
+                coverage_mask=np.ones((self.H, self.W), dtype=bool),
+                output_coverage_mask=None,
+                early_stop_missing_fraction=None,
+                mosaic_method="mean",
+                percentile=None,
+                tile_size=3,
+                tile_workers=1,
+                out_dtype=np.dtype(np.uint16),
+            )
+
+        with rio.open(export_path) as src:
+            np.testing.assert_array_equal(
+                src.read(1), np.full((self.H, self.W), 7, dtype=np.uint16)
+            )
+        assert not list(tmp_path.glob("existing.tmp.*.tif"))
 
     def test_write_tile_aggregation_geotiff_applies_output_coverage(self, tmp_path):
         coverage = np.ones((self.H, self.W), dtype=bool)
@@ -1130,8 +1265,8 @@ class TestMosaicBoundsValidation:
             )
 
     def test_bounds_large_4326_warns_but_is_accepted(self, caplog):
-        # 5 deg x 5 deg AOI at lat=-32: area is well over 200km x 200km.
-        with caplog.at_level(logging.WARNING, logger="s2mosaic.helpers"):
+        # 5 deg x 5 deg AOI at 10m produces more than 20k x 20k pixels.
+        with caplog.at_level(logging.WARNING, logger="s2mosaic.config"):
             validate_inputs(
                 scene_order="valid_data",
                 mosaic_method="mean",
@@ -1143,11 +1278,13 @@ class TestMosaicBoundsValidation:
                 input_crs=4326,
                 resolution=10,
             )
-        assert "larger than 200km x 200km" in caplog.text
+        assert "larger than a 20,000 x 20,000 pixel raster" in caplog.text
+        assert "width_px=" in caplog.text
+        assert "height_px=" in caplog.text
 
     def test_bounds_large_utm_warns_but_is_accepted(self, caplog):
-        # 300km x 300km in UTM.
-        with caplog.at_level(logging.WARNING, logger="s2mosaic.helpers"):
+        # 300km x 300km in UTM at 10m produces 900M output pixels.
+        with caplog.at_level(logging.WARNING, logger="s2mosaic.config"):
             validate_inputs(
                 scene_order="valid_data",
                 mosaic_method="mean",
@@ -1159,7 +1296,25 @@ class TestMosaicBoundsValidation:
                 input_crs=32750,
                 resolution=10,
             )
-        assert "larger than 200km x 200km" in caplog.text
+        assert "larger than a 20,000 x 20,000 pixel raster" in caplog.text
+        assert "pixels=900000000" in caplog.text
+
+    def test_large_physical_bounds_at_coarse_resolution_do_not_warn(self, caplog):
+        # Mirrors the wide visual export case: physically large, but only
+        # ~8.4k x 4.9k pixels at 60m.
+        with caplog.at_level(logging.WARNING, logger="s2mosaic.config"):
+            validate_inputs(
+                scene_order="valid_data",
+                mosaic_method="mean",
+                early_stop_missing_fraction=0.01,
+                bands=["visual"],
+                grid_id=None,
+                percentile=None,
+                bounds=(300_000.0, 6_300_000.0, 802_920.0, 6_588_890.0),
+                input_crs=32750,
+                resolution=60,
+            )
+        assert "20,000 x 20,000 pixel raster" not in caplog.text
 
     def test_typical_cross_tile_bounds_accepted(self):
         # ~80km × 80km, larger than a single S2 tile's overlap zone but well
@@ -1613,6 +1768,24 @@ class TestSceneRetry:
         assert calls["n"] == 3
         assert isinstance(exc_info.value.__cause__, RasterioIOError)
         assert "failed after 3 attempts" in str(exc_info.value)
+
+    def test_retry_warning_includes_exception_chain(self, monkeypatch, caplog):
+        monkeypatch.setattr("s2mosaic.helpers.time.sleep", lambda _: None)
+
+        @with_scene_retry(attempts=2, base_delay=0.01)
+        def fails_with_context():
+            try:
+                raise RasterioIOError("low-level read failed")
+            except RasterioIOError as exc:
+                raise RuntimeError("band B04 failed") from exc
+
+        with caplog.at_level(logging.WARNING, logger="s2mosaic.helpers"):
+            with pytest.raises(SceneFetchError):
+                fails_with_context()
+
+        text = caplog.text
+        assert "RuntimeError: band B04 failed" in text
+        assert "RasterioIOError: low-level read failed" in text
 
 
 class TestGridOrderedMaskStreaming:
@@ -2738,8 +2911,9 @@ class TestTiledBandMaterialisation:
     def test_handle_cache_resolves_sources_only_on_first_read(self, monkeypatch):
         calls = {"resolver": 0, "open": 0}
 
-        def resolver():
+        def resolver(refresh=False):
             calls["resolver"] += 1
+            assert refresh is False
             return "lazy-source.tif"
 
         class FakeDataset:
@@ -2759,6 +2933,393 @@ class TestTiledBandMaterialisation:
 
         assert first is second
         assert calls == {"resolver": 1, "open": 1}
+
+    def test_lazy_signed_url_refreshes_after_ttl(self, monkeypatch):
+        now = {"value": 100.0}
+        calls = []
+
+        class FakeSource:
+            def sign(self, href):
+                calls.append(href)
+                return f"signed-{len(calls)}"
+
+        monkeypatch.setattr("s2mosaic.readers.time.monotonic", lambda: now["value"])
+
+        get_signed_url = _lazy_signed_url(FakeSource(), "remote.tif", ttl_seconds=10)
+
+        assert get_signed_url() == "signed-1"
+        assert get_signed_url() == "signed-1"
+        now["value"] = 111.0
+        assert get_signed_url() == "signed-2"
+        assert get_signed_url(refresh=True) == "signed-3"
+        assert calls == ["remote.tif", "remote.tif", "remote.tif"]
+
+    def test_grid_reader_signs_only_on_first_read_when_not_prewarmed(self, monkeypatch):
+        calls = {"sign": 0, "materialise": 0, "open": 0}
+
+        class FakeAsset:
+            href = "remote.tif"
+
+        class FakeItem:
+            assets = {"B04": FakeAsset()}
+            id = "fake-scene"
+
+        class FakeSource:
+            name = "FAKE"
+
+            def asset_name(self, canonical):
+                return canonical
+
+            def sign(self, href):
+                calls["sign"] += 1
+                return f"signed-{href}"
+
+        class FakeDataset:
+            width = 10
+            height = 10
+
+            def read(self, band_idx, *, window, out_shape, resampling):
+                return np.full(out_shape, band_idx, dtype=np.uint16)
+
+            def close(self):
+                pass
+
+        def fake_materialise(cache_key, materialiser):
+            calls["materialise"] += 1
+            return None
+
+        def fake_open(source):
+            calls["open"] += 1
+            assert source == "signed-remote.tif"
+            return FakeDataset()
+
+        monkeypatch.setattr("s2mosaic.readers.materialise_tiled_band", fake_materialise)
+        monkeypatch.setattr("s2mosaic.readers.rio.open", fake_open)
+
+        read_fn = make_grid_tile_reader(
+            items=[FakeItem()],
+            href_template=[("B04", 1)],
+            source=FakeSource(),
+            s2_scene_size=10,
+            resolution=10,
+            resampling_method="nearest",
+            prewarm=False,
+        )
+
+        assert calls == {"sign": 0, "materialise": 0, "open": 0}
+        data = read_fn(0, 0, (0, 0, 2, 3))
+
+        np.testing.assert_array_equal(data, np.ones((2, 3), dtype=np.uint16))
+        assert calls == {"sign": 1, "materialise": 1, "open": 1}
+
+    def test_grid_reader_prewarm_signs_sources_once(self, monkeypatch):
+        calls = {"sign": 0, "materialise": 0}
+
+        class FakeAsset:
+            href = "remote.tif"
+
+        class FakeItem:
+            assets = {"B04": FakeAsset()}
+            id = "fake-scene"
+
+        class FakeSource:
+            name = "FAKE"
+
+            def asset_name(self, canonical):
+                return canonical
+
+            def sign(self, href):
+                calls["sign"] += 1
+                return f"signed-{href}"
+
+        def fake_materialise(cache_key, materialiser):
+            calls["materialise"] += 1
+            return None
+
+        monkeypatch.setattr("s2mosaic.readers.materialise_tiled_band", fake_materialise)
+
+        make_grid_tile_reader(
+            items=[FakeItem()],
+            href_template=[("B04", 1)],
+            source=FakeSource(),
+            s2_scene_size=10,
+            resolution=10,
+            resampling_method="nearest",
+            prewarm=True,
+        )
+
+        assert calls == {"sign": 1, "materialise": 1}
+
+    def test_grid_reader_reopens_with_refreshed_source_on_read_error(self, monkeypatch):
+        resolver_calls = []
+        open_calls = []
+
+        def resolver(refresh=False):
+            resolver_calls.append(refresh)
+            return f"remote-refresh-{refresh}.tif"
+
+        class FakeDataset:
+            width = 10
+            height = 10
+
+            def __init__(self, source):
+                self.source = source
+
+            def read(self, band_idx, *, window, out_shape, resampling):
+                if self.source == "remote-refresh-False.tif":
+                    raise RasterioIOError("expired token")
+                return np.full(out_shape, band_idx, dtype=np.uint16)
+
+            def close(self):
+                pass
+
+        def fake_open(source):
+            open_calls.append(source)
+            return FakeDataset(source)
+
+        monkeypatch.setattr("s2mosaic.readers.rio.open", fake_open)
+
+        cache = _HandleCache([[resolver]])
+        read_fn = GridTileReader(
+            cache,
+            href_band_indices=[1],
+            s2_scene_size=10,
+            rio_resampling=Resampling.nearest,
+        )
+
+        data = read_fn(0, 0, (0, 0, 2, 3))
+
+        np.testing.assert_array_equal(data, np.ones((2, 3), dtype=np.uint16))
+        assert resolver_calls == [False, True]
+        assert open_calls == ["remote-refresh-False.tif", "remote-refresh-True.tif"]
+
+    def test_grid_reader_recovers_on_third_read_attempt(self, monkeypatch):
+        monkeypatch.setattr("s2mosaic.readers.time.sleep", lambda _: None)
+        resolver_calls = []
+        open_calls = []
+        read_calls = {"count": 0}
+
+        def resolver(refresh=False):
+            resolver_calls.append(refresh)
+            return f"remote-refresh-{refresh}.tif"
+
+        class FakeDataset:
+            width = 10
+            height = 10
+
+            def read(self, band_idx, *, window, out_shape, resampling):
+                read_calls["count"] += 1
+                if read_calls["count"] < 3:
+                    raise RasterioIOError("temporary read failure")
+                return np.full(out_shape, band_idx, dtype=np.uint16)
+
+            def close(self):
+                pass
+
+        def fake_open(source):
+            open_calls.append(source)
+            return FakeDataset()
+
+        monkeypatch.setattr("s2mosaic.readers.rio.open", fake_open)
+
+        read_fn = GridTileReader(
+            _HandleCache([[resolver]]),
+            href_band_indices=[1],
+            s2_scene_size=10,
+            rio_resampling=Resampling.nearest,
+        )
+
+        data = read_fn(0, 0, (0, 0, 2, 3))
+
+        np.testing.assert_array_equal(data, np.ones((2, 3), dtype=np.uint16))
+        assert read_calls["count"] == 3
+        assert resolver_calls == [False, True, True]
+        assert open_calls == [
+            "remote-refresh-False.tif",
+            "remote-refresh-True.tif",
+            "remote-refresh-True.tif",
+        ]
+
+    def test_grid_reader_reopens_with_refreshed_source_on_open_error(self, monkeypatch):
+        resolver_calls = []
+        open_calls = []
+
+        def resolver(refresh=False):
+            resolver_calls.append(refresh)
+            return f"remote-refresh-{refresh}.tif"
+
+        class FakeDataset:
+            width = 10
+            height = 10
+
+            def read(self, band_idx, *, window, out_shape, resampling):
+                return np.full(out_shape, band_idx, dtype=np.uint16)
+
+            def close(self):
+                pass
+
+        def fake_open(source):
+            open_calls.append(source)
+            if source == "remote-refresh-False.tif":
+                raise RasterioIOError("expired token")
+            return FakeDataset()
+
+        monkeypatch.setattr("s2mosaic.readers.rio.open", fake_open)
+
+        cache = _HandleCache([[resolver]])
+        read_fn = GridTileReader(
+            cache,
+            href_band_indices=[1],
+            s2_scene_size=10,
+            rio_resampling=Resampling.nearest,
+        )
+
+        data = read_fn(0, 0, (0, 0, 2, 3))
+
+        np.testing.assert_array_equal(data, np.ones((2, 3), dtype=np.uint16))
+        assert resolver_calls == [False, True]
+        assert open_calls == ["remote-refresh-False.tif", "remote-refresh-True.tif"]
+
+    def test_bounds_reader_recovers_on_third_open_attempt(self, monkeypatch):
+        monkeypatch.setattr("s2mosaic.readers.time.sleep", lambda _: None)
+        resolver_calls = []
+        open_calls = []
+
+        def resolver(refresh=False):
+            resolver_calls.append(refresh)
+            return f"bounds-refresh-{refresh}.tif", True
+
+        class FakeDataset:
+            def read(self, band_idx, window):
+                return np.full(
+                    (int(window.height), int(window.width)),
+                    band_idx,
+                    dtype=np.uint16,
+                )
+
+            def close(self):
+                pass
+
+        def fake_open(source):
+            open_calls.append(source)
+            if len(open_calls) < 3:
+                raise RasterioIOError("temporary open failure")
+            return FakeDataset()
+
+        monkeypatch.setattr("s2mosaic.readers.rio.open", fake_open)
+
+        read_fn = BoundsTileReader(
+            sources=[[resolver]],
+            href_band_indices=[1],
+            target_crs_obj=CRS.from_epsg(32750),
+            user_transform=from_origin(0, 10, 1, 1),
+            width=10,
+            height=10,
+            rio_resampling=Resampling.nearest,
+        )
+
+        data = read_fn(0, 0, (0, 0, 2, 3))
+
+        np.testing.assert_array_equal(data, np.ones((2, 3), dtype=np.uint16))
+        assert resolver_calls == [False, True, True]
+        assert open_calls == [
+            "bounds-refresh-False.tif",
+            "bounds-refresh-True.tif",
+            "bounds-refresh-True.tif",
+        ]
+
+    def test_bounds_reader_reopens_with_refreshed_source_on_read_error(
+        self, monkeypatch
+    ):
+        resolver_calls = []
+        open_calls = []
+
+        def resolver(refresh=False):
+            resolver_calls.append(refresh)
+            return f"bounds-refresh-{refresh}.tif", True
+
+        class FakeDataset:
+            def __init__(self, source):
+                self.source = source
+
+            def read(self, band_idx, window):
+                if self.source == "bounds-refresh-False.tif":
+                    raise RasterioIOError("expired token")
+                return np.full(
+                    (int(window.height), int(window.width)),
+                    band_idx,
+                    dtype=np.uint16,
+                )
+
+            def close(self):
+                pass
+
+        def fake_open(source):
+            open_calls.append(source)
+            return FakeDataset(source)
+
+        monkeypatch.setattr("s2mosaic.readers.rio.open", fake_open)
+
+        read_fn = BoundsTileReader(
+            sources=[[resolver]],
+            href_band_indices=[1],
+            target_crs_obj=CRS.from_epsg(32750),
+            user_transform=from_origin(0, 10, 1, 1),
+            width=10,
+            height=10,
+            rio_resampling=Resampling.nearest,
+        )
+
+        data = read_fn(0, 0, (0, 0, 2, 3))
+
+        np.testing.assert_array_equal(data, np.ones((2, 3), dtype=np.uint16))
+        assert resolver_calls == [False, True]
+        assert open_calls == ["bounds-refresh-False.tif", "bounds-refresh-True.tif"]
+
+    def test_bounds_reader_reopens_with_refreshed_source_on_open_error(
+        self, monkeypatch
+    ):
+        resolver_calls = []
+        open_calls = []
+
+        def resolver(refresh=False):
+            resolver_calls.append(refresh)
+            return f"bounds-refresh-{refresh}.tif", True
+
+        class FakeDataset:
+            def read(self, band_idx, window):
+                return np.full(
+                    (int(window.height), int(window.width)),
+                    band_idx,
+                    dtype=np.uint16,
+                )
+
+            def close(self):
+                pass
+
+        def fake_open(source):
+            open_calls.append(source)
+            if source == "bounds-refresh-False.tif":
+                raise RasterioIOError("expired token")
+            return FakeDataset()
+
+        monkeypatch.setattr("s2mosaic.readers.rio.open", fake_open)
+
+        read_fn = BoundsTileReader(
+            sources=[[resolver]],
+            href_band_indices=[1],
+            target_crs_obj=CRS.from_epsg(32750),
+            user_transform=from_origin(0, 10, 1, 1),
+            width=10,
+            height=10,
+            rio_resampling=Resampling.nearest,
+        )
+
+        data = read_fn(0, 0, (0, 0, 2, 3))
+
+        np.testing.assert_array_equal(data, np.ones((2, 3), dtype=np.uint16))
+        assert resolver_calls == [False, True]
+        assert open_calls == ["bounds-refresh-False.tif", "bounds-refresh-True.tif"]
 
     def test_bounds_reader_materialises_cache_only_on_read(self, monkeypatch):
         calls = {"materialise": 0, "materialiser_factory": 0, "open": 0}
