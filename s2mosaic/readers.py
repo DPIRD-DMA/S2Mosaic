@@ -27,7 +27,7 @@ from .sources import Source
 from .stac_bounds import _BoundsItemLike
 
 logger = logging.getLogger(__name__)
-DEFAULT_TILE_WORKERS = min(4, os.cpu_count() or 1)
+DEFAULT_TILE_WORKERS = 8
 SIGNED_URL_TTL_SECONDS = 45 * 60
 REMOTE_RASTER_ATTEMPTS = 3
 GridSourceResolver = Callable[[bool], str]

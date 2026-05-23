@@ -90,6 +90,80 @@ from .bounds_scl import (
 )
 
 logger = logging.getLogger(__name__)
+SCL_NATIVE_RESOLUTION = 20
+BOUNDS_ADAPTIVE_SCAN_PIXEL_LIMIT = 20_000 * 20_000
+
+
+def _mask_resolution_for_request(request: MosaicRequest) -> int:
+    """Choose the cloud-mask read resolution for bounds/AOI mode."""
+    if request.cloud_mask == CLOUD_MASK_SCL:
+        # Sentinel-2 L2A SCL is a 20m asset. Reading it onto a 10m bounds grid
+        # quadruples mask pixels and network work without adding SCL detail.
+        return max(request.resolution, SCL_NATIVE_RESOLUTION)
+    return pick_ocm_resolution(request.resolution)
+
+
+class _AllTrueMask:
+    """Array-like boolean mask that materialises only requested windows."""
+
+    def __init__(self, shape: Tuple[int, int]):
+        self.shape = shape
+
+    def __getitem__(self, key: Any) -> npt.NDArray[np.bool_]:
+        row_key, col_key = key
+        h = row_key.stop - row_key.start
+        w = col_key.stop - col_key.start
+        return np.ones((h, w), dtype=bool)
+
+    def __array__(self, dtype: Optional["np.dtype[Any]"] = None) -> npt.NDArray[Any]:
+        arr = np.ones(self.shape, dtype=bool)
+        return arr.astype(dtype, copy=False) if dtype is not None else arr
+
+
+class _ResampledBoolMask:
+    """Array-like mask that resamples source mask windows on demand."""
+
+    def __init__(
+        self,
+        source: npt.NDArray[Any],
+        shape: Tuple[int, int],
+        coverage: Optional[Any] = None,
+    ):
+        self._source = source
+        self.shape = shape
+        self._coverage = coverage
+
+    def __getitem__(self, key: Any) -> npt.NDArray[np.bool_]:
+        row_key, col_key = key
+        row_start = int(row_key.start or 0)
+        row_stop = int(row_key.stop)
+        col_start = int(col_key.start or 0)
+        col_stop = int(col_key.stop)
+        dst_h = row_stop - row_start
+        dst_w = col_stop - col_start
+        src_h, src_w = self._source.shape
+        out_h, out_w = self.shape
+
+        src_row_start = max(0, int(np.floor(row_start * src_h / out_h)))
+        src_row_stop = min(src_h, int(np.ceil(row_stop * src_h / out_h)))
+        src_col_start = max(0, int(np.floor(col_start * src_w / out_w)))
+        src_col_stop = min(src_w, int(np.ceil(col_stop * src_w / out_w)))
+        tile = self._source[src_row_start:src_row_stop, src_col_start:src_col_stop]
+        if tile.shape != (dst_h, dst_w):
+            tile = cv2.resize(
+                tile.astype(np.uint8),
+                (dst_w, dst_h),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(bool)
+        else:
+            tile = tile.astype(bool, copy=False)
+        if self._coverage is not None:
+            tile &= self._coverage[key]
+        return tile
+
+    def __array__(self, dtype: Optional["np.dtype[Any]"] = None) -> npt.NDArray[Any]:
+        arr = self[slice(0, self.shape[0]), slice(0, self.shape[1])]
+        return arr.astype(dtype, copy=False) if dtype is not None else arr
 
 
 def _fetch_one_ocm_key(
@@ -226,6 +300,12 @@ def _stream_bounds_combo_masks(
             desc=f"Phase 1: streaming cloud masks ({cloud_mask})",
             unit="scene",
         )
+    _pb = mask_progress
+
+    def _on_mask_complete(_i: int) -> None:
+        if _pb is not None:
+            _pb.update(1)
+
     mask_fetch_iter: Optional[
         Iterator[Tuple[int, Union[npt.NDArray[Any], Exception]]]
     ] = None
@@ -250,6 +330,7 @@ def _stream_bounds_combo_masks(
                 )
             ),
             max_workers=phase1_workers,
+            on_complete=_on_mask_complete,
         )
     elif cloud_mask == CLOUD_MASK_OCM:
         # Each OCM fetch already reads R/G/NIR in parallel. Keep scene-level
@@ -265,6 +346,7 @@ def _stream_bounds_combo_masks(
                 mask_resolution,
             ),
             max_workers=min(2, phase1_workers),
+            on_complete=_on_mask_complete,
         )
 
     for scene_position in range(n_time):
@@ -285,13 +367,9 @@ def _stream_bounds_combo_masks(
             scene_idx, mask_result = next(mask_fetch_iter)
             if isinstance(mask_result, Exception):
                 raise mask_result
-            if mask_progress is not None:
-                mask_progress.update(1)
         except StopIteration:
             break
         except SceneFetchError as e:
-            if mask_progress is not None:
-                mask_progress.update(1)
             n_mask_fetch_failed += 1
             logger.warning(
                 f"Scene {scene_idx + 1}/{n_time} "
@@ -343,6 +421,11 @@ def _stream_bounds_combo_masks(
                     f"({scene_idx + 1}/{n_time} examined)"
                 )
                 break
+
+    if mask_fetch_iter is not None:
+        close = getattr(mask_fetch_iter, "close", None)
+        if close is not None:
+            close()
 
     if mask_progress is not None:
         # `first` mode and early_stop_missing_fraction can break the loop early. Snap
@@ -552,15 +635,10 @@ def run_bounds_pipeline(
         scene_sort_fn=request.scene_sort_fn,
     )
 
-    # Mask resolution depends on provider: OCM is fastest at coarser resolutions
-    # so we clamp to [20, 50]; SCL is a single COG read, so we fetch at the
-    # user's output resolution to avoid a resize step. Either way the streaming
-    # loop produces masks at this resolution and the coverage mask is computed
-    # at the same shape.
-    if request.cloud_mask == CLOUD_MASK_SCL:
-        mask_resolution = request.resolution
-    else:
-        mask_resolution = pick_ocm_resolution(request.resolution)
+    # Mask resolution depends on provider. OCM is fastest at coarser
+    # resolutions, and SCL is native 20m, so avoid upsampling SCL to 10m
+    # during the network-heavy mask scan.
+    mask_resolution = _mask_resolution_for_request(request)
     logger.info(f"Cloud mask provider {request.cloud_mask} at {mask_resolution}m")
 
     # Each per-scene fetch via WarpedVRT snaps to exactly this transform /
@@ -659,26 +737,44 @@ def run_bounds_pipeline(
     )
     n_bands = 3 if is_visual else len(bands)
 
-    def _to_user_shape(mask: npt.NDArray[Any]) -> npt.NDArray[Any]:
-        if mask.shape == (h, w):
+    def _to_user_mask(mask: npt.NDArray[Any], coverage: Optional[Any] = None) -> Any:
+        if mask.shape == (h, w) and coverage is None:
             return mask
-        return cv2.resize(
-            mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST
-        ).astype(bool)
+        return _ResampledBoolMask(mask, (h, w), coverage=coverage)
 
-    coverage_mask = _to_user_shape(coverage_mask_ocm)
+    if (
+        request.min_coverage_fraction is None
+        and aoi_target is None
+        and coverage_mask_ocm.all()
+    ):
+        coverage_mask: Any = _AllTrueMask((h, w))
+    else:
+        coverage_mask = _to_user_mask(coverage_mask_ocm)
     if aoi_target is not None:
-        coverage_mask &= _rasterize_aoi_mask(
+        aoi_user_mask = _rasterize_aoi_mask(
             aoi_target=aoi_target,
             bounds_target=bounds_target,
             resolution=request.resolution,
             width=w,
             height=h,
         )
+        if isinstance(coverage_mask, _AllTrueMask):
+            coverage_mask = aoi_user_mask
+        else:
+            coverage_mask = _ResampledBoolMask(
+                coverage_mask_ocm, (h, w), coverage=aoi_user_mask
+            )
+    logger.info(
+        "Prepared lazy user-grid masks for %d scenes (%dx%d output)",
+        len(kept_indices),
+        h,
+        w,
+    )
     combo_masks_user = {
-        i: _to_user_shape(kept_combo_masks_ocm[i]) & coverage_mask for i in kept_indices
+        i: _to_user_mask(kept_combo_masks_ocm[i], coverage=coverage_mask)
+        for i in kept_indices
     }
-    # OCM-resolution mask dict can be released once the user-resolution copies exist.
+    # OCM/SCL-resolution mask dict can be released once lazy user-grid wrappers exist.
     del kept_combo_masks_ocm
 
     # Phase 3 — tile-streamed aggregation. Same architecture as grid_id mode:
@@ -709,6 +805,7 @@ def run_bounds_pipeline(
     masks_in_order: List[Optional[npt.NDArray[Any]]] = [
         combo_masks_user[scene_idx] for scene_idx in kept_indices
     ]
+    del combo_masks_user
     # Tile small AOIs as a single tile; cap large AOIs at 2048 so each
     # tile read from PC stays one big range request. Smaller tiles trade
     # round-trip latency for worker utilisation — a bad deal when reads
@@ -746,6 +843,15 @@ def run_bounds_pipeline(
         source.name,
         bands,
     )
+    adaptive_tiling = request.adaptive_tiling
+    if adaptive_tiling and h * w > BOUNDS_ADAPTIVE_SCAN_PIXEL_LIMIT:
+        adaptive_tiling = False
+        logger.info(
+            "Disabling adaptive tiling for large bounds output (%d pixels); "
+            "using fixed %d-pixel tiles to avoid pre-scanning masks",
+            h * w,
+            tile_size,
+        )
 
     try:
         if export_path is not None:
@@ -767,7 +873,7 @@ def run_bounds_pipeline(
                 tile_size=tile_size,
                 tile_workers=request.tile_workers,
                 out_dtype=np.dtype(np.uint8) if is_visual else np.dtype(np.uint16),
-                adaptive_tiling=request.adaptive_tiling,
+                adaptive_tiling=adaptive_tiling,
                 show_progress=request.show_progress,
                 min_tile_size=min_tile_size,
             )
@@ -788,7 +894,7 @@ def run_bounds_pipeline(
             tile_size=tile_size,
             tile_workers=request.tile_workers,
             out_dtype=np.dtype(np.uint8) if is_visual else np.dtype(np.uint16),
-            adaptive_tiling=request.adaptive_tiling,
+            adaptive_tiling=adaptive_tiling,
             show_progress=request.show_progress,
             min_tile_size=min_tile_size,
         )

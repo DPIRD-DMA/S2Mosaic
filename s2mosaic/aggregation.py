@@ -19,9 +19,16 @@ from .output import output_band_metadata
 
 logger = logging.getLogger(__name__)
 DEFAULT_OUTPUT_DTYPE = np.dtype(np.uint16)
-DEFAULT_TILE_WORKERS = min(4, os.cpu_count() or 1)
+# Bumped from min(4, cpu_count). With band-parallel reads each tile worker
+# fans out ``bands_count`` concurrent range requests on the same HTTP/2
+# connection, so the work per worker is I/O-bound and benefits from a higher
+# tile-worker count than CPU count would suggest. 8 was the sweet spot on a
+# 400 Mbps Starlink benchmark — more workers gave diminishing returns and
+# multiplied concurrent requests against the source server.
+DEFAULT_TILE_WORKERS = 8
 DEFAULT_ADAPTIVE_TILE_MIN_SIZE = 512
 DEFAULT_ADAPTIVE_TILE_DENSE_FRACTION = 0.75
+EXPECTED_READ_EXACT_SCAN_LIMIT = 50_000
 
 # Reader function shared by grid_id and bounds streamers.
 # Signature: read_fn(scene_idx, band_idx, spec) -> ndarray of shape (h, w).
@@ -35,6 +42,25 @@ def _empty_tile(
 ) -> npt.NDArray[Any]:
     _, _, h, w = spec
     return np.zeros((bands_count, h, w), dtype=out_dtype)
+
+
+def _read_scene_bands(
+    read_fn: ReaderFn,
+    scene_idx: int,
+    bands_count: int,
+    spec: Tuple[int, int, int, int],
+) -> List[npt.NDArray[Any]]:
+    """Read all bands for one (scene, tile) concurrently.
+
+    Per-tile band reads are network-bound, so issuing them in parallel lets
+    HTTP/2 multiplexing fan out the range requests onto a single TCP
+    connection. For bands_count==1 we skip the executor and just call
+    read_fn directly to avoid the thread-pool overhead.
+    """
+    if bands_count <= 1:
+        return [read_fn(scene_idx, 0, spec)]
+    with ThreadPoolExecutor(max_workers=bands_count) as ex:
+        return list(ex.map(lambda j: read_fn(scene_idx, j, spec), range(bands_count)))
 
 
 def _finalise_tile(
@@ -134,8 +160,8 @@ def _copy_single_scene_tile(
     """Copy one contributing scene into an output tile, zeroing masked pixels."""
     _, _, h, w = spec
     out = np.zeros((bands_count, h, w), dtype=out_dtype)
-    for j in range(bands_count):
-        data = read_fn(scene_idx, j, spec)
+    band_data = _read_scene_bands(read_fn, scene_idx, bands_count, spec)
+    for j, data in enumerate(band_data):
         np.copyto(out[j], data, where=mask_tile, casting="unsafe")
     return out
 
@@ -212,8 +238,8 @@ def tile_percentile(
         if mask is None:
             raise RuntimeError(f"Missing mask for contributing scene {scene_idx}")
         mask_tile = mask[r : r + h, c : c + w]
-        for j in range(bands_count):
-            data = read_fn(scene_idx, j, spec)
+        band_data = _read_scene_bands(read_fn, scene_idx, bands_count, spec)
+        for j, data in enumerate(band_data):
             stack[k, j].fill(np.nan)
             np.copyto(stack[k, j], data, where=mask_tile, casting="unsafe")
 
@@ -260,8 +286,8 @@ def tile_mean(
         if mask is None:
             raise RuntimeError(f"Missing mask for contributing scene {scene_idx}")
         mask_tile = mask[r : r + h, c : c + w]
-        for j in range(bands_count):
-            data = read_fn(scene_idx, j, spec)
+        band_data = _read_scene_bands(read_fn, scene_idx, bands_count, spec)
+        for j, data in enumerate(band_data):
             np.add(sum_block[j], data, out=sum_block[j], where=mask_tile)
         np.add(count, mask_tile, out=count, casting="unsafe")
     result = np.divide(sum_block, count, out=np.zeros_like(sum_block), where=count != 0)
@@ -292,8 +318,8 @@ def tile_first(
         new_pixels = mask_tile & ~filled
         if not new_pixels.any():
             continue
-        for j in range(bands_count):
-            data = read_fn(scene_idx, j, spec)
+        band_data = _read_scene_bands(read_fn, scene_idx, bands_count, spec)
+        for j, data in enumerate(band_data):
             result[j][new_pixels] = data[new_pixels]
         filled |= new_pixels
         if (filled | ~tile_coverage).all():
@@ -380,6 +406,10 @@ def _expected_reads_upper_bound(
     fine for the progress bar; we just won't naturally hit 100% in those
     cases and fast-forward at the end.
     """
+    non_empty_masks = sum(1 for m in masks if m is not None)
+    if len(specs) * non_empty_masks > EXPECTED_READ_EXACT_SCAN_LIMIT:
+        return len(specs) * non_empty_masks * bands_count
+
     total = 0
     for r, c, h, w in specs:
         n_contrib = 0
@@ -618,6 +648,7 @@ def write_tile_aggregation_geotiff(
         dtype=out_dtype,
         nodata=nodata_value,
         compress="lzw",
+        BIGTIFF="IF_SAFER",
     )
     tmp_path = export_path.with_suffix(
         f".tmp.{os.getpid()}.{threading.get_ident()}{export_path.suffix}"

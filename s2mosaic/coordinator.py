@@ -5,10 +5,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union, overload
 import numpy.typing as npt
 
 from .config import MosaicRequest
+from .gdal_env import apply_gdal_network_defaults
 from .geometry import Aoi, Bbox
 from .pipelines.bounds import run_bounds_pipeline
 from .pipelines.grid import run_grid_pipeline
-from .sources import SOURCE_AWS, get_source
+from .sources import SOURCE_MPC, get_source
+
+apply_gdal_network_defaults()
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +155,7 @@ def mosaic(
     resolution: int = 10,
     resampling_method: str = "nearest",
     additional_query: Optional[Dict[str, Any]] = None,
-    source: str = SOURCE_AWS,
+    source: str = SOURCE_MPC,
     early_stop_missing_fraction: Union[float, None] = None,
     min_observations: Optional[int] = None,
     min_coverage_fraction: Optional[float] = None,
@@ -217,10 +220,10 @@ def mosaic(
             "bilinear", "cubic", "average", and "lanczos". Defaults to "nearest".
         additional_query (Dict[str, Any], optional): Additional query parameters for STAC API.
             Defaults to {"eo:cloud_cover": {"lt": 100}}.
-        source (str, optional): STAC imagery source. ``"AWS"`` (default) uses
-            Element 84 Earth Search on AWS Open Data (public S3, no auth);
-            ``"MPC"`` uses Microsoft Planetary Computer (SAS-signed URLs).
-            Defaults to "AWS".
+        source (str, optional): STAC imagery source. ``"MPC"`` (default) uses
+            Microsoft Planetary Computer (SAS-signed URLs); ``"AWS"`` uses
+            Element 84 Earth Search on AWS Open Data (public S3, no auth).
+            Defaults to "MPC".
         early_stop_missing_fraction (float, optional): Early-stop fraction for scene
             ingestion. Stops reading further scenes once the AOI's no-data
             fraction drops below this value. Set to ``None`` (default) or

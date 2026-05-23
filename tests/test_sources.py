@@ -145,12 +145,12 @@ class TestValidateInputsRejectsBadSource:
 
 
 class TestMosaicPublicApiSource:
-    def test_mosaic_signature_has_source_param_defaulting_to_aws(self):
+    def test_mosaic_signature_has_source_param_defaulting_to_mpc(self):
         import inspect
 
         sig = inspect.signature(mosaic)
         assert "source" in sig.parameters
-        assert sig.parameters["source"].default == SOURCE_AWS
+        assert sig.parameters["source"].default == SOURCE_MPC
 
     def test_mosaic_rejects_invalid_source_string(self):
         with pytest.raises(ValueError, match="GCS"):
@@ -185,7 +185,7 @@ class TestSourceThreadsThroughBoundsPipeline:
 
         assert captured["source"] is AWS
 
-    def test_aws_source_reaches_bounds_search_by_default(self, monkeypatch):
+    def test_mpc_source_reaches_bounds_search_by_default(self, monkeypatch):
         captured = {}
 
         def fake_search(*, bbox_4326, start_date, end_date, source, **_):
@@ -204,7 +204,7 @@ class TestSourceThreadsThroughBoundsPipeline:
                 bands=["B04"],
             )
 
-        assert captured["source"] is AWS
+        assert captured["source"] is MPC
 
 
 class TestSourceThreadsThroughGridPipeline:

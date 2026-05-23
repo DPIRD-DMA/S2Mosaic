@@ -15,7 +15,7 @@ S2Mosaic is a Python package for creating cloud-free mosaics from Sentinel-2 sat
 - Multiple mosaic creation methods: mean, arbitrary percentile, median or first valid pixel.
 - Support for different spectral bands, including visual (RGB) composites.
 - State-of-the-art cloud masking using OmniCloudMask, with an SCL option for computationally cheaper bulk processing.
-- STAC source selection: Element 84 Earth Search on AWS Open Data by default, or Microsoft Planetary Computer.
+- STAC source selection: Microsoft Planetary Computer by default, or Element 84 Earth Search on AWS Open Data.
 - Tile-streaming pipeline keeps peak memory low even for full-MGRS percentile mosaics over many scenes — the aggregation is parallelised across ~2048-pixel tiles, so only a handful of tile-sized buffers live in RAM at a time.
 - Resilient to transient COG read failures — per-scene fetches retry with exponential backoff, and a scene that still fails is logged and skipped so one bad asset doesn't abort the whole mosaic.
 - Export mosaics as GeoTIFF files or return as NumPy arrays.
@@ -146,7 +146,7 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 
 **Scene selection**
 
-- `source` (`"AWS"`): STAC provider. `"AWS"` (default) uses Element 84's Earth Search on AWS Open Data — Sentinel-2 L2A scenes, public COGs, no auth, no SAS rotation. `"MPC"` uses Microsoft Planetary Computer with SAS-signed URLs.
+- `source` (`"MPC"`): STAC provider. `"MPC"` (default) uses Microsoft Planetary Computer with SAS-signed URLs. `"AWS"` uses Element 84's Earth Search on AWS Open Data — Sentinel-2 L2A scenes, public COGs, no auth, no SAS rotation.
 - `additional_query` (`{"eo:cloud_cover": {"lt": 100}}`): extra STAC query filters, e.g. `{"eo:cloud_cover": {"lt": 80}}`.
 - `early_stop_missing_fraction` (`None`): scene-selection early stop once the remaining missing fraction inside the coverable area drops below this value. The default `None` examines every scene; `0.0` is accepted as an equivalent no-op. Ignored for `percentile` mosaic methods.
 - `min_coverage_fraction` (`None`): optional scene-edge trimming. When set, drops pixels covered by fewer than this fraction of the maximum scene-overlap count in the requested area. The default keeps the full requested coverage.
@@ -218,8 +218,8 @@ This project is licensed under the MIT License.
 S2Mosaic is built on top of:
 
 - **[Sentinel-2](https://sentiwiki.copernicus.eu/web/s2-products)** — ESA's Copernicus Earth-observation mission, the imagery source.
-- **[Element 84 Earth Search](https://earth-search.aws.element84.com/)** — the default STAC catalog and public AWS Open Data access to Sentinel-2 L2A COGs.
-- **[Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/)** — optional STAC catalog and signed access to the Sentinel-2 L2A archive.
+- **[Element 84 Earth Search](https://earth-search.aws.element84.com/)** — optional public AWS Open Data access to Sentinel-2 L2A COGs.
+- **[Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/)** — the default STAC catalog and signed access to the Sentinel-2 L2A archive.
 - **[OmniCloudMask](https://github.com/DPIRD-DMA/OmniCloudMask)** — the deep-learning cloud and cloud-shadow mask used by the default `cloud_mask="OCM"` provider.
 - **L2A Scene Classification Layer (SCL)** — the published per-scene classification used by the optional `cloud_mask="SCL"` provider.
 - **[rasterio](https://rasterio.readthedocs.io/)**, **[GeoPandas](https://geopandas.org/)**, **[pystac-client](https://pystac-client.readthedocs.io/)**, **[OpenCV](https://opencv.org/)**, **[Numba](https://numba.pydata.org/)**, and **[multiclean](https://github.com/DPIRD-DMA/multiclean)** — supporting libraries for I/O (including per-scene `WarpedVRT` reprojection), geometry, search, image ops, percentile aggregation, and mask post-processing.

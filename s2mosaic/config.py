@@ -9,6 +9,7 @@ import numpy as np
 from shapely.geometry.polygon import Polygon
 
 from .geometry import Aoi, Bbox
+from .sources import SOURCE_MPC
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,7 @@ class MosaicRequest:
     resolution: int = 10
     resampling_method: str = "nearest"
     additional_query: Optional[Dict[str, Any]] = None
-    source: str = "AWS"
+    source: str = SOURCE_MPC
     early_stop_missing_fraction: Optional[float] = None
     min_observations: Optional[int] = None
     min_coverage_fraction: Optional[float] = None
@@ -196,7 +197,7 @@ def validate_inputs(
     adaptive_tiling: bool = True,
     aoi: Optional[Polygon] = None,
     min_coverage_fraction: Optional[float] = None,
-    source: str = "AWS",
+    source: str = SOURCE_MPC,
 ) -> None:
     from .sources import VALID_SOURCES
 

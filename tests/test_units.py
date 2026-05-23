@@ -24,6 +24,7 @@ sys.path.insert(0, str(project_root))
 
 from s2mosaic import mosaic
 import s2mosaic.aggregation as aggregation_mod
+from s2mosaic.gdal_env import GDAL_NETWORK_DEFAULTS, apply_gdal_network_defaults
 from s2mosaic.geometry import (
     _expand_bounds_for_ocm_context,
     _rasterize_aoi_mask,
@@ -67,6 +68,7 @@ from s2mosaic.aggregation import (
 )
 from s2mosaic.cache import _read_with_retry, _write_tiled_copy, iter_ordered_fetches
 from s2mosaic.pipelines.grid import stream_mosaic_pipeline
+from s2mosaic.pipelines.bounds import _mask_resolution_for_request
 from s2mosaic.readers import (
     BoundsTileReader,
     GridTileReader,
@@ -1134,7 +1136,9 @@ class TestNanquantileAxis0:
     def test_default_tile_workers_uses_thread_safe_percentile_kernel(self):
         _warm_nanquantile_axis0()
 
-        assert DEFAULT_TILE_WORKERS == min(4, os.cpu_count() or 1)
+        # The kernel-warming guard exists because the default runs threaded.
+        # Pin the bound (>1) rather than the value so the test survives tuning.
+        assert DEFAULT_TILE_WORKERS > 1
         assert _nanquantile_axis0.signatures
 
 
@@ -1395,6 +1399,48 @@ class TestMosaicBoundsValidation:
                 input_crs=4326,
                 resolution=10,
             )
+
+
+class TestNetworkDefaults:
+    def test_gdal_network_defaults_include_timeouts(self, monkeypatch):
+        for key in GDAL_NETWORK_DEFAULTS:
+            monkeypatch.delenv(key, raising=False)
+
+        apply_gdal_network_defaults()
+
+        assert os.environ["GDAL_HTTP_CONNECTTIMEOUT"] == "30"
+        assert os.environ["GDAL_HTTP_TIMEOUT"] == "120"
+        assert os.environ["GDAL_DISABLE_READDIR_ON_OPEN"] == "EMPTY_DIR"
+
+    def test_gdal_network_defaults_preserve_user_values(self, monkeypatch):
+        monkeypatch.setenv("GDAL_HTTP_TIMEOUT", "9")
+
+        apply_gdal_network_defaults()
+
+        assert os.environ["GDAL_HTTP_TIMEOUT"] == "9"
+
+
+class TestBoundsMaskResolution:
+    def test_scl_mask_resolution_uses_native_floor(self):
+        request = MosaicRequest(
+            bounds=(0, 0, 100, 100), resolution=10, cloud_mask="SCL"
+        )
+
+        assert _mask_resolution_for_request(request) == 20
+
+    def test_scl_mask_resolution_preserves_coarser_user_resolution(self):
+        request = MosaicRequest(
+            bounds=(0, 0, 100, 100), resolution=30, cloud_mask="SCL"
+        )
+
+        assert _mask_resolution_for_request(request) == 30
+
+    def test_ocm_mask_resolution_still_uses_ocm_policy(self):
+        request = MosaicRequest(
+            bounds=(0, 0, 100, 100), resolution=60, cloud_mask="OCM"
+        )
+
+        assert _mask_resolution_for_request(request) == 50
 
 
 class TestExportPaths:
@@ -2040,9 +2086,11 @@ class TestBoundsOcmContext:
             lambda **_: [self.FakeItem(), self.FakeItem(), self.FakeItem()],
         )
 
-        def fake_iter_ordered_fetches(items, fetch_fn, max_workers):
+        def fake_iter_ordered_fetches(items, fetch_fn, max_workers, on_complete=None):
             prefetch_workers.append(max_workers)
             for i, _item in enumerate(items):
+                if on_complete is not None:
+                    on_complete(i)
                 yield i, np.zeros((3, 150, 150), dtype=np.uint16)
 
         monkeypatch.setattr(
@@ -2192,9 +2240,9 @@ class TestBoundsOcmContext:
         )
 
         assert fetch_tile_specs
-        assert fetch_tile_specs[0] != [(0, 0, 2048, 2048)]
+        assert fetch_tile_specs[0] != [(0, 0, 1024, 1024)]
         assert all(h <= 512 and w <= 512 for _, _, h, w in fetch_tile_specs[0])
-        assert len(fetch_tile_specs[0]) == 4
+        assert len(fetch_tile_specs[0]) == 2
 
     def test_aoi_scl_uses_full_read_when_block_gate_rejects_tiling(self, monkeypatch):
         import s2mosaic.pipelines.bounds as bounds_mod
@@ -2218,7 +2266,7 @@ class TestBoundsOcmContext:
             item, source, bounds_target, target_crs, mask_resolution
         ):
             full_fetches.append(item.id)
-            return np.ones((2048, 2048), dtype=np.uint8)
+            return np.ones((1024, 1024), dtype=np.uint8)
 
         monkeypatch.setattr(
             bounds_mod, "_search_for_items_by_aoi", lambda **_: [self.FakeItem()]
@@ -2296,7 +2344,7 @@ class TestBoundsOcmContext:
             bounds_mod,
             "_fetch_one_scl",
             lambda item, source, bounds_target, target_crs, mask_resolution: np.ones(
-                (4, 4), dtype=np.uint8
+                (2, 2), dtype=np.uint8
             ),
         )
         monkeypatch.setattr(
@@ -2362,16 +2410,18 @@ class TestBoundsOcmContext:
         monkeypatch.setattr(
             bounds_mod, "_search_for_items_by_aoi", lambda **_: [self.FakeItem()]
         )
-        monkeypatch.setattr(
-            bounds_mod,
-            "_rasterize_aoi_mask",
-            lambda **_: aoi_mask.copy(),
-        )
+
+        def fake_rasterize_aoi_mask(**kwargs):
+            if kwargs["height"] == 2:
+                return np.ones((2, 2), dtype=bool)
+            return aoi_mask.copy()
+
+        monkeypatch.setattr(bounds_mod, "_rasterize_aoi_mask", fake_rasterize_aoi_mask)
         monkeypatch.setattr(
             bounds_mod,
             "_fetch_one_scl",
             lambda item, source, bounds_target, target_crs, mask_resolution: np.ones(
-                (4, 4), dtype=np.uint8
+                (2, 2), dtype=np.uint8
             ),
         )
         monkeypatch.setattr(
@@ -2433,7 +2483,7 @@ class TestBoundsOcmContext:
             bounds_mod,
             "_fetch_one_scl",
             lambda item, source, bounds_target, target_crs, mask_resolution: np.ones(
-                (4, 4), dtype=np.uint8
+                (2, 2), dtype=np.uint8
             ),
         )
         monkeypatch.setattr(
@@ -2495,7 +2545,7 @@ class TestBoundsOcmContext:
             bounds_mod,
             "_fetch_one_scl",
             lambda item, source, bounds_target, target_crs, mask_resolution: np.ones(
-                (4, 4), dtype=np.uint8
+                (2, 2), dtype=np.uint8
             ),
         )
         monkeypatch.setattr(
