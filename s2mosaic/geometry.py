@@ -1,6 +1,6 @@
 """Geometry and target-grid helpers for bounds/AOI mosaics."""
 
-from typing import Tuple, TypeAlias, cast
+from typing import Any, NamedTuple, Optional, Tuple, TypeAlias, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -8,7 +8,7 @@ from pyproj import Transformer
 from rasterio.crs import CRS
 from rasterio.features import rasterize
 from rasterio.transform import Affine
-from shapely.geometry import Polygon
+from shapely.geometry import MultiPolygon, Polygon, box, shape
 from shapely.ops import transform as shapely_transform
 
 Bbox = Tuple[float, float, float, float]
@@ -85,6 +85,152 @@ def _grid_shape_for_bounds(bounds_target: Bbox, resolution: int) -> Tuple[int, i
     width = max(1, int(round((maxx - minx) / resolution)))
     height = max(1, int(round((maxy - miny) / resolution)))
     return width, height
+
+
+SceneWindow = Tuple[int, int, int, int]  # (col_off, row_off, width, height)
+
+
+class _MaskFetch(NamedTuple):
+    """Per-scene mask-fetch result, sized to the scene's footprint window.
+
+    ``arr`` holds the read pixels at ``crop``'s pre-crop shape; the caller
+    applies ``crop`` after mask compute to undo any OCM-context padding,
+    yielding a block that lands at ``target_window`` in the bounds grid.
+    """
+
+    arr: npt.NDArray[Any]
+    target_window: SceneWindow
+    crop: Tuple[slice, slice]
+
+
+def _window_from_target_bounds(
+    intersection_bounds: Bbox,
+    bounds_target: Bbox,
+    resolution: int,
+) -> Optional[SceneWindow]:
+    """Snap a target-CRS bounds to bounds_target's pixel grid as a SceneWindow."""
+    minx_t, _, _, maxy_t = bounds_target
+    minx, miny, maxx, maxy = intersection_bounds
+    if minx >= maxx or miny >= maxy:
+        return None
+    grid_w, grid_h = _grid_shape_for_bounds(bounds_target, resolution)
+    col_off = max(0, int(np.floor((minx - minx_t) / resolution)))
+    row_off = max(0, int(np.floor((maxy_t - maxy) / resolution)))
+    col_end = min(grid_w, int(np.ceil((maxx - minx_t) / resolution)))
+    row_end = min(grid_h, int(np.ceil((maxy_t - miny) / resolution)))
+    width = col_end - col_off
+    height = row_end - row_off
+    if width <= 0 or height <= 0:
+        return None
+    return col_off, row_off, width, height
+
+
+def _scene_window_in_target(
+    item_bbox_4326: Bbox,
+    bounds_target: Bbox,
+    target_crs: int,
+    resolution: int,
+) -> Optional[SceneWindow]:
+    """Where in the bounds_target grid a scene's footprint lands.
+
+    Reprojects the scene's lon/lat bbox into ``target_crs``, intersects with
+    ``bounds_target``, and snaps to the grid at ``resolution``. Returns
+    ``(col_off, row_off, width, height)`` or None if there's no overlap.
+
+    For wide-AOI cases prefer :func:`_scene_window_from_geometry` — the bbox
+    here always circumscribes the actual scene footprint (a UTM-aligned tile
+    appears as a tilted trapezoid in lon/lat, so its lon/lat bbox is strictly
+    larger than the tile). The slack shows up as nodata fed into OCM.
+    """
+    item_t = reproject_bbox(item_bbox_4326, 4326, target_crs)
+    minx_t, miny_t, maxx_t, maxy_t = bounds_target
+    minx_i, miny_i, maxx_i, maxy_i = item_t
+    intersection = (
+        max(minx_t, minx_i),
+        max(miny_t, miny_i),
+        min(maxx_t, maxx_i),
+        min(maxy_t, maxy_i),
+    )
+    return _window_from_target_bounds(intersection, bounds_target, resolution)
+
+
+def _scene_window_from_geometry(
+    item_geometry: Any,
+    bounds_target: Bbox,
+    target_crs: int,
+    resolution: int,
+) -> Optional[SceneWindow]:
+    """Tight scene window from the scene's GeoJSON footprint polygon (in 4326).
+
+    Reprojects the polygon vertex-by-vertex into ``target_crs``, intersects
+    with ``bounds_target`` as polygons, and takes the intersection's bbox.
+    Tighter than :func:`_scene_window_in_target` because the polygon traces
+    the actual data footprint rather than its circumscribing rectangle —
+    cuts the nodata fed into OCM, especially for cross-UTM-zone scenes.
+
+    Accepts either a GeoJSON-like mapping (``{"type": "Polygon", ...}``) or a
+    shapely geometry. Returns None on empty intersection or empty geometry.
+    """
+    geom = item_geometry if hasattr(item_geometry, "is_empty") else shape(item_geometry)
+    if geom.is_empty:
+        return None
+    if target_crs != 4326:
+        transformer = Transformer.from_crs(4326, target_crs, always_xy=True)
+        geom = shapely_transform(transformer.transform, geom)
+    if not isinstance(geom, (Polygon, MultiPolygon)):
+        return None
+    intersection = geom.intersection(box(*bounds_target))
+    if intersection.is_empty:
+        return None
+    return _window_from_target_bounds(intersection.bounds, bounds_target, resolution)
+
+
+def _window_bounds_in_target(
+    bounds_target: Bbox,
+    resolution: int,
+    window: SceneWindow,
+) -> Bbox:
+    """World-space bbox of a (col_off, row_off, w, h) window in bounds_target."""
+    minx_t, _, _, maxy_t = bounds_target
+    col_off, row_off, width, height = window
+    minx = minx_t + col_off * resolution
+    maxy = maxy_t - row_off * resolution
+    maxx = minx + width * resolution
+    miny = maxy - height * resolution
+    return (minx, miny, maxx, maxy)
+
+
+def _expand_window_for_ocm_context(
+    bounds_target: Bbox,
+    resolution: int,
+    window: SceneWindow,
+    min_pixels: int = _OCM_MIN_CONTEXT_PIXELS,
+) -> Tuple[SceneWindow, Tuple[slice, slice]]:
+    """Pad a scene window centered to satisfy OCM's >=``min_pixels`` context.
+
+    Mirrors :func:`_expand_bounds_for_ocm_context` but for per-scene windows.
+    The padded window may extend outside bounds_target's grid (negative
+    offsets or beyond the grid edge) — OCM gets context but the crop puts the
+    inferred pixels back at the original window position. Returns the padded
+    window and the crop slices that undo the padding on the OCM output.
+    """
+    col_off, row_off, width, height = window
+    target_w = max(width, min_pixels)
+    target_h = max(height, min_pixels)
+    if target_w == width and target_h == height:
+        return window, (slice(0, height), slice(0, width))
+    pad_x = target_w - width
+    pad_y = target_h - height
+    left = pad_x // 2
+    top = pad_y // 2
+    new_col_off = col_off - left
+    new_row_off = row_off - top
+    crop_col = col_off - new_col_off
+    crop_row = row_off - new_row_off
+    return (
+        (new_col_off, new_row_off, target_w, target_h),
+        (slice(crop_row, crop_row + height), slice(crop_col, crop_col + width)),
+    )
 
 
 def _expand_bounds_for_ocm_context(

@@ -69,18 +69,28 @@ def compute_masks_from_array(
 ) -> Tuple[npt.NDArray[Any], npt.NDArray[Any]]:
     """Run cloud + valid masking on an in-memory (3, H, W) R+G+NIR uint16 array.
 
-    Returns (clear_mask, valid_mask) at the same resolution as the input."""
-    # Silence OCM's chatty patch-size adjustment notices — they fire on every
-    # small-AOI scene and obscure the s2mosaic pipeline logs without telling
-    # the user anything actionable.
+    Returns (clear_mask, valid_mask) at the same resolution as the input.
+
+    Suppresses omnicloudmask's "Significant no-data areas detected" warning —
+    it fires on every cross-UTM-zone edge scene where the swath polygon is
+    tilted relative to the read rectangle (triangular nodata wedge). OCM
+    auto-shrinks the patch size and produces correct masks; the warning is
+    just noise.
+    """
     with warnings.catch_warnings():
         warnings.filterwarnings(
-            "ignore", category=UserWarning, module=r"omnicloudmask\..*"
+            "ignore",
+            message=r"Significant no-data areas detected",
+            category=UserWarning,
         )
+        patch_size = min(*rgb_nir.shape[1:], 1000)
+        patch_overlap = min(patch_size // 2, 50)
         cloud_class = predict_from_array(
             input_array=rgb_nir,
             batch_size=batch_size,
             inference_dtype=inference_dtype,
+            patch_size=patch_size,
+            patch_overlap=patch_overlap,
         )[0]
     clear = (cloud_class == 0).astype(np.uint8)
     clear = clean_array(

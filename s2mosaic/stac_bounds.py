@@ -27,6 +27,8 @@ class _AssetLike(Protocol):
 class _BoundsItemLike(Protocol):
     id: str
     assets: Any
+    bbox: Any
+    geometry: Any
 
 
 def _search_for_items_by_bbox(

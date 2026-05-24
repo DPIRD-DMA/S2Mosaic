@@ -11,7 +11,17 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+    Union,
+    cast,
+)
 
 import cv2
 import numpy as np
@@ -67,11 +77,16 @@ from ..stac import (
 from ..geometry import (
     Aoi,
     Bbox,
+    SceneWindow,
+    _MaskFetch,
     _OCM_BANDS,
-    _expand_bounds_for_ocm_context,
+    _expand_window_for_ocm_context,
     _grid_shape_for_bounds,
     _rasterize_aoi_mask,
+    _scene_window_from_geometry,
+    _scene_window_in_target,
     _target_grid,
+    _window_bounds_in_target,
     pick_utm_epsg,
     reproject_aoi,
     reproject_bbox,
@@ -85,7 +100,7 @@ from ..stac_bounds import (
 from .bounds_scl import (
     _fetch_one_scl,
     _fetch_one_scl_tiled,
-    _read_warpvrt,
+    _read_band_at_target_window,
     _should_use_tiled_scl_fetch,
 )
 
@@ -166,17 +181,79 @@ class _ResampledBoolMask:
         return arr.astype(dtype, copy=False) if dtype is not None else arr
 
 
+class _WindowedBoolMask:
+    """Sparse bool mask: a dense block placed at (row_off, col_off) within a
+    larger logical shape; pixels outside the block read as False.
+
+    Lets per-scene combo masks store only the scene's footprint within
+    bounds_target instead of the full bounds, which would be ruinous for
+    wide AOIs with hundreds of scenes (e.g. 20k x 9.6k bool x 200 scenes
+    ≈ 38 GB if dense). With a window, each scene holds ~one MGRS-tile-sized
+    block (~3666 x 3666 at 30 m ≈ 13 MB).
+    """
+
+    def __init__(
+        self,
+        block: npt.NDArray[Any],
+        col_off: int,
+        row_off: int,
+        shape: Tuple[int, int],
+    ):
+        self._block = np.ascontiguousarray(block, dtype=bool)
+        self._col_off = col_off
+        self._row_off = row_off
+        self.shape = shape
+
+    def __getitem__(self, key: Any) -> npt.NDArray[np.bool_]:
+        row_key, col_key = key
+        row_start = int(row_key.start or 0)
+        row_stop = int(row_key.stop)
+        col_start = int(col_key.start or 0)
+        col_stop = int(col_key.stop)
+        out = np.zeros((row_stop - row_start, col_stop - col_start), dtype=bool)
+        block_h, block_w = self._block.shape
+        r0 = max(row_start, self._row_off)
+        r1 = min(row_stop, self._row_off + block_h)
+        c0 = max(col_start, self._col_off)
+        c1 = min(col_stop, self._col_off + block_w)
+        if r0 < r1 and c0 < c1:
+            out[r0 - row_start : r1 - row_start, c0 - col_start : c1 - col_start] = (
+                self._block[
+                    r0 - self._row_off : r1 - self._row_off,
+                    c0 - self._col_off : c1 - self._col_off,
+                ]
+            )
+        return out
+
+    def __array__(self, dtype: Optional["np.dtype[Any]"] = None) -> npt.NDArray[Any]:
+        h, w = self.shape
+        out = np.zeros((h, w), dtype=bool)
+        block_h, block_w = self._block.shape
+        out[
+            self._row_off : self._row_off + block_h,
+            self._col_off : self._col_off + block_w,
+        ] = self._block
+        return out.astype(dtype, copy=False) if dtype is not None else out
+
+    def any(self) -> bool:
+        return bool(self._block.any())
+
+
 def _fetch_one_ocm_key(
     item: _BoundsItemLike,
     source: Source,
     bounds_target: Bbox,
     target_crs: int,
     ocm_resolution: int,
+    scene_window: SceneWindow,
 ) -> str:
-    return f"{source.name}|{item.id}|{bounds_target}|{target_crs}|{ocm_resolution}"
+    return (
+        f"{source.name}|{item.id}|{bounds_target}|{target_crs}|"
+        f"{ocm_resolution}|{scene_window}"
+    )
 
 
-@disk_cache("ocm", key_fn=_fetch_one_ocm_key)
+@disk_cache("ocm_v2", key_fn=_fetch_one_ocm_key)
 @with_scene_retry()
 def _fetch_one_ocm(
     item: _BoundsItemLike,
@@ -184,23 +261,31 @@ def _fetch_one_ocm(
     bounds_target: Bbox,
     target_crs: int,
     ocm_resolution: int,
-) -> npt.NDArray[Any]:
-    """Fetch one scene's OCM bands (B04, B03, B8A) as (3, h, w) uint16.
+    scene_window: SceneWindow,
+) -> _MaskFetch:
+    """Fetch R+G+NIR over the scene's footprint within ``bounds_target``.
 
-    Reads via rasterio + WarpedVRT so the mask loop can stream one scene at a
-    time and skip fetching late scenes entirely once the no_data threshold or
-    first-mode coverage is met.
+    Reading at the scene's footprint (rather than the full bounds) is the
+    difference between a per-scene tick costing one MGRS tile worth of work
+    vs. the whole AOI. Pads to >=100 px so OCM has its required context, then
+    returns a crop slice the caller applies to undo the padding.
     """
-    transform, width, height, target_crs_obj = _target_grid(
-        bounds_target, ocm_resolution, target_crs
+    expanded_window, crop = _expand_window_for_ocm_context(
+        bounds_target, ocm_resolution, scene_window
+    )
+    read_bounds = _window_bounds_in_target(
+        bounds_target, ocm_resolution, expanded_window
+    )
+    _, width, height, target_crs_obj = _target_grid(
+        read_bounds, ocm_resolution, target_crs
     )
     rio_resampling = get_rasterio_resampling("nearest")
 
     def _read_band(band_name: str) -> npt.NDArray[Any]:
         href = source.sign(item.assets[source.asset_name(band_name)].href)
         try:
-            return _read_warpvrt(
-                href, 1, transform, width, height, target_crs_obj, rio_resampling
+            return _read_band_at_target_window(
+                href, 1, read_bounds, target_crs_obj, width, height, rio_resampling
             )
         except RasterioIOError as exc:
             raise RasterioIOError(
@@ -209,7 +294,8 @@ def _fetch_one_ocm(
 
     with ThreadPoolExecutor(max_workers=len(_OCM_BANDS)) as executor:
         bands = list(executor.map(_read_band, _OCM_BANDS))
-    return np.stack(bands, axis=0).astype(np.uint16)  # type: ignore[no-any-return, unused-ignore]
+    arr = np.stack(bands, axis=0).astype(np.uint16)
+    return _MaskFetch(arr=arr, target_window=scene_window, crop=crop)
 
 
 def _search_and_sort_bounds_items(
@@ -262,6 +348,23 @@ def _search_and_sort_bounds_items(
     )
 
 
+def _scene_window_for_item(
+    item: _BoundsItemLike,
+    bounds_target: Bbox,
+    target_crs: int,
+    resolution: int,
+) -> Optional[SceneWindow]:
+    """Polygon-based scene window with bbox fallback for items missing geometry."""
+    geometry = getattr(item, "geometry", None)
+    if geometry is not None:
+        window = _scene_window_from_geometry(
+            geometry, bounds_target, target_crs, resolution
+        )
+        if window is not None:
+            return window
+    return _scene_window_in_target(item.bbox, bounds_target, target_crs, resolution)
+
+
 def _stream_bounds_combo_masks(
     *,
     items_list: List[_BoundsItemLike],
@@ -277,20 +380,43 @@ def _stream_bounds_combo_masks(
     early_stop_missing_fraction: Optional[float],
     possible_pixel_count: int,
     tile_workers: Optional[int],
-    ocm_bounds_target: Bbox,
-    ocm_crop: Optional[Tuple[slice, slice]],
     ocm_batch_size: int,
     ocm_inference_dtype: str,
     scl_tile_specs: Optional[List[Tuple[int, int, int, int]]],
     show_progress: bool,
-) -> Dict[int, npt.NDArray[Any]]:
-    """Stream per-scene cloud masks and keep only masks that contribute pixels."""
+) -> Dict[int, "_WindowedBoolMask"]:
+    """Stream per-scene cloud masks and keep only masks that contribute pixels.
+
+    Each scene's read window is clipped to its own footprint within
+    ``bounds_target``, so per-scene OCM/SCL work scales with the scene
+    (~one MGRS tile) rather than the full AOI extent.
+    """
     n_time = len(items_list)
     logger.info(
         f"Streaming cloud mask over up to {n_time} scenes "
         f"(per-scene fetch at {mask_resolution}m, EPSG:{target_crs})"
     )
-    kept_combo_masks: Dict[int, npt.NDArray[Any]] = {}
+
+    # Pre-compute the scene-footprint window in bounds_target's grid for each
+    # item. Scenes with no overlap (rare: STAC search uses bbox-in-lon/lat;
+    # corner cases can still drop empty intersections) are skipped up-front so
+    # we don't spend any worker time on them. Prefer item.geometry (polygon)
+    # over item.bbox so the read window tracks the actual swath footprint
+    # instead of its lon/lat bounding rectangle — meaningfully less nodata is
+    # fed into OCM, especially for cross-UTM-zone scenes.
+    scene_windows: List[Optional[SceneWindow]] = [
+        _scene_window_for_item(item, bounds_target, target_crs, mask_resolution)
+        for item in items_list
+    ]
+    valid_scene_idx = [i for i, w in enumerate(scene_windows) if w is not None]
+    if len(valid_scene_idx) < n_time:
+        logger.info(
+            "Skipping %d/%d scenes with no footprint overlap after reprojection",
+            n_time - len(valid_scene_idx),
+            n_time,
+        )
+
+    kept_combo_masks: Dict[int, _WindowedBoolMask] = {}
     good_pixel_tracker = np.zeros((mask_h, mask_w), dtype=bool)
     n_mask_fetch_failed = 0
     mask_progress: Optional["tqdm[Any]"] = None
@@ -300,21 +426,21 @@ def _stream_bounds_combo_masks(
             desc=f"Phase 1: streaming cloud masks ({cloud_mask})",
             unit="scene",
         )
-    _pb = mask_progress
 
-    def _on_mask_complete(_i: int) -> None:
-        if _pb is not None:
-            _pb.update(1)
-
-    mask_fetch_iter: Optional[
-        Iterator[Tuple[int, Union[npt.NDArray[Any], Exception]]]
-    ] = None
+    # For ordered iteration we still walk through all items_list positions;
+    # entries without a window are no-ops below.
+    mask_fetch_iter: Optional[Iterator[Tuple[int, Union[_MaskFetch, Exception]]]] = None
     phase1_workers = tile_workers if tile_workers is not None else DEFAULT_TILE_WORKERS
-    if cloud_mask == CLOUD_MASK_SCL:
-        mask_fetch_iter = iter_ordered_fetches(
-            items=items_list,
-            fetch_fn=lambda _i, item: (
-                _fetch_one_scl_tiled(
+
+    def _fetch_scene(idx: int, item: _BoundsItemLike) -> _MaskFetch:
+        window = scene_windows[idx]
+        if window is None:
+            raise SceneFetchError(
+                f"Scene {item.id} does not intersect bounds_target after reprojection"
+            )
+        if cloud_mask == CLOUD_MASK_SCL:
+            if scl_tile_specs is not None:
+                return _fetch_one_scl_tiled(
                     item,
                     source,
                     bounds_target,
@@ -323,14 +449,20 @@ def _stream_bounds_combo_masks(
                     mask_w,
                     mask_h,
                     scl_tile_specs,
+                    window,
                 )
-                if scl_tile_specs is not None
-                else _fetch_one_scl(
-                    item, source, bounds_target, target_crs, mask_resolution
-                )
-            ),
+            return _fetch_one_scl(
+                item, source, bounds_target, target_crs, mask_resolution, window
+            )
+        return _fetch_one_ocm(
+            item, source, bounds_target, target_crs, mask_resolution, window
+        )
+
+    if cloud_mask == CLOUD_MASK_SCL:
+        mask_fetch_iter = iter_ordered_fetches(
+            items=items_list,
+            fetch_fn=_fetch_scene,
             max_workers=phase1_workers,
-            on_complete=_on_mask_complete,
         )
     elif cloud_mask == CLOUD_MASK_OCM:
         # Each OCM fetch already reads R/G/NIR in parallel. Keep scene-level
@@ -338,15 +470,8 @@ def _stream_bounds_combo_masks(
         # without multiplying concurrent reads too aggressively.
         mask_fetch_iter = iter_ordered_fetches(
             items=items_list,
-            fetch_fn=lambda _i, item: _fetch_one_ocm(
-                item,
-                source,
-                ocm_bounds_target,
-                target_crs,
-                mask_resolution,
-            ),
+            fetch_fn=_fetch_scene,
             max_workers=min(2, phase1_workers),
-            on_complete=_on_mask_complete,
         )
 
     for scene_position in range(n_time):
@@ -376,32 +501,43 @@ def _stream_bounds_combo_masks(
                 f"({items_list[scene_idx].id}): mask fetch failed, "
                 f"skipping ({e})"
             )
+            if mask_progress is not None:
+                mask_progress.update(1)
             continue
 
         if cloud_mask == CLOUD_MASK_SCL:
-            clear, valid = compute_masks_from_scl(mask_result)
+            clear, valid = compute_masks_from_scl(mask_result.arr)
         else:
             clear, valid = compute_masks_from_array(
-                mask_result,
+                mask_result.arr,
                 batch_size=ocm_batch_size,
                 inference_dtype=ocm_inference_dtype,
             )
-            if ocm_crop is not None:
-                clear = clear[ocm_crop]
-                valid = valid[ocm_crop]
-        combo = clear & valid
+        clear = clear[mask_result.crop]
+        valid = valid[mask_result.crop]
+        if mask_progress is not None:
+            mask_progress.update(1)
+        combo_block = clear & valid
 
+        col_off, row_off, win_w, win_h = mask_result.target_window
         if mosaic_method == MOSAIC_FIRST:
-            new_pixels = combo & ~good_pixel_tracker
+            tracker_slice = good_pixel_tracker[
+                row_off : row_off + win_h, col_off : col_off + win_w
+            ]
+            new_pixels = combo_block & ~tracker_slice
             if not new_pixels.any():
                 continue
-            combo = new_pixels
-        elif not combo.any():
+            combo_block = new_pixels
+        elif not combo_block.any():
             # All-cloud scene — no contribution to mean/percentile either.
             continue
 
-        kept_combo_masks[scene_idx] = combo
-        good_pixel_tracker |= combo
+        kept_combo_masks[scene_idx] = _WindowedBoolMask(
+            combo_block, col_off, row_off, (mask_h, mask_w)
+        )
+        good_pixel_tracker[row_off : row_off + win_h, col_off : col_off + win_w] |= (
+            combo_block
+        )
 
         if (
             early_stop_missing_fraction is not None
@@ -641,18 +777,11 @@ def run_bounds_pipeline(
     mask_resolution = _mask_resolution_for_request(request)
     logger.info(f"Cloud mask provider {request.cloud_mask} at {mask_resolution}m")
 
-    # Each per-scene fetch via WarpedVRT snaps to exactly this transform /
-    # width / height, so all scenes share the same (h, w) without us
-    # materialising them. OCM gets an expanded read if needed so the model sees
-    # at least 100 x 100 pixels of spatial context; predictions are cropped
-    # back to the requested bounds before scene-selection logic uses them.
+    # Each per-scene fetch reads a window clipped to the scene's footprint
+    # within bounds_target, so per-scene work scales with the scene (~one MGRS
+    # tile) rather than the full AOI. OCM context padding happens per-window
+    # inside the fetcher.
     mask_w, mask_h = _grid_shape_for_bounds(bounds_target, mask_resolution)
-    ocm_bounds_target = bounds_target
-    ocm_crop: Optional[Tuple[slice, slice]] = None
-    if request.cloud_mask == CLOUD_MASK_OCM:
-        ocm_bounds_target, ocm_crop = _expand_bounds_for_ocm_context(
-            bounds_target, mask_resolution
-        )
     n_time = len(items_list)
 
     # Coverage mask at mask resolution — used for skip decisions.
@@ -716,8 +845,6 @@ def run_bounds_pipeline(
         early_stop_missing_fraction=request.early_stop_missing_fraction,
         possible_pixel_count=possible_pixel_count,
         tile_workers=request.tile_workers,
-        ocm_bounds_target=ocm_bounds_target,
-        ocm_crop=ocm_crop,
         ocm_batch_size=request.ocm_batch_size,
         ocm_inference_dtype=request.ocm_inference_dtype,
         scl_tile_specs=scl_tile_specs,
@@ -737,7 +864,7 @@ def run_bounds_pipeline(
     )
     n_bands = 3 if is_visual else len(bands)
 
-    def _to_user_mask(mask: npt.NDArray[Any], coverage: Optional[Any] = None) -> Any:
+    def _to_user_mask(mask: Any, coverage: Optional[Any] = None) -> Any:
         if mask.shape == (h, w) and coverage is None:
             return mask
         return _ResampledBoolMask(mask, (h, w), coverage=coverage)

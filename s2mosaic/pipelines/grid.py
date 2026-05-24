@@ -302,13 +302,7 @@ def stream_mosaic_pipeline(
             except StopIteration:
                 break
             if isinstance(combo_result, Exception):
-                n_mask_fetch_failed += 1
-                logger.warning(
-                    "Mask fetch failed for %s, skipping (%s)",
-                    items[scene_idx].id,
-                    combo_result,
-                )
-                continue
+                raise combo_result
             combo = combo_result
             logger.info(
                 "Phase 1: scene %d/%d (%s): %s",

@@ -26,7 +26,9 @@ from s2mosaic import mosaic
 import s2mosaic.aggregation as aggregation_mod
 from s2mosaic.gdal_env import GDAL_NETWORK_DEFAULTS, apply_gdal_network_defaults
 from s2mosaic.geometry import (
+    _MaskFetch,
     _expand_bounds_for_ocm_context,
+    _expand_window_for_ocm_context,
     _rasterize_aoi_mask,
     _target_grid,
     pick_utm_epsg,
@@ -1949,10 +1951,24 @@ class TestGridOrderedMaskStreaming:
         assert calls == ["scene-0", "scene-1"]
 
 
+def _fake_scl_fetch_full_window(item, source, bt, tc, mr, scene_window):
+    """All-ones SCL fetch returned at the requested scene_window — shared
+    test stub for the bounds pipeline's per-scene-window fetch contract."""
+    return _MaskFetch(
+        arr=np.ones((scene_window[3], scene_window[2]), dtype=np.uint8),
+        target_window=scene_window,
+        crop=(slice(0, scene_window[3]), slice(0, scene_window[2])),
+    )
+
+
 class TestBoundsOcmContext:
     class FakeItem:
         id = "fake-scene"
         datetime = datetime(2023, 6, 1, tzinfo=timezone.utc)
+        # Wide enough that the reprojected bbox covers any test bounds in
+        # EPSG:32750 (whether near origin or in real UTM coords). Avoids the
+        # extreme poles so reprojection stays well-defined.
+        bbox = (-90.0, -45.0, 90.0, 45.0)
         properties = {
             "s2:nodata_pixel_percentage": 0.0,
             "s2:high_proba_clouds_percentage": 0.0,
@@ -1987,12 +2003,6 @@ class TestBoundsOcmContext:
         import s2mosaic.pipelines.bounds as bounds_mod
 
         requested_bounds = (390_000.0, 6_460_000.0, 390_200.0, 6_460_100.0)
-        expected_expanded = (
-            389_100.0,
-            6_459_040.0,
-            391_100.0,
-            6_461_040.0,
-        )
         fetch_calls = []
         compute_input_shapes = []
         aggregation_calls = []
@@ -2017,10 +2027,33 @@ class TestBoundsOcmContext:
             "get_frequent_coverage_for_bbox",
             lambda **_: np.ones((5, 10), dtype=bool),
         )
+        monkeypatch.setattr(
+            bounds_mod,
+            "_scene_window_in_target",
+            lambda item_bbox, bounds_target, target_crs, resolution: (0, 0, 10, 5),
+        )
 
-        def fake_fetch_one_ocm(item, source, bounds_target, target_crs, ocm_resolution):
-            fetch_calls.append((item.id, bounds_target, target_crs, ocm_resolution))
-            return np.zeros((3, 100, 100), dtype=np.uint16)
+        def fake_fetch_one_ocm(
+            item, source, bounds_target, target_crs, ocm_resolution, scene_window
+        ):
+            expanded, crop = _expand_window_for_ocm_context(
+                bounds_target, ocm_resolution, scene_window
+            )
+            fetch_calls.append(
+                (
+                    item.id,
+                    bounds_target,
+                    scene_window,
+                    expanded,
+                    target_crs,
+                    ocm_resolution,
+                )
+            )
+            return _MaskFetch(
+                arr=np.zeros((3, expanded[3], expanded[2]), dtype=np.uint16),
+                target_window=scene_window,
+                crop=crop,
+            )
 
         def fake_compute_masks_from_array(array, *, batch_size, inference_dtype):
             compute_input_shapes.append(array.shape)
@@ -2064,7 +2097,14 @@ class TestBoundsOcmContext:
             cloud_mask="OCM",
         )
 
-        assert fetch_calls == [("fake-scene", expected_expanded, 32750, 20)]
+        assert len(fetch_calls) == 1
+        call = fetch_calls[0]
+        assert call[0] == "fake-scene"
+        assert call[1] == requested_bounds  # bounds_target, not expanded
+        assert call[2] == (0, 0, 10, 5)  # scene_window equals full bounds (small AOI)
+        assert call[3] == (-45, -47, 100, 100)  # padded to OCM context
+        assert call[4] == 32750
+        assert call[5] == 20
         assert compute_input_shapes == [(3, 100, 100)]
         assert arr.shape == (1, 5, 10)
         assert profile["width"] == 10
@@ -2085,13 +2125,25 @@ class TestBoundsOcmContext:
             "_search_for_items_by_bbox",
             lambda **_: [self.FakeItem(), self.FakeItem(), self.FakeItem()],
         )
+        monkeypatch.setattr(
+            bounds_mod,
+            "_scene_window_in_target",
+            lambda item_bbox, bounds_target, target_crs, resolution: (0, 0, 100, 100),
+        )
 
         def fake_iter_ordered_fetches(items, fetch_fn, max_workers, on_complete=None):
             prefetch_workers.append(max_workers)
             for i, _item in enumerate(items):
                 if on_complete is not None:
                     on_complete(i)
-                yield i, np.zeros((3, 150, 150), dtype=np.uint16)
+                yield (
+                    i,
+                    _MaskFetch(
+                        arr=np.zeros((3, 100, 100), dtype=np.uint16),
+                        target_window=(0, 0, 100, 100),
+                        crop=(slice(0, 100), slice(0, 100)),
+                    ),
+                )
 
         monkeypatch.setattr(
             bounds_mod, "iter_ordered_fetches", fake_iter_ordered_fetches
@@ -2185,9 +2237,14 @@ class TestBoundsOcmContext:
             width,
             height,
             tile_specs,
+            scene_window,
         ):
             fetch_tile_specs.append(tile_specs)
-            return np.ones((height, width), dtype=np.uint8)
+            return _MaskFetch(
+                arr=np.ones((height, width), dtype=np.uint8),
+                target_window=(0, 0, width, height),
+                crop=(slice(0, height), slice(0, width)),
+            )
 
         monkeypatch.setattr(
             bounds_mod, "_search_for_items_by_aoi", lambda **_: [self.FakeItem()]
@@ -2263,10 +2320,15 @@ class TestBoundsOcmContext:
             return mask
 
         def fake_fetch_one_scl(
-            item, source, bounds_target, target_crs, mask_resolution
+            item, source, bounds_target, target_crs, mask_resolution, scene_window
         ):
             full_fetches.append(item.id)
-            return np.ones((1024, 1024), dtype=np.uint8)
+            _, _, w, h = scene_window
+            return _MaskFetch(
+                arr=np.ones((h, w), dtype=np.uint8),
+                target_window=scene_window,
+                crop=(slice(0, h), slice(0, w)),
+            )
 
         monkeypatch.setattr(
             bounds_mod, "_search_for_items_by_aoi", lambda **_: [self.FakeItem()]
@@ -2340,13 +2402,7 @@ class TestBoundsOcmContext:
         monkeypatch.setattr(
             bounds_mod, "_search_for_items_by_bbox", fake_search_by_bbox
         )
-        monkeypatch.setattr(
-            bounds_mod,
-            "_fetch_one_scl",
-            lambda item, source, bounds_target, target_crs, mask_resolution: np.ones(
-                (2, 2), dtype=np.uint8
-            ),
-        )
+        monkeypatch.setattr(bounds_mod, "_fetch_one_scl", _fake_scl_fetch_full_window)
         monkeypatch.setattr(
             bounds_mod,
             "compute_masks_from_scl",
@@ -2417,13 +2473,7 @@ class TestBoundsOcmContext:
             return aoi_mask.copy()
 
         monkeypatch.setattr(bounds_mod, "_rasterize_aoi_mask", fake_rasterize_aoi_mask)
-        monkeypatch.setattr(
-            bounds_mod,
-            "_fetch_one_scl",
-            lambda item, source, bounds_target, target_crs, mask_resolution: np.ones(
-                (2, 2), dtype=np.uint8
-            ),
-        )
+        monkeypatch.setattr(bounds_mod, "_fetch_one_scl", _fake_scl_fetch_full_window)
         monkeypatch.setattr(
             bounds_mod,
             "compute_masks_from_scl",
@@ -2479,13 +2529,7 @@ class TestBoundsOcmContext:
         monkeypatch.setattr(
             bounds_mod, "_search_for_items_by_bbox", lambda **_: [self.FakeItem()]
         )
-        monkeypatch.setattr(
-            bounds_mod,
-            "_fetch_one_scl",
-            lambda item, source, bounds_target, target_crs, mask_resolution: np.ones(
-                (2, 2), dtype=np.uint8
-            ),
-        )
+        monkeypatch.setattr(bounds_mod, "_fetch_one_scl", _fake_scl_fetch_full_window)
         monkeypatch.setattr(
             bounds_mod,
             "compute_masks_from_scl",
@@ -2541,13 +2585,7 @@ class TestBoundsOcmContext:
         monkeypatch.setattr(
             bounds_mod, "_search_for_items_by_bbox", lambda **_: [self.FakeItem()]
         )
-        monkeypatch.setattr(
-            bounds_mod,
-            "_fetch_one_scl",
-            lambda item, source, bounds_target, target_crs, mask_resolution: np.ones(
-                (2, 2), dtype=np.uint8
-            ),
-        )
+        monkeypatch.setattr(bounds_mod, "_fetch_one_scl", _fake_scl_fetch_full_window)
         monkeypatch.setattr(
             bounds_mod,
             "compute_masks_from_scl",
