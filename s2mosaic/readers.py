@@ -1,11 +1,10 @@
-"""Raster tile readers and local materialisation helpers."""
+"""Raster tile readers."""
 
 import logging
 import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -18,7 +17,6 @@ from rasterio.transform import Affine
 from rasterio.vrt import WarpedVRT
 from rasterio.windows import Window
 
-from .cache import _write_tiled_copy, materialise_tiled_band
 from .config import CLOUD_MASK_SCL, MOSAIC_FIRST
 from .geometry import Bbox
 from .helpers import SceneFetchError, get_rasterio_resampling
@@ -31,55 +29,7 @@ DEFAULT_TILE_WORKERS = 8
 SIGNED_URL_TTL_SECONDS = 45 * 60
 REMOTE_RASTER_ATTEMPTS = 3
 GridSourceResolver = Callable[[bool], str]
-BoundsSourceResolver = Callable[[bool], Tuple[str, bool]]
-
-
-def _materialise_grid_band(
-    get_signed_url: Callable[[], str],
-    s2_scene_size: int,
-    rio_resampling: Resampling,
-) -> Callable[[Path], None]:
-    """Build a materialiser for a grid_id-mode band cache entry.
-
-    Returns a closure that, given an output path, downloads the full asset
-    from the configured source and writes it as a tiled GeoTIFF on the MGRS
-    grid at the user's output resolution.
-    """
-
-    def write(tmp_path: Path) -> None:
-        with rio.open(get_signed_url()) as src:
-            n_bands = src.count
-            scale_x = src.width / s2_scene_size
-            scale_y = src.height / s2_scene_size
-            transform = src.transform * rio.Affine.scale(scale_x, scale_y)
-            profile = {
-                "driver": "GTiff",
-                "count": n_bands,
-                "dtype": src.dtypes[0],
-                "width": s2_scene_size,
-                "height": s2_scene_size,
-                "crs": src.crs,
-                "transform": transform,
-                "tiled": True,
-                "blockxsize": 512,
-                "blockysize": 512,
-                "compress": "lzw",
-                "BIGTIFF": "IF_SAFER",
-            }
-
-            window_cls: Any = Window
-
-            def source_window_for(dst_window: Window) -> Window:
-                return window_cls(
-                    dst_window.col_off * scale_x,
-                    dst_window.row_off * scale_y,
-                    dst_window.width * scale_x,
-                    dst_window.height * scale_y,
-                )
-
-            _write_tiled_copy(src, tmp_path, profile, rio_resampling, source_window_for)
-
-    return write
+BoundsSourceResolver = Callable[[bool], str]
 
 
 def _lazy_signed_url(
@@ -323,14 +273,13 @@ def make_grid_tile_reader(
     """Build a tile-reader for grid_id mode (direct MGRS COG reads).
 
     Builds lazy source resolvers for every (scene, asset). Workers in Phase 2
-    open handles lazily per thread; if ``S2MOSAIC_DEBUG_CACHE`` is on, the
-    cache file is materialised only when a tile actually reads that source.
+    open handles lazily per thread.
 
-    With ``prewarm=True`` (default) the resolvers are called in parallel
-    once before returning, so cache materialisation happens in one parallel
-    burst rather than being fanned out serially by the per-tile workers.
-    Set ``prewarm=False`` to keep the resolvers strictly lazy (useful for
-    tests, or for callers that expect to skip many reads via early stopping).
+    With ``prewarm=True`` (default) the resolvers are called in parallel once
+    before returning so all signed URLs are warmed in a single burst rather
+    than fanned out serially by the per-tile workers. Set ``prewarm=False``
+    to keep the resolvers strictly lazy (useful for tests, or for callers
+    that expect to skip many reads via early stopping).
     """
     rio_resampling = get_rasterio_resampling(resampling_method)
     href_band_indices = [band_idx for _, band_idx in href_template]
@@ -340,49 +289,26 @@ def make_grid_tile_reader(
         scene_sources: List[GridSourceResolver] = []
         for asset, _ in href_template:
             asset_key = source.asset_name(asset)
-            cache_key = (
-                f"grid|{source.name}|{item.id}|{asset_key}|{s2_scene_size}|"
-                f"{resolution}|{resampling_method}"
-            )
             get_signed_url = _lazy_signed_url(source, item.assets[asset_key].href)
 
             def source_for(
                 refresh: bool = False,
-                cache_key: str = cache_key,
                 get_signed_url: Callable[[bool], str] = get_signed_url,
             ) -> str:
-                local = materialise_tiled_band(
-                    cache_key,
-                    _materialise_grid_band(
-                        lambda: get_signed_url(refresh),
-                        s2_scene_size,
-                        rio_resampling,
-                    ),
-                )
-                return str(local) if local is not None else get_signed_url(refresh)
+                return get_signed_url(refresh)
 
             scene_sources.append(source_for)
         sources.append(scene_sources)
     cache = _HandleCache(sources)
 
     if prewarm:
-        # Pre-warm the per-(scene, asset) sources in parallel. When the debug
-        # cache is on this materialises every cache entry up-front (much faster
-        # than serially-on-first-read inside the tile loop); when caching is off
-        # it's a cheap parallel URL-sign and adds negligible overhead.
         _prewarm_sources(sources)
 
     return GridTileReader(cache, href_band_indices, s2_scene_size, rio_resampling)
 
 
 def _prewarm_sources(sources: List[List[Callable[..., Any]]]) -> None:
-    """Call every lazy source resolver in parallel.
-
-    Resolvers are no-ops when the debug cache is disabled (just URL signing).
-    With cache enabled they trigger materialisation — pre-warming avoids the
-    serial fan-out you'd otherwise get from tile workers each lazily
-    materialising the (scene, asset) entries they touch.
-    """
+    """Call every lazy source resolver in parallel to pre-sign URLs."""
     flat: List[Callable[..., Any]] = [
         resolver for scene in sources for resolver in scene
     ]
@@ -402,74 +328,21 @@ def _prewarm_sources(sources: List[List[Callable[..., Any]]]) -> None:
 
 def should_prewarm_sources(
     mosaic_method: str,
-    early_stop_missing_fraction: Optional[float],
     min_observations: Optional[int] = None,
+    max_observations: Optional[int] = None,
 ) -> bool:
-    """Whether to pre-materialise tile sources before aggregation.
+    """Whether to pre-sign tile sources before aggregation.
 
     Prewarming improves throughput when most scene/band sources will be read
     anyway. Keep sources lazy when the aggregation is likely to skip many reads:
-    ``first`` mode can stop as pixels fill, ``early_stop_missing_fraction`` can stop
-    scene walks before all scenes are touched, and ``min_observations``
-    can cap per-tile observations.
+    ``first`` mode can stop as pixels fill, and observation bounds can cap
+    per-tile or per-pixel observations.
     """
     return (
         mosaic_method != MOSAIC_FIRST
-        and (early_stop_missing_fraction is None or early_stop_missing_fraction == 0.0)
         and min_observations is None
+        and max_observations is None
     )
-
-
-def _materialise_bounds_band(
-    get_signed_url: Callable[[], str],
-    bounds_target: Bbox,
-    target_crs: int,
-    width: int,
-    height: int,
-    resolution: int,
-    rio_resampling: Any,
-) -> Callable[[Path], None]:
-    """Build a materialiser for a bounds-mode band cache entry.
-
-    Closes over the item, asset, target grid, and resampling. The returned
-    function opens the COG via WarpedVRT (which handles reprojection to the
-    user's target grid) and streams destination blocks to a tiled GeoTIFF.
-    Subsequent reads of any tile window can open the local file directly —
-    no WarpedVRT needed once materialised.
-    """
-    target_crs_obj = CRS.from_epsg(target_crs)
-    minx, _, _, maxy = bounds_target
-    transform = Affine(resolution, 0, minx, 0, -resolution, maxy)
-
-    def write(tmp_path: Path) -> None:
-        with rio.open(get_signed_url()) as src:
-            with WarpedVRT(
-                src,
-                crs=target_crs_obj,
-                transform=transform,
-                width=width,
-                height=height,
-                resampling=rio_resampling,
-            ) as vrt:
-                n_bands = vrt.count
-                dtype = vrt.dtypes[0]
-                profile = {
-                    "driver": "GTiff",
-                    "count": n_bands,
-                    "dtype": dtype,
-                    "width": width,
-                    "height": height,
-                    "crs": target_crs_obj,
-                    "transform": transform,
-                    "tiled": True,
-                    "blockxsize": 512,
-                    "blockysize": 512,
-                    "compress": "lzw",
-                    "BIGTIFF": "IF_SAFER",
-                }
-                _write_tiled_copy(vrt, tmp_path, profile, rio_resampling, lambda w: w)
-
-    return write
 
 
 def make_bounds_tile_reader(
@@ -488,10 +361,8 @@ def make_bounds_tile_reader(
     """Build a tile-reader for bounds mode (WarpedVRT-backed reads).
 
     Builds lazy source resolvers for every (scene, asset). Workers open
-    handles lazily per thread; if ``S2MOSAIC_DEBUG_CACHE`` is on, the local
-    cache file is materialised only when a tile actually reads that source.
-    PC URLs get wrapped in a ``WarpedVRT`` to reproject on read, while cached
-    local files are opened directly (they're already on the target grid).
+    handles lazily per thread and wrap each opened COG in a ``WarpedVRT``
+    that reprojects to the user's target grid.
 
     With ``prewarm=True`` (default) the resolvers are called in parallel once
     before returning. Pass ``prewarm=False`` to keep them strictly lazy.
@@ -505,43 +376,18 @@ def make_bounds_tile_reader(
         scene_sources: List[BoundsSourceResolver] = []
         for asset, _ in href_template:
             asset_key = source.asset_name(asset)
-            cache_key = (
-                f"bounds|{source.name}|{item.id}|{asset_key}|{bounds_target}|"
-                f"{target_crs}|{width}|{height}|{resolution}|{resampling_method}"
-            )
             get_signed_url = _lazy_signed_url(source, item.assets[asset_key].href)
 
             def source_for(
                 refresh: bool = False,
-                cache_key: str = cache_key,
                 get_signed_url: Callable[[bool], str] = get_signed_url,
-            ) -> Tuple[str, bool]:
-                local = materialise_tiled_band(
-                    cache_key,
-                    _materialise_bounds_band(
-                        lambda: get_signed_url(refresh),
-                        bounds_target,
-                        target_crs,
-                        width,
-                        height,
-                        resolution,
-                        rio_resampling,
-                    ),
-                )
-                return (
-                    (str(local), True)
-                    if local is not None
-                    else (get_signed_url(refresh), False)
-                )
+            ) -> str:
+                return get_signed_url(refresh)
 
             scene_sources.append(source_for)
         sources.append(scene_sources)
 
     if prewarm:
-        # Pre-warm sources in parallel. With debug cache on this materialises
-        # every (scene, asset) up front; without cache it's just parallel URL
-        # signing. Avoids the serial fan-out tile workers would otherwise do
-        # when each first touches a (scene, asset) inside the tile loop.
         _prewarm_sources(sources)
 
     return BoundsTileReader(
@@ -584,11 +430,9 @@ class BoundsTileReader:
     ) -> Tuple[Any, Any]:
         last_error: Optional[RasterioIOError] = None
         for attempt in range(REMOTE_RASTER_ATTEMPTS):
-            source, is_local = self._sources[scene_idx][asset_idx](
-                refresh or attempt > 0
-            )
+            href = self._sources[scene_idx][asset_idx](refresh or attempt > 0)
             try:
-                src = rio.open(source)
+                src = rio.open(href)
                 break
             except RasterioIOError as exc:
                 last_error = exc
@@ -597,17 +441,14 @@ class BoundsTileReader:
         else:
             assert last_error is not None
             raise last_error
-        if is_local:
-            handle: Any = src
-        else:
-            handle = WarpedVRT(
-                src,
-                crs=self._target_crs_obj,
-                transform=self._user_transform,
-                width=self._width,
-                height=self._height,
-                resampling=self._rio_resampling,
-            )
+        handle = WarpedVRT(
+            src,
+            crs=self._target_crs_obj,
+            transform=self._user_transform,
+            width=self._width,
+            height=self._height,
+            resampling=self._rio_resampling,
+        )
         return src, handle
 
     def _get_source(self, scene_idx: int, asset_idx: int) -> Any:
@@ -636,8 +477,7 @@ class BoundsTileReader:
                 if old in self._entries:
                     self._entries.remove(old)
             src, handle = old
-            if handle is not src:
-                handle.close()
+            handle.close()
             src.close()
         entry = self._open_entry(scene_idx, asset_idx, refresh=True)
         per_thread[key] = entry
@@ -675,6 +515,5 @@ class BoundsTileReader:
             entries = self._entries
             self._entries = []
         for src, handle in entries:
-            if handle is not src:
-                handle.close()
+            handle.close()
             src.close()

@@ -11,7 +11,7 @@ from tqdm.auto import tqdm
 
 from ..aggregation import run_tile_aggregation, write_tile_aggregation_geotiff
 from ..cache import iter_ordered_fetches
-from ..config import CLOUD_MASK_OCM, MOSAIC_FIRST, MOSAIC_PERCENTILE, MosaicRequest
+from ..config import CLOUD_MASK_OCM, MOSAIC_FIRST, MosaicRequest
 from ..frequent_coverage import get_frequent_coverage
 from ..helpers import (
     MGRS_TILE_SIZE_M,
@@ -154,9 +154,9 @@ def run_grid_pipeline(
     mosaic, profile = stream_mosaic_pipeline(
         sorted_scenes=sorted_items,
         bands=bands,
-        early_stop_missing_fraction=request.early_stop_missing_fraction,
         source=source,
         min_observations=request.min_observations,
+        max_observations=request.max_observations,
         export_path=export_path,
         output_coverage_mask=output_coverage_mask,
         mosaic_method=request.mosaic_method,
@@ -189,9 +189,9 @@ def stream_mosaic_pipeline(
     sorted_scenes: pd.DataFrame,
     bands: List[str],
     coverage_mask: npt.NDArray[Any],
-    early_stop_missing_fraction: Union[float, None],
     source: Optional[Source] = None,
     min_observations: Optional[int] = None,
+    max_observations: Optional[int] = None,
     export_path: Optional[Path] = None,
     output_coverage_mask: Optional[npt.NDArray[Any]] = None,
     mosaic_method: str = "mean",
@@ -323,33 +323,16 @@ def stream_mosaic_pipeline(
                 continue
             masks[scene_idx] = combo
             good_pixel_tracker |= combo
-
-            if (
-                early_stop_missing_fraction is not None
-                and mosaic_method != MOSAIC_PERCENTILE
-                and possible_pixel_count > 0
-            ):
-                completed = int((coverage_mask & good_pixel_tracker).sum())
-                no_data_sum = int(possible_pixel_count) - completed
-                if no_data_sum < possible_pixel_count * early_stop_missing_fraction:
-                    logger.info(
-                        "early_stop_missing_fraction met after %d kept scenes "
-                        "(%d/%d examined)",
-                        sum(1 for m in masks if m is not None),
-                        scene_idx + 1,
-                        n_scenes,
-                    )
-                    break
     finally:
         # Close the prefetch iterator first so its on_complete callbacks
         # (running in worker threads) can't fire ``update(1)`` after we snap
         # and close the bar.
         mask_iter.close()
         if mask_progress is not None:
-            # Early-stop paths (FIRST coverage filled, early_stop_missing_fraction
-            # met) leave the bar short. Snap to total and force a refresh — setting
-            # ``n`` directly bypasses ``update``'s min-interval throttling so the
-            # final 100% state actually renders before ``close``.
+            # The FIRST-coverage-filled early-stop path leaves the bar short.
+            # Snap to total and force a refresh — setting ``n`` directly bypasses
+            # ``update``'s min-interval throttling so the final 100% state
+            # actually renders before ``close``.
             if mask_progress.n < mask_progress.total:
                 mask_progress.n = mask_progress.total
                 mask_progress.refresh()
@@ -383,7 +366,9 @@ def stream_mosaic_pipeline(
         resolution=resolution,
         resampling_method=resampling_method,
         prewarm=should_prewarm_sources(
-            mosaic_method, early_stop_missing_fraction, min_observations
+            mosaic_method,
+            min_observations,
+            max_observations,
         ),
     )
 
@@ -422,8 +407,8 @@ def stream_mosaic_pipeline(
                 width=s2_scene_size,
                 coverage_mask=coverage_mask,
                 output_coverage_mask=output_coverage_mask,
-                early_stop_missing_fraction=early_stop_missing_fraction,
                 min_observations=min_observations,
+                max_observations=max_observations,
                 mosaic_method=mosaic_method,
                 percentile=percentile,
                 tile_size=tile_size,
@@ -442,8 +427,8 @@ def stream_mosaic_pipeline(
             height=s2_scene_size,
             width=s2_scene_size,
             coverage_mask=coverage_mask,
-            early_stop_missing_fraction=early_stop_missing_fraction,
             min_observations=min_observations,
+            max_observations=max_observations,
             mosaic_method=mosaic_method,
             percentile=percentile,
             tile_size=tile_size,

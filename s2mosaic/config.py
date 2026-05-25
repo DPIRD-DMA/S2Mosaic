@@ -91,8 +91,8 @@ class MosaicRequest:
     resampling_method: str = "nearest"
     additional_query: Optional[Dict[str, Any]] = None
     source: str = SOURCE_MPC
-    early_stop_missing_fraction: Optional[float] = None
     min_observations: Optional[int] = None
+    max_observations: Optional[int] = None
     min_coverage_fraction: Optional[float] = None
     ignore_duplicate_items: bool = True
     scene_order: str = SCENE_ORDER_VALID_DATA
@@ -132,7 +132,6 @@ class MosaicRequest:
         validate_inputs(
             scene_order=self.scene_order,
             mosaic_method=self.mosaic_method,
-            early_stop_missing_fraction=self.early_stop_missing_fraction,
             bands=self.bands,
             grid_id=self.grid_id,
             percentile=self.percentile,
@@ -143,6 +142,7 @@ class MosaicRequest:
             resolution=self.resolution,
             cloud_mask=self.cloud_mask,
             min_observations=self.min_observations,
+            max_observations=self.max_observations,
             tile_workers=self.tile_workers,
             adaptive_tiling=self.adaptive_tiling,
             min_coverage_fraction=self.min_coverage_fraction,
@@ -183,7 +183,6 @@ def normalize_mosaic_inputs(
 def validate_inputs(
     scene_order: str,
     mosaic_method: str,
-    early_stop_missing_fraction: Union[float, None],
     bands: List[str],
     grid_id: Optional[str],
     percentile: Optional[float],
@@ -193,6 +192,7 @@ def validate_inputs(
     resolution: Optional[int] = None,
     cloud_mask: str = CLOUD_MASK_OCM,
     min_observations: Optional[int] = None,
+    max_observations: Optional[int] = None,
     tile_workers: Optional[int] = None,
     adaptive_tiling: bool = True,
     aoi: Optional[Polygon] = None,
@@ -247,13 +247,6 @@ def validate_inputs(
             f"Invalid resampling method: {resampling_method}. "
             f"Must be one of {VALID_RESAMPLING_METHODS}"
         )
-    if early_stop_missing_fraction is not None and not (
-        0.0 <= early_stop_missing_fraction <= 1.0
-    ):
-        raise ValueError(
-            f"early_stop_missing_fraction must be between 0 and 1 or None, "
-            f"got {early_stop_missing_fraction}"
-        )
     if min_coverage_fraction is not None and not (0.0 <= min_coverage_fraction <= 1.0):
         raise ValueError(
             f"min_coverage_fraction must be between 0 and 1 or None, "
@@ -268,6 +261,21 @@ def validate_inputs(
             raise ValueError(
                 "min_observations must be a positive integer or None, "
                 f"got {min_observations}"
+            )
+    if max_observations is not None:
+        if (
+            isinstance(max_observations, bool)
+            or not isinstance(max_observations, int)
+            or max_observations < 1
+        ):
+            raise ValueError(
+                "max_observations must be a positive integer or None, "
+                f"got {max_observations}"
+            )
+        if min_observations is not None and max_observations < min_observations:
+            raise ValueError(
+                f"max_observations ({max_observations}) must be >= "
+                f"min_observations ({min_observations})"
             )
     if tile_workers is not None:
         if (

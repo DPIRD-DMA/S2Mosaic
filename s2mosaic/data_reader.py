@@ -5,16 +5,10 @@ import numpy.typing as npt
 import rasterio as rio
 from rasterio.windows import Window
 
-from .helpers import disk_cache, with_scene_retry
+from .helpers import with_scene_retry
 from .sources import Source
 
 
-def _full_band_key(href: str, source: Source, res: int = 10) -> str:
-    href_parts = href.split("/")
-    return f"{source.name}|{href_parts[-4]}|{href_parts[-1]}|{res / 10}|{res}"
-
-
-@disk_cache("full_band", key_fn=_full_band_key)
 @with_scene_retry()
 def get_full_band(
     href: str, source: Source, res: int = 10

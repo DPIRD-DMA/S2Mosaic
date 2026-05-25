@@ -260,7 +260,8 @@ def finalize_output(
 ) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
     """Apply coverage mask, set band names + nodata, export or return."""
     if coverage_mask is not None:
-        np.multiply(array, coverage_mask[None, :, :], out=array, casting="unsafe")
+        coverage = np.asarray(coverage_mask, dtype=bool)
+        np.multiply(array, coverage[None, :, :], out=array, casting="unsafe")
 
     band_descriptions, nodata_value = output_band_metadata(bands)
 

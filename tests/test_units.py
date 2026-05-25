@@ -34,7 +34,7 @@ from s2mosaic.geometry import (
     pick_utm_epsg,
     reproject_bbox,
 )
-from s2mosaic.readers import make_bounds_tile_reader, make_grid_tile_reader
+from s2mosaic.readers import make_grid_tile_reader
 from s2mosaic.helpers import (
     SceneFetchError,
     _load_s2_grid,
@@ -42,6 +42,7 @@ from s2mosaic.helpers import (
 )
 from s2mosaic.config import MosaicRequest, validate_inputs
 from s2mosaic.output import (
+    finalize_output,
     get_output_path,
     output_request_hash,
     output_sidecar_metadata,
@@ -68,7 +69,7 @@ from s2mosaic.aggregation import (
     run_tile_aggregation,
     write_tile_aggregation_geotiff,
 )
-from s2mosaic.cache import _read_with_retry, _write_tiled_copy, iter_ordered_fetches
+from s2mosaic.cache import iter_ordered_fetches
 from s2mosaic.pipelines.grid import stream_mosaic_pipeline
 from s2mosaic.pipelines.bounds import _mask_resolution_for_request
 from s2mosaic.readers import (
@@ -294,7 +295,6 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            early_stop_missing_fraction=None,
             mosaic_method="mean",
             percentile=None,
             tile_size=3,
@@ -325,7 +325,6 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            early_stop_missing_fraction=None,
             mosaic_method="first",
             percentile=None,
             tile_size=4,
@@ -354,7 +353,6 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            early_stop_missing_fraction=None,
             mosaic_method="percentile",
             percentile=50.0,
             tile_size=2,
@@ -429,7 +427,6 @@ class TestRunTileAggregation:
                 height=4,
                 width=4,
                 coverage_mask=np.ones((4, 4), dtype=bool),
-                early_stop_missing_fraction=None,
                 mosaic_method="mean",
                 percentile=None,
                 tile_size=2,
@@ -463,7 +460,6 @@ class TestRunTileAggregation:
                 height=4,
                 width=4,
                 coverage_mask=np.ones((4, 4), dtype=bool),
-                early_stop_missing_fraction=None,
                 mosaic_method="mean",
                 percentile=None,
                 tile_size=2,
@@ -492,7 +488,6 @@ class TestRunTileAggregation:
             height=4,
             width=4,
             coverage_mask=np.ones((4, 4), dtype=bool),
-            early_stop_missing_fraction=None,
             mosaic_method="mean",
             percentile=None,
             tile_size=2,
@@ -530,7 +525,6 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            early_stop_missing_fraction=None,
             mosaic_method="percentile",
             percentile=50.0,
             tile_size=3,
@@ -569,7 +563,6 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            early_stop_missing_fraction=None,
             mosaic_method=mosaic_method,
             percentile=50.0 if mosaic_method == "percentile" else None,
             tile_size=2,
@@ -606,7 +599,6 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            early_stop_missing_fraction=None,
             mosaic_method="percentile",
             percentile=50.0,
             tile_size=3,
@@ -614,41 +606,6 @@ class TestRunTileAggregation:
         )
 
         assert set(thread_names) == {"MainThread"}
-        np.testing.assert_allclose(out, 20.0)
-
-    def test_percentile_ignores_early_stop_missing_fraction_inside_tile(self):
-        reads = []
-        scenes = np.stack(
-            [
-                np.full((1, self.H, self.W), 10, dtype=np.uint16),
-                np.full((1, self.H, self.W), 30, dtype=np.uint16),
-            ],
-            axis=0,
-        )
-
-        def read_fn(scene_idx, band_idx, spec):
-            reads.append(scene_idx)
-            r, c, h, w = spec
-            return scenes[scene_idx, band_idx, r : r + h, c : c + w]
-
-        out = run_tile_aggregation(
-            masks=[
-                np.ones((self.H, self.W), dtype=bool),
-                np.ones((self.H, self.W), dtype=bool),
-            ],
-            read_fn=read_fn,
-            bands_count=1,
-            height=self.H,
-            width=self.W,
-            coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            early_stop_missing_fraction=0.01,
-            mosaic_method="percentile",
-            percentile=50.0,
-            tile_size=10,
-            tile_workers=1,
-        )
-
-        assert reads == [0, 1]
         np.testing.assert_allclose(out, 20.0)
 
     def test_empty_coverage_tile_does_not_read_sources(self):
@@ -666,7 +623,6 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.zeros((self.H, self.W), dtype=bool),
-            early_stop_missing_fraction=None,
             mosaic_method="mean",
             percentile=None,
             tile_size=3,
@@ -675,34 +631,6 @@ class TestRunTileAggregation:
 
         assert reads["n"] == 0
         np.testing.assert_array_equal(out, np.zeros((1, self.H, self.W)))
-
-    def test_mean_ignores_early_stop_missing_fraction_inside_tile(self):
-        reads = []
-
-        def read_fn(scene_idx, band_idx, spec):
-            reads.append(scene_idx)
-            _, _, h, w = spec
-            return np.full((h, w), 10 + scene_idx * 20, dtype=np.uint16)
-
-        out = run_tile_aggregation(
-            masks=[
-                np.ones((self.H, self.W), dtype=bool),
-                np.ones((self.H, self.W), dtype=bool),
-            ],
-            read_fn=read_fn,
-            bands_count=1,
-            height=self.H,
-            width=self.W,
-            coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            early_stop_missing_fraction=0.01,
-            mosaic_method="mean",
-            percentile=None,
-            tile_size=10,
-            tile_workers=1,
-        )
-
-        assert reads == [0, 1]
-        np.testing.assert_array_equal(out, np.full((1, self.H, self.W), 20))
 
     def test_mean_stops_at_min_observations(self):
         reads = []
@@ -723,7 +651,6 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            early_stop_missing_fraction=None,
             mosaic_method="mean",
             percentile=None,
             tile_size=10,
@@ -755,7 +682,6 @@ class TestRunTileAggregation:
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            early_stop_missing_fraction=None,
             mosaic_method="percentile",
             percentile=50.0,
             tile_size=10,
@@ -768,39 +694,107 @@ class TestRunTileAggregation:
         assert reads == [0, 1, 2]
         np.testing.assert_array_equal(out, expected)
 
-    def test_first_ignores_early_stop_missing_fraction_until_coverage_filled(self):
+    def test_mean_caps_at_max_observations_per_pixel(self):
+        # Three uniformly-clear scenes with values 10, 20, 30. With
+        # max_observations=2 each pixel should only see the first two scenes,
+        # so the mean is 15 (not 20).
         reads = []
-        first_mask = np.ones((self.H, self.W), dtype=bool)
-        first_mask[0, 0] = False
-        second_mask = np.zeros((self.H, self.W), dtype=bool)
-        second_mask[0, 0] = True
 
         def read_fn(scene_idx, band_idx, spec):
             reads.append(scene_idx)
             _, _, h, w = spec
-            return np.full((h, w), scene_idx + 1, dtype=np.uint16)
+            return np.full((h, w), 10 + scene_idx * 10, dtype=np.uint16)
 
         out = run_tile_aggregation(
             masks=[
-                first_mask,
-                second_mask,
+                np.ones((self.H, self.W), dtype=bool),
+                np.ones((self.H, self.W), dtype=bool),
+                np.ones((self.H, self.W), dtype=bool),
             ],
             read_fn=read_fn,
             bands_count=1,
             height=self.H,
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
-            early_stop_missing_fraction=0.1,
-            mosaic_method="first",
+            mosaic_method="mean",
             percentile=None,
             tile_size=10,
             tile_workers=1,
+            max_observations=2,
         )
 
-        expected = np.ones((1, self.H, self.W), dtype=np.uint16)
-        expected[0, 0, 0] = 2
         assert reads == [0, 1]
+        np.testing.assert_array_equal(out, np.full((1, self.H, self.W), 15))
+
+    def test_mean_max_observations_skips_capped_pixels_per_scene(self):
+        # Pixel (0, 0) is cloudy in scenes 0 and 1, so it doesn't hit the cap
+        # until scene 2. Other pixels hit cap=1 after scene 0; scene 1 has no
+        # uncapped contribution left (it's cloudy on the only uncapped pixel),
+        # so the contributor scan skips it entirely.
+        reads = []
+        masks = [
+            np.ones((self.H, self.W), dtype=bool),
+            np.ones((self.H, self.W), dtype=bool),
+            np.ones((self.H, self.W), dtype=bool),
+        ]
+        masks[0][0, 0] = False
+        masks[1][0, 0] = False
+
+        def read_fn(scene_idx, band_idx, spec):
+            reads.append(scene_idx)
+            _, _, h, w = spec
+            return np.full((h, w), (scene_idx + 1) * 10, dtype=np.uint16)
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=read_fn,
+            bands_count=1,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            mosaic_method="mean",
+            percentile=None,
+            tile_size=10,
+            tile_workers=1,
+            max_observations=1,
+        )
+
+        assert reads == [0, 2]
+        expected = np.full((1, self.H, self.W), 10, dtype=np.uint16)
+        expected[0, 0, 0] = 30
         np.testing.assert_array_equal(out, expected)
+
+    def test_percentile_caps_at_max_observations_per_pixel(self):
+        # Six clear scenes with values 0, 10, 20, 30, 40, 50. With
+        # max_observations=3 each pixel sees only 0, 10, 20 — median is 10
+        # rather than 25.
+        reads = []
+        n_scenes = 6
+        scene_values = np.arange(n_scenes) * 10
+
+        def read_fn(scene_idx, band_idx, spec):
+            reads.append(scene_idx)
+            _, _, h, w = spec
+            return np.full((h, w), scene_values[scene_idx], dtype=np.uint16)
+
+        masks = [np.ones((self.H, self.W), dtype=bool) for _ in range(n_scenes)]
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=read_fn,
+            bands_count=1,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            mosaic_method="percentile",
+            percentile=50.0,
+            tile_size=10,
+            tile_workers=1,
+            max_observations=3,
+        )
+
+        assert sorted(set(reads)) == [0, 1, 2]
+        np.testing.assert_array_equal(out, np.full((1, self.H, self.W), 10))
 
     def test_write_tile_aggregation_geotiff_streams_tiles(self, tmp_path):
         reads = []
@@ -835,7 +829,6 @@ class TestRunTileAggregation:
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
             output_coverage_mask=None,
-            early_stop_missing_fraction=None,
             mosaic_method="mean",
             percentile=None,
             tile_size=3,
@@ -884,7 +877,6 @@ class TestRunTileAggregation:
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
             output_coverage_mask=None,
-            early_stop_missing_fraction=None,
             mosaic_method="mean",
             percentile=None,
             tile_size=3,
@@ -925,7 +917,6 @@ class TestRunTileAggregation:
                 width=self.W,
                 coverage_mask=np.ones((self.H, self.W), dtype=bool),
                 output_coverage_mask=None,
-                early_stop_missing_fraction=None,
                 mosaic_method="mean",
                 percentile=None,
                 tile_size=3,
@@ -967,7 +958,6 @@ class TestRunTileAggregation:
                 width=self.W,
                 coverage_mask=np.ones((self.H, self.W), dtype=bool),
                 output_coverage_mask=None,
-                early_stop_missing_fraction=None,
                 mosaic_method="mean",
                 percentile=None,
                 tile_size=3,
@@ -1009,7 +999,6 @@ class TestRunTileAggregation:
             width=self.W,
             coverage_mask=np.ones((self.H, self.W), dtype=bool),
             output_coverage_mask=coverage,
-            early_stop_missing_fraction=None,
             mosaic_method="mean",
             percentile=None,
             tile_size=3,
@@ -1062,7 +1051,6 @@ class TestRunTileAggregation:
             width=width,
             coverage_mask=np.ones((height, width), dtype=bool),
             output_coverage_mask=None,
-            early_stop_missing_fraction=None,
             mosaic_method="mean",
             percentile=None,
             tile_size=4,
@@ -1242,7 +1230,6 @@ class TestMosaicBoundsValidation:
         validate_inputs(
             scene_order="valid_data",
             mosaic_method="mean",
-            early_stop_missing_fraction=0.01,
             bands=["B04"],
             grid_id=None,
             percentile=None,
@@ -1276,7 +1263,6 @@ class TestMosaicBoundsValidation:
             validate_inputs(
                 scene_order="valid_data",
                 mosaic_method="mean",
-                early_stop_missing_fraction=0.01,
                 bands=["B04"],
                 grid_id=None,
                 percentile=None,
@@ -1294,7 +1280,6 @@ class TestMosaicBoundsValidation:
             validate_inputs(
                 scene_order="valid_data",
                 mosaic_method="mean",
-                early_stop_missing_fraction=0.01,
                 bands=["B04"],
                 grid_id=None,
                 percentile=None,
@@ -1312,7 +1297,6 @@ class TestMosaicBoundsValidation:
             validate_inputs(
                 scene_order="valid_data",
                 mosaic_method="mean",
-                early_stop_missing_fraction=0.01,
                 bands=["visual"],
                 grid_id=None,
                 percentile=None,
@@ -1328,7 +1312,6 @@ class TestMosaicBoundsValidation:
         validate_inputs(
             scene_order="valid_data",
             mosaic_method="mean",
-            early_stop_missing_fraction=0.01,
             bands=["B04"],
             grid_id=None,
             percentile=None,
@@ -1349,7 +1332,6 @@ class TestMosaicBoundsValidation:
         validate_inputs(
             scene_order="valid_data",
             mosaic_method="mean",
-            early_stop_missing_fraction=0.01,
             bands=["B04"],
             grid_id=None,
             percentile=None,
@@ -1371,7 +1353,6 @@ class TestMosaicBoundsValidation:
             validate_inputs(
                 scene_order="valid_data",
                 mosaic_method="mean",
-                early_stop_missing_fraction=0.01,
                 bands=["B04"],
                 grid_id=None,
                 percentile=None,
@@ -1393,7 +1374,6 @@ class TestMosaicBoundsValidation:
             validate_inputs(
                 scene_order="valid_data",
                 mosaic_method="mean",
-                early_stop_missing_fraction=0.01,
                 bands=["B04"],
                 grid_id=None,
                 percentile=None,
@@ -1615,6 +1595,26 @@ class TestExportPaths:
         assert sidecar["mode"] == "grid"
         assert sidecar["request"]["grid_id"] == "50HMH"
         assert sidecar["request"]["bands"] == ["B04"]
+
+    def test_finalize_output_accepts_lazy_array_like_coverage_mask(self):
+        class LazyMask:
+            def __array__(self, dtype=None):
+                arr = np.array([[True, False], [False, True]], dtype=bool)
+                return arr.astype(dtype, copy=False) if dtype is not None else arr
+
+        array = np.ones((1, 2, 2), dtype=np.uint16) * 7
+        result, _ = finalize_output(
+            array=array,
+            profile={"driver": "GTiff"},
+            bands=["B04"],
+            coverage_mask=LazyMask(),
+            export_path=None,
+        )
+
+        np.testing.assert_array_equal(
+            result,
+            np.array([[[7, 0], [0, 7]]], dtype=np.uint16),
+        )
 
     def test_output_path_is_used_directly(self, tmp_path):
         path = resolve_export_path(
@@ -1902,7 +1902,6 @@ class TestGridOrderedMaskStreaming:
             sorted_scenes=self._sorted_scenes(4),
             bands=["B04"],
             coverage_mask=np.ones((4, 4), dtype=bool),
-            early_stop_missing_fraction=None,
             mosaic_method="first",
             cloud_mask="SCL",
             source=MPC,
@@ -1914,41 +1913,6 @@ class TestGridOrderedMaskStreaming:
         assert calls == ["scene-0"]
         assert out is not None
         assert profile["width"] == 4
-
-    def test_grid_mean_stops_mask_stream_at_early_stop_missing_fraction(
-        self, monkeypatch
-    ):
-        import s2mosaic.pipelines.grid as core_mod
-
-        self._patch_grid_pipeline_io(monkeypatch)
-        calls = []
-
-        def fake_compute_one_scene_mask(**kwargs):
-            calls.append(kwargs["item"].id)
-            if kwargs["item"].id == "scene-0":
-                mask = np.zeros((4, 4), dtype=bool)
-                mask[:2, :] = True
-                return mask
-            return np.ones((4, 4), dtype=bool)
-
-        monkeypatch.setattr(
-            core_mod, "_compute_one_scene_mask", fake_compute_one_scene_mask
-        )
-
-        stream_mosaic_pipeline(
-            sorted_scenes=self._sorted_scenes(4),
-            bands=["B04"],
-            coverage_mask=np.ones((4, 4), dtype=bool),
-            early_stop_missing_fraction=0.01,
-            mosaic_method="mean",
-            cloud_mask="SCL",
-            source=MPC,
-            s2_scene_size=4,
-            tile_size=4,
-            tile_workers=1,
-        )
-
-        assert calls == ["scene-0", "scene-1"]
 
 
 def _fake_scl_fetch_full_window(item, source, bt, tc, mr, scene_window):
@@ -2187,7 +2151,6 @@ class TestBoundsOcmContext:
             duration_days=1,
             bands=["B04"],
             cloud_mask="OCM",
-            early_stop_missing_fraction=None,
             min_coverage_fraction=None,
             tile_workers=8,
         )
@@ -2292,7 +2255,6 @@ class TestBoundsOcmContext:
             bands=["B04"],
             cloud_mask="SCL",
             min_coverage_fraction=None,
-            early_stop_missing_fraction=None,
             adaptive_tiling=True,
         )
 
@@ -2379,7 +2341,6 @@ class TestBoundsOcmContext:
             bands=["B04"],
             cloud_mask="SCL",
             min_coverage_fraction=None,
-            early_stop_missing_fraction=None,
             adaptive_tiling=True,
         )
 
@@ -2798,200 +2759,29 @@ class TestGetRasterCoverage:
         assert raster.shape == (expected_side, expected_side)
 
 
-class TestDebugCacheEnvVar:
-    """Env-var gating for the debug-cache machinery (pickle_cache + disk_cache)."""
-
-    def test_unset_env_var_means_disabled(self, monkeypatch):
-        from s2mosaic.helpers import debug_cache_enabled
-
-        monkeypatch.delenv("S2MOSAIC_DEBUG_CACHE", raising=False)
-        assert debug_cache_enabled() is False
-
-    @pytest.mark.parametrize("value", ["1", "true", "True", "TRUE", "yes", "YES"])
-    def test_truthy_values_enable(self, monkeypatch, value):
-        from s2mosaic.helpers import debug_cache_enabled
-
-        monkeypatch.setenv("S2MOSAIC_DEBUG_CACHE", value)
-        assert debug_cache_enabled() is True
-
-    @pytest.mark.parametrize("value", ["0", "false", "no", "", "bogus"])
-    def test_non_truthy_values_disable(self, monkeypatch, value):
-        from s2mosaic.helpers import debug_cache_enabled
-
-        monkeypatch.setenv("S2MOSAIC_DEBUG_CACHE", value)
-        assert debug_cache_enabled() is False
-
-    def test_pickle_cache_skips_disk_when_disabled(self, tmp_path, monkeypatch):
-        """When env var is unset, pickle_cache must not write to disk."""
-        from s2mosaic.helpers import pickle_cache
-
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.delenv("S2MOSAIC_DEBUG_CACHE", raising=False)
-
-        calls = {"n": 0}
-
-        def compute():
-            calls["n"] += 1
-            return 42
-
-        # Two calls with the same key — both should compute, nothing on disk
-        assert pickle_cache("p", "k", compute) == 42
-        assert pickle_cache("p", "k", compute) == 42
-        assert calls["n"] == 2
-        assert not (tmp_path / "cache").exists()
-
-    def test_pickle_cache_writes_and_hits_when_enabled(self, tmp_path, monkeypatch):
-        from s2mosaic.helpers import pickle_cache
-
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("S2MOSAIC_DEBUG_CACHE", "1")
-
-        calls = {"n": 0}
-
-        def compute():
-            calls["n"] += 1
-            return {"answer": 42}
-
-        out1 = pickle_cache("p", "k", compute)
-        out2 = pickle_cache("p", "k", compute)
-        assert out1 == out2 == {"answer": 42}
-        assert calls["n"] == 1  # second call was a hit
-        # Cache file written under the configured prefix
-        cache_files = list((tmp_path / "cache").glob("p_*.pkl"))
-        assert len(cache_files) == 1
-
-
-class TestDiskCacheDecorator:
-    """Behaviour of the @disk_cache decorator wrapping a function."""
-
-    def test_disabled_env_skips_keyfn_and_caching(self, tmp_path, monkeypatch):
-        from s2mosaic.helpers import disk_cache
-
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.delenv("S2MOSAIC_DEBUG_CACHE", raising=False)
-
-        key_calls = {"n": 0}
-        fn_calls = {"n": 0}
-
-        def key_fn(x):
-            key_calls["n"] += 1
-            return f"k{x}"
-
-        @disk_cache("dec_test", key_fn=key_fn)
-        def fn(x):
-            fn_calls["n"] += 1
-            return x * 2
-
-        # Two calls with same arg: both compute, key_fn never invoked
-        assert fn(3) == 6
-        assert fn(3) == 6
-        assert fn_calls["n"] == 2
-        assert key_calls["n"] == 0
-        assert not (tmp_path / "cache").exists()
-
-    def test_enabled_env_caches_by_key(self, tmp_path, monkeypatch):
-        from s2mosaic.helpers import disk_cache
-
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("S2MOSAIC_DEBUG_CACHE", "1")
-
-        fn_calls = {"n": 0}
-
-        @disk_cache("dec_test", key_fn=lambda x: f"k{x}")
-        def fn(x):
-            fn_calls["n"] += 1
-            return x * 2
-
-        # Same key → second call is a hit
-        assert fn(3) == 6
-        assert fn(3) == 6
-        assert fn_calls["n"] == 1
-        # Different key → second compute
-        assert fn(4) == 8
-        assert fn_calls["n"] == 2
-        # And third call with x=4 hits again
-        assert fn(4) == 8
-        assert fn_calls["n"] == 2
-
-    def test_key_fn_receives_same_args_as_fn(self, tmp_path, monkeypatch):
-        """key_fn must be passed exactly the wrapped function's args/kwargs."""
-        from s2mosaic.helpers import disk_cache
-
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("S2MOSAIC_DEBUG_CACHE", "1")
-
-        seen_args = []
-
-        def key_fn(*args, **kwargs):
-            seen_args.append((args, kwargs))
-            return "fixed"  # constant key — second call is a hit
-
-        @disk_cache("dec_test", key_fn=key_fn)
-        def fn(a, b, c=10):
-            return a + b + c
-
-        fn(1, 2, c=3)
-        # On a hit, key_fn is still called once to compute the lookup key
-        assert seen_args[0] == ((1, 2), {"c": 3})
-
-    def test_decorator_preserves_function_metadata(self):
-        from s2mosaic.helpers import disk_cache
-
-        @disk_cache("p", key_fn=lambda x: str(x))
-        def my_fn(x):
-            """My docstring."""
-            return x
-
-        assert my_fn.__name__ == "my_fn"
-        assert my_fn.__doc__ == "My docstring."
-
-    def test_different_prefixes_do_not_collide(self, tmp_path, monkeypatch):
-        """Two fns with same key but different prefixes write distinct files."""
-        from s2mosaic.helpers import disk_cache
-
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("S2MOSAIC_DEBUG_CACHE", "1")
-
-        @disk_cache("alpha", key_fn=lambda: "shared")
-        def fn_a():
-            return "A"
-
-        @disk_cache("beta", key_fn=lambda: "shared")
-        def fn_b():
-            return "B"
-
-        assert fn_a() == "A"
-        assert fn_b() == "B"
-        # Two distinct files in the cache dir
-        files = sorted(p.name for p in (tmp_path / "cache").glob("*.pkl"))
-        assert len(files) == 2
-        assert any(f.startswith("alpha_") for f in files)
-        assert any(f.startswith("beta_") for f in files)
-
-
-class TestTiledBandMaterialisation:
-    """Local tiled GeoTIFF materialisation helpers."""
+class TestTileReaderHelpers:
+    """Tile-reader helpers: prewarm policy, lazy handles, retries."""
 
     @pytest.mark.parametrize(
-        "mosaic_method,early_stop_missing_fraction,min_observations,expected",
+        "mosaic_method,min_observations,max_observations,expected",
         [
             ("mean", None, None, True),
             ("percentile", None, None, True),
             ("first", None, None, False),
-            ("mean", 0.01, None, False),
-            ("percentile", 0.01, None, False),
+            ("mean", 2, None, False),
+            ("percentile", 2, None, False),
             ("mean", None, 2, False),
             ("percentile", None, 2, False),
         ],
     )
     def test_source_prewarm_policy(
-        self, mosaic_method, early_stop_missing_fraction, min_observations, expected
+        self, mosaic_method, min_observations, max_observations, expected
     ):
         assert (
             should_prewarm_sources(
                 mosaic_method,
-                early_stop_missing_fraction,
                 min_observations,
+                max_observations,
             )
             is expected
         )
@@ -3043,7 +2833,7 @@ class TestTiledBandMaterialisation:
         assert calls == ["remote.tif", "remote.tif", "remote.tif"]
 
     def test_grid_reader_signs_only_on_first_read_when_not_prewarmed(self, monkeypatch):
-        calls = {"sign": 0, "materialise": 0, "open": 0}
+        calls = {"sign": 0, "open": 0}
 
         class FakeAsset:
             href = "remote.tif"
@@ -3072,16 +2862,11 @@ class TestTiledBandMaterialisation:
             def close(self):
                 pass
 
-        def fake_materialise(cache_key, materialiser):
-            calls["materialise"] += 1
-            return None
-
         def fake_open(source):
             calls["open"] += 1
             assert source == "signed-remote.tif"
             return FakeDataset()
 
-        monkeypatch.setattr("s2mosaic.readers.materialise_tiled_band", fake_materialise)
         monkeypatch.setattr("s2mosaic.readers.rio.open", fake_open)
 
         read_fn = make_grid_tile_reader(
@@ -3094,14 +2879,14 @@ class TestTiledBandMaterialisation:
             prewarm=False,
         )
 
-        assert calls == {"sign": 0, "materialise": 0, "open": 0}
+        assert calls == {"sign": 0, "open": 0}
         data = read_fn(0, 0, (0, 0, 2, 3))
 
         np.testing.assert_array_equal(data, np.ones((2, 3), dtype=np.uint16))
-        assert calls == {"sign": 1, "materialise": 1, "open": 1}
+        assert calls == {"sign": 1, "open": 1}
 
     def test_grid_reader_prewarm_signs_sources_once(self, monkeypatch):
-        calls = {"sign": 0, "materialise": 0}
+        calls = {"sign": 0}
 
         class FakeAsset:
             href = "remote.tif"
@@ -3120,12 +2905,6 @@ class TestTiledBandMaterialisation:
                 calls["sign"] += 1
                 return f"signed-{href}"
 
-        def fake_materialise(cache_key, materialiser):
-            calls["materialise"] += 1
-            return None
-
-        monkeypatch.setattr("s2mosaic.readers.materialise_tiled_band", fake_materialise)
-
         make_grid_tile_reader(
             items=[FakeItem()],
             href_template=[("B04", 1)],
@@ -3136,7 +2915,7 @@ class TestTiledBandMaterialisation:
             prewarm=True,
         )
 
-        assert calls == {"sign": 1, "materialise": 1}
+        assert calls == {"sign": 1}
 
     def test_grid_reader_reopens_with_refreshed_source_on_read_error(self, monkeypatch):
         resolver_calls = []
@@ -3275,7 +3054,7 @@ class TestTiledBandMaterialisation:
 
         def resolver(refresh=False):
             resolver_calls.append(refresh)
-            return f"bounds-refresh-{refresh}.tif", True
+            return f"bounds-refresh-{refresh}.tif"
 
         class FakeDataset:
             def read(self, band_idx, window):
@@ -3295,6 +3074,7 @@ class TestTiledBandMaterialisation:
             return FakeDataset()
 
         monkeypatch.setattr("s2mosaic.readers.rio.open", fake_open)
+        monkeypatch.setattr("s2mosaic.readers.WarpedVRT", lambda src, **_: src)
 
         read_fn = BoundsTileReader(
             sources=[[resolver]],
@@ -3324,7 +3104,7 @@ class TestTiledBandMaterialisation:
 
         def resolver(refresh=False):
             resolver_calls.append(refresh)
-            return f"bounds-refresh-{refresh}.tif", True
+            return f"bounds-refresh-{refresh}.tif"
 
         class FakeDataset:
             def __init__(self, source):
@@ -3347,6 +3127,7 @@ class TestTiledBandMaterialisation:
             return FakeDataset(source)
 
         monkeypatch.setattr("s2mosaic.readers.rio.open", fake_open)
+        monkeypatch.setattr("s2mosaic.readers.WarpedVRT", lambda src, **_: src)
 
         read_fn = BoundsTileReader(
             sources=[[resolver]],
@@ -3372,7 +3153,7 @@ class TestTiledBandMaterialisation:
 
         def resolver(refresh=False):
             resolver_calls.append(refresh)
-            return f"bounds-refresh-{refresh}.tif", True
+            return f"bounds-refresh-{refresh}.tif"
 
         class FakeDataset:
             def read(self, band_idx, window):
@@ -3392,6 +3173,7 @@ class TestTiledBandMaterialisation:
             return FakeDataset()
 
         monkeypatch.setattr("s2mosaic.readers.rio.open", fake_open)
+        monkeypatch.setattr("s2mosaic.readers.WarpedVRT", lambda src, **_: src)
 
         read_fn = BoundsTileReader(
             sources=[[resolver]],
@@ -3409,152 +3191,6 @@ class TestTiledBandMaterialisation:
         assert resolver_calls == [False, True]
         assert open_calls == ["bounds-refresh-False.tif", "bounds-refresh-True.tif"]
 
-    def test_bounds_reader_materialises_cache_only_on_read(self, monkeypatch):
-        calls = {"materialise": 0, "materialiser_factory": 0, "open": 0}
-
-        class FakeAsset:
-            href = "remote.tif"
-
-        class FakeItem:
-            assets = {"B04": FakeAsset()}
-            id = "fake-scene"
-
-        class FakeDataset:
-            def read(self, band_idx, window):
-                return np.full(
-                    (int(window.height), int(window.width)),
-                    band_idx,
-                    dtype=np.uint16,
-                )
-
-        def fake_materialiser_factory(*args, **kwargs):
-            calls["materialiser_factory"] += 1
-
-            def write(path):
-                return None
-
-            return write
-
-        def fake_materialise(cache_key, materialiser):
-            calls["materialise"] += 1
-            return Path("cached.tif")
-
-        def fake_open(source):
-            calls["open"] += 1
-            assert source == "cached.tif"
-            return FakeDataset()
-
-        monkeypatch.setattr("planetary_computer.sign", lambda href: href)
-        monkeypatch.setattr(
-            "s2mosaic.readers._materialise_bounds_band",
-            fake_materialiser_factory,
-        )
-        monkeypatch.setattr(
-            "s2mosaic.readers.materialise_tiled_band",
-            fake_materialise,
-        )
-        monkeypatch.setattr("s2mosaic.readers.rio.open", fake_open)
-
-        from s2mosaic.sources import MPC
-
-        read_fn = make_bounds_tile_reader(
-            items=[FakeItem()],
-            href_template=[("B04", 1)],
-            source=MPC,
-            bounds_target=(0.0, 0.0, 10.0, 10.0),
-            target_crs=32750,
-            user_transform=from_origin(0, 10, 1, 1),
-            width=10,
-            height=10,
-            resolution=1,
-            resampling_method="nearest",
-            prewarm=False,  # verify the strictly-lazy contract
-        )
-
-        assert calls == {"materialise": 0, "materialiser_factory": 0, "open": 0}
-        data = read_fn(0, 0, (2, 3, 4, 5))
-
-        np.testing.assert_array_equal(data, np.ones((4, 5), dtype=np.uint16))
-        assert calls == {"materialise": 1, "materialiser_factory": 1, "open": 1}
-
-    def test_read_with_retry_recovers_from_transient_rasterio_error(self, monkeypatch):
-        monkeypatch.setattr("s2mosaic.cache.time.sleep", lambda _: None)
-
-        class FlakySource:
-            calls = 0
-
-            def read(self, *, window, out_shape, resampling):
-                self.calls += 1
-                if self.calls == 1:
-                    raise RasterioIOError("temporary read failure")
-                return np.full(out_shape, 7, dtype=np.uint16)
-
-        src = FlakySource()
-        data = _read_with_retry(
-            src,
-            window=rio.windows.Window(0, 0, 2, 2),
-            out_shape=(1, 2, 2),
-            resampling=Resampling.nearest,
-        )
-        assert src.calls == 2
-        np.testing.assert_array_equal(data, np.full((1, 2, 2), 7, dtype=np.uint16))
-
-    def test_read_with_retry_rejects_zero_attempts(self):
-        class Source:
-            def read(self, *, window, out_shape, resampling):
-                raise AssertionError("read should not be called")
-
-        with pytest.raises(RuntimeError, match="Remote read was not attempted"):
-            _read_with_retry(
-                Source(),
-                window=rio.windows.Window(0, 0, 2, 2),
-                out_shape=(1, 2, 2),
-                resampling=Resampling.nearest,
-                attempts=0,
-            )
-
-    def test_write_tiled_copy_streams_destination_blocks(self, tmp_path):
-        class FakeSource:
-            def __init__(self):
-                self.windows = []
-
-            def read(self, *, window, out_shape, resampling):
-                self.windows.append(window)
-                return np.full(out_shape, int(window.col_off + window.row_off))
-
-        src = FakeSource()
-        profile = {
-            "driver": "GTiff",
-            "count": 1,
-            "dtype": "uint16",
-            "width": 4,
-            "height": 4,
-            "crs": "EPSG:32750",
-            "transform": from_origin(0, 4, 1, 1),
-            "tiled": True,
-            "blockxsize": 16,
-            "blockysize": 16,
-        }
-        out_path = tmp_path / "cached.tif"
-
-        _write_tiled_copy(
-            src,
-            out_path,
-            profile,
-            Resampling.nearest,
-            lambda window: rio.windows.Window(
-                window.col_off * 2,
-                window.row_off * 2,
-                window.width * 2,
-                window.height * 2,
-            ),
-        )
-
-        assert src.windows == [rio.windows.Window(0, 0, 8, 8)]
-        with rio.open(out_path) as cached:
-            data = cached.read(1)
-        np.testing.assert_array_equal(data, np.zeros((4, 4), dtype=np.uint16))
-
 
 class TestMosaicSharedParamsValidation:
     """Validation edge cases for params shared by both modes."""
@@ -3568,13 +3204,6 @@ class TestMosaicSharedParamsValidation:
     def test_bounds_mode_rejects_invalid_band(self):
         with pytest.raises(ValueError, match="Invalid band"):
             mosaic(start_year=2023, bounds=self.BOUNDS, bands=["FOO"])
-
-    def test_bounds_mode_accepts_early_stop_missing_fraction(self):
-        # Should fail later (no network) but not on validation
-        with pytest.raises(
-            ValueError, match="early_stop_missing_fraction must be between 0 and 1"
-        ):
-            mosaic(start_year=2023, bounds=self.BOUNDS, early_stop_missing_fraction=2.0)
 
     def test_bounds_mode_accepts_resolution(self):
         with pytest.raises(ValueError, match="resolution"):

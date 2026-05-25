@@ -1,8 +1,5 @@
 import functools
-import hashlib
 import logging
-import os
-import pickle
 import time
 from datetime import date, datetime
 from functools import lru_cache
@@ -28,62 +25,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
-
-# Debug cache: opt-in via env var. When unset, pickle_cache and the @disk_cache
-# decorator are no-ops — callers don't need to thread a flag through their
-# signatures. CWD-relative because the typical entry point (notebooks, scripts)
-# treats the project working directory as scratch space.
-DEBUG_CACHE_DIR = Path("cache")
-DEBUG_CACHE_ENV_VAR = "S2MOSAIC_DEBUG_CACHE"
-
-
-def debug_cache_enabled() -> bool:
-    """True if S2MOSAIC_DEBUG_CACHE is set to a truthy value."""
-    return os.environ.get(DEBUG_CACHE_ENV_VAR, "").lower() in ("1", "true", "yes")
-
-
-def pickle_cache(prefix: str, key: str, compute: Callable[[], T]) -> T:
-    """Memoize ``compute()`` to ``DEBUG_CACHE_DIR/{prefix}_{md5(key)}.pkl``.
-
-    No-op (just calls ``compute()``) unless ``S2MOSAIC_DEBUG_CACHE`` is set.
-    """
-    if not debug_cache_enabled():
-        return compute()
-    digest = hashlib.md5(key.encode()).hexdigest()
-    path = DEBUG_CACHE_DIR / f"{prefix}_{digest}.pkl"
-    if path.exists():
-        with open(path, "rb") as f:
-            return pickle.load(f)  # type: ignore[no-any-return, unused-ignore]
-    result = compute()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "wb") as f:
-        pickle.dump(result, f)
-    return result
-
-
-def disk_cache(
-    prefix: str, key_fn: Callable[..., str]
-) -> Callable[[Callable[..., T]], Callable[..., T]]:
-    """Decorator: wraps a function with the optional debug-cache layer.
-
-    ``key_fn`` receives the same args/kwargs as the wrapped function and
-    returns a cache-key string. The cache is gated on ``S2MOSAIC_DEBUG_CACHE``
-    via :func:`pickle_cache`, so decorated functions transparently skip the
-    cache machinery when the env var is unset.
-    """
-
-    def decorator(fn: Callable[..., T]) -> Callable[..., T]:
-        @functools.wraps(fn)
-        def wrapper(*args: Any, **kwargs: Any) -> T:
-            if not debug_cache_enabled():
-                return fn(*args, **kwargs)
-            return pickle_cache(
-                prefix, key_fn(*args, **kwargs), lambda: fn(*args, **kwargs)
-            )
-
-        return wrapper
-
-    return decorator
 
 
 class SceneFetchError(Exception):

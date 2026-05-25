@@ -43,20 +43,6 @@ class TestMosaicInputValidation:
         with pytest.raises(ValueError, match="Invalid mosaic method"):
             mosaic(grid_id="50HMH", start_year=2023, mosaic_method="invalid_method")
 
-    def test_invalid_early_stop_missing_fraction_negative(self):
-        """Test that negative early_stop_missing_fraction is rejected"""
-        with pytest.raises(
-            ValueError, match="early_stop_missing_fraction must be between 0 and 1"
-        ):
-            mosaic(grid_id="50HMH", start_year=2023, early_stop_missing_fraction=-0.1)
-
-    def test_invalid_early_stop_missing_fraction_greater_than_one(self):
-        """Test that early_stop_missing_fraction > 1 is rejected"""
-        with pytest.raises(
-            ValueError, match="early_stop_missing_fraction must be between 0 and 1"
-        ):
-            mosaic(grid_id="50HMH", start_year=2023, early_stop_missing_fraction=1.5)
-
     def test_invalid_band(self):
         """Test that invalid band names are rejected"""
         with pytest.raises(ValueError, match="Invalid band"):
@@ -180,7 +166,6 @@ class TestMosaicValidInputs:
     DEFAULT_KWARGS = {
         "scene_order": "valid_data",
         "mosaic_method": "mean",
-        "early_stop_missing_fraction": 0.01,
         "min_observations": None,
         "bands": ["B04", "B03", "B02", "B08"],
         "grid_id": "50HMH",
@@ -204,10 +189,6 @@ class TestMosaicValidInputs:
     def test_valid_percentile_method(self):
         self._validate(mosaic_method="percentile", percentile=50.0)
 
-    @pytest.mark.parametrize("threshold", [0.0, 0.01, 0.5, 1.0, None])
-    def test_valid_early_stop_missing_fractions(self, threshold):
-        self._validate(early_stop_missing_fraction=threshold)
-
     @pytest.mark.parametrize("target", [1, 2, 10, None])
     def test_valid_min_observations(self, target):
         self._validate(min_observations=target)
@@ -216,6 +197,22 @@ class TestMosaicValidInputs:
     def test_invalid_min_observations(self, target):
         with pytest.raises(ValueError, match="min_observations"):
             self._validate(min_observations=target)
+
+    @pytest.mark.parametrize("target", [1, 2, 10, None])
+    def test_valid_max_observations(self, target):
+        self._validate(max_observations=target)
+
+    @pytest.mark.parametrize("target", [0, -1, 1.5, "2", True])
+    def test_invalid_max_observations(self, target):
+        with pytest.raises(ValueError, match="max_observations"):
+            self._validate(max_observations=target)
+
+    def test_max_observations_below_min_observations_rejected(self):
+        with pytest.raises(ValueError, match="max_observations.*>= "):
+            self._validate(min_observations=5, max_observations=2)
+
+    def test_max_observations_equal_to_min_observations_accepted(self):
+        self._validate(min_observations=3, max_observations=3)
 
     @pytest.mark.parametrize(
         "bands",
@@ -246,12 +243,7 @@ class TestMosaicValidInputs:
 
 @pytest.mark.slow
 class TestMosaicEndToEnd:
-    """End-to-end tests using debug cache for performance"""
-
-    @pytest.fixture(autouse=True)
-    def enable_debug_cache(self, monkeypatch):
-        """Cache STAC/COG fetches across this class to keep wall time low."""
-        monkeypatch.setenv("S2MOSAIC_DEBUG_CACHE", "1")
+    """End-to-end mosaic tests."""
 
     @pytest.fixture(autouse=True)
     def time_test(self):
@@ -560,8 +552,9 @@ class TestMosaicFileNaming:
             bands=["B04", "B03", "B02"],
         )
 
-        expected_pattern = "50HMH_2023-06-01_to_2023-06-08_oldest_mean_B04_B03_B02.tif"
-        assert result.name == expected_pattern
+        assert result.name.startswith("grid-50HMH_2023-06-01_to_2023-06-08_")
+        assert "_B04-B03-B02_mean_scene-oldest_10m_OCM_MPC_" in result.name
+        assert result.name.endswith(".tif")
 
     def test_filename_different_parameters(self, temp_output_dir):
         """Test filename changes with different parameters"""
@@ -577,9 +570,9 @@ class TestMosaicFileNaming:
             bands=["visual"],
         )
 
-        expected_pattern = "50HMH_2022-12-15_to_2023-01-15_newest_first_visual.tif"
-
-        assert result.name == expected_pattern
+        assert result.name.startswith("grid-50HMH_2022-12-15_to_2023-01-15_")
+        assert "_visual_first_scene-newest_10m_OCM_MPC_" in result.name
+        assert result.name.endswith(".tif")
 
 
 @pytest.mark.slow
@@ -587,8 +580,7 @@ class TestMosaicBoundsEndToEnd:
     """End-to-end coverage of bounds-mode parameter combinations.
 
     These hit the network (PC + COG reads + OCM). Each test uses a small AOI
-    and short time range so they finish in a few seconds. Fixtures cache the
-    common scene download via S2MOSAIC_DEBUG_CACHE=1 to keep wall time reasonable.
+    and short time range so they finish in a few seconds.
     """
 
     # Small AOI in 50HMH (Perth, WA) — single MGRS tile
@@ -598,10 +590,6 @@ class TestMosaicBoundsEndToEnd:
     # Tight date window with a couple of cloud-free passes
     DATE_KW = dict(start_year=2023, start_month=6, start_day=1, duration_days=14)
     QUERY = {"eo:cloud_cover": {"lt": 80}}
-
-    @pytest.fixture(autouse=True)
-    def enable_debug_cache(self, monkeypatch):
-        monkeypatch.setenv("S2MOSAIC_DEBUG_CACHE", "1")
 
     @pytest.fixture(autouse=True)
     def time_test(self):
@@ -775,21 +763,6 @@ class TestMosaicBoundsEndToEnd:
         )
         self._assert_basic_geotiff(arr, profile, expect_bands=1)
 
-    # --- early_stop_missing_fraction (early termination) ---
-    @pytest.mark.parametrize("threshold", [None, 0.001, 0.5])
-    def test_early_stop_missing_fraction(self, threshold):
-        # Longer duration so we exercise multi-scene early termination
-        date_kw = {**self.DATE_KW, "duration_days": 30}
-        arr, profile = mosaic(
-            bounds=self.AOI_SMALL,
-            **date_kw,
-            bands=["B04"],
-            mosaic_method="first",  # early termination is meaningful
-            early_stop_missing_fraction=threshold,
-            additional_query=self.QUERY,
-        )
-        self._assert_basic_geotiff(arr, profile, expect_bands=1)
-
     # --- Custom output_crs ---
     def test_custom_output_crs(self):
         # Force WGS84 / Web Mercator output for a UTM-zone area
@@ -835,7 +808,7 @@ class TestMosaicBoundsEndToEnd:
         )
         assert isinstance(result, Path) and result.exists()
         assert result.suffix == ".tif"
-        assert "bounds_" in result.name  # filename uses bounds prefix
+        assert result.name.startswith("bbox-")
 
     # --- overwrite=False short-circuit ---
     def test_overwrite_false_short_circuits(self, tmp_path):
@@ -916,44 +889,6 @@ class TestMosaicBoundsEndToEnd:
             cloud_mask="SCL",
         )
         self._assert_basic_geotiff(arr, profile, expect_bands=1)
-
-    def test_scl_cache_writes_scl_pkl(self, tmp_path, monkeypatch):
-        """SCL provider should write scl_*.pkl cache files, not ocm_*.pkl."""
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("S2MOSAIC_DEBUG_CACHE", "1")
-        kw = dict(
-            bounds=self.AOI_SMALL,
-            **self.DATE_KW,
-            bands=["B04"],
-            mosaic_method="percentile",
-            percentile=50,
-            additional_query=self.QUERY,
-            cloud_mask="SCL",
-        )
-        mosaic(**kw)
-        scl_caches = list((tmp_path / "cache").glob("scl_*.pkl"))
-        ocm_caches = list((tmp_path / "cache").glob("ocm_*.pkl"))
-        assert len(scl_caches) >= 1, "expected at least one scl cache file"
-        assert len(ocm_caches) == 0, "SCL provider should not write ocm cache files"
-
-    # --- disk cache hit on repeat ---
-    def test_debug_cache_repeats_match(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)  # cache writes to ./cache (env var set by autouse)
-        kw = dict(
-            bounds=self.AOI_SMALL,
-            **self.DATE_KW,
-            bands=["B04"],
-            mosaic_method="percentile",
-            percentile=50,
-            additional_query=self.QUERY,
-        )
-        arr1, _ = mosaic(**kw)
-        arr2, _ = mosaic(**kw)
-        # Warm-cache run must be byte-for-byte identical to the cold run
-        np.testing.assert_array_equal(arr1, arr2)
-        # Tile-source cache files should have been written (one per kept scene/band)
-        cache_files = list((tmp_path / "cache").glob("tiled_band_*.tif"))
-        assert len(cache_files) >= 1, "expected at least one tiled band cache file"
 
 
 if __name__ == "__main__":

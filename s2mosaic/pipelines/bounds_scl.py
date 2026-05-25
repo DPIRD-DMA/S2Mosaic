@@ -19,7 +19,7 @@ from ..geometry import (
     _target_grid,
     _window_bounds_in_target,
 )
-from ..helpers import disk_cache, get_rasterio_resampling, with_scene_retry
+from ..helpers import get_rasterio_resampling, with_scene_retry
 from ..sources import Source
 from ..stac_bounds import _BoundsItemLike
 
@@ -123,21 +123,6 @@ def _read_band_at_target_window(
             return vrt.read(band_idx)  # type: ignore[no-any-return]
 
 
-def _fetch_one_scl_key(
-    item: _BoundsItemLike,
-    source: Source,
-    bounds_target: Bbox,
-    target_crs: int,
-    mask_resolution: int,
-    scene_window: SceneWindow,
-) -> str:
-    return (
-        f"{source.name}|{item.id}|{bounds_target}|{target_crs}|"
-        f"{mask_resolution}|{scene_window}"
-    )
-
-
-@disk_cache("scl_v2", key_fn=_fetch_one_scl_key)
 @with_scene_retry()
 def _fetch_one_scl(
     item: _BoundsItemLike,

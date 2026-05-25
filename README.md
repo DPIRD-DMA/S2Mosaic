@@ -129,6 +129,7 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 - `mosaic_method` (`"mean"`): `"mean"`, `"first"`, `"percentile"` (with `percentile`), or `"median"` (shortcut for percentile 50).
 - `percentile` (`None`): percentile to compute when `mosaic_method="percentile"` (0–100).
 - `min_observations` (`None`): minimum valid observations to read per pixel for `"mean"` and `"percentile"`. When set, tile aggregation stops reading later scenes once every coverable pixel has reached the target. This is not an output quality guarantee; pixels that cannot reach the target use whatever observations are available.
+- `max_observations` (`None`): per-pixel cap on valid observations for `"mean"` and `"percentile"`. Each pixel accepts at most this many scenes (in `scene_order`); later valid scenes are dropped for that pixel. Combined with `scene_order="oldest"` or `"newest"` this biases the mosaic toward early or late dates. Must be `>= min_observations` when both are set; ignored by `"first"` (effectively N=1).
 - `tile_workers` (`min(4, os.cpu_count() or 1)`): number of output tiles to aggregate concurrently. Higher values can improve throughput for network-bound reads, but increase memory use and simultaneous source reads.
 - `adaptive_tiling` (`True`): split sparse output tiles based on the actual cloud-valid contribution masks. This reduces wasted reads for irregular AOIs, sparse coverage, and heavily masked scenes. Set to `False` to use fixed-size output tiles.
 
@@ -148,7 +149,6 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 
 - `source` (`"MPC"`): STAC provider. `"MPC"` (default) uses Microsoft Planetary Computer with SAS-signed URLs. `"AWS"` uses Element 84's Earth Search on AWS Open Data — Sentinel-2 L2A scenes, public COGs, no auth, no SAS rotation.
 - `additional_query` (`{"eo:cloud_cover": {"lt": 100}}`): extra STAC query filters, e.g. `{"eo:cloud_cover": {"lt": 80}}`.
-- `early_stop_missing_fraction` (`None`): scene-selection early stop once the remaining missing fraction inside the coverable area drops below this value. The default `None` examines every scene; `0.0` is accepted as an equivalent no-op. Ignored for `percentile` mosaic methods.
 - `min_coverage_fraction` (`None`): optional scene-edge trimming. When set, drops pixels covered by fewer than this fraction of the maximum scene-overlap count in the requested area. The default keeps the full requested coverage.
 - `ignore_duplicate_items` (`True`): drop duplicate acquisitions, keeping the latest processing baseline.
 
@@ -162,6 +162,10 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 - `cloud_mask` (`"OCM"`): provider — `"OCM"` runs the OmniCloudMask deep-learning model on R+G+NIR bands (most accurate); `"SCL"` reads the L2A Scene Classification Layer (much cheaper, lower accuracy).
 - `ocm_batch_size` (`1`): OCM inference batch size. Only used with `cloud_mask="OCM"`.
 - `ocm_inference_dtype` (`"bf16"`): OCM inference dtype. Only used with `cloud_mask="OCM"`.
+
+**Diagnostics**
+
+- `show_progress` (`False`): show tqdm progress bars for the cloud-mask streaming and tile-aggregation phases. Useful in notebooks; leave off for headless/batch runs.
 
 **Bounds/AOI-mode-specific options**
 
@@ -187,6 +191,7 @@ If your application already configures the `logging` module, the package logger 
 - `ocm_inference_dtype`: if the device supports it 'bf16' tends to be the fastest option, failing this try 'fp16' then 'fp32'.
 - `scene_order`: Using `"valid_data"` tends to work well with early stopping because clear scenes are considered first.
 - `min_observations`: For large `"mean"` or `"percentile"` jobs, set this to the number of observations per pixel you actually need to avoid reading later scenes for already-satisfied tiles.
+- `max_observations`: Caps each pixel at N valid scenes. Combine with `scene_order="oldest"` (or `"newest"`) to bias the mosaic toward early/late dates over a long search window without paying for the extra reads.
 - `mosaic_method`: Using `"first"` can be a lot faster than `"mean"` as only valid, non-cloudy, new pixels are downloaded.
 
 ## Known limitations
@@ -198,16 +203,6 @@ If your application already configures the `logging` module, the package logger 
 Contributions to S2Mosaic are welcome! Please feel free to submit pull requests, create issues, or suggest improvements.
 
 For maintainers: the release flow (cut a tag, GitHub Actions builds + publishes to PyPI) is documented in [RELEASING.md](https://github.com/DPIRD-DMA/S2Mosaic/blob/main/RELEASING.md).
-
-### Debug caching
-
-When iterating on the code or running the slow test suite, set the `S2MOSAIC_DEBUG_CACHE` environment variable to skip repeated STAC and COG fetches:
-
-```bash
-export S2MOSAIC_DEBUG_CACHE=1
-```
-
-When set (to `1`, `true`, or `yes`), STAC search results, per-scene cloud masks, and per-(scene, band) tile sources are written to a `cache/` directory next to the working directory and reused on subsequent runs. Tile sources are stored as tiled GeoTIFFs on the target grid, so warm-cache reads bypass remote COG downloads and, for bounds/AOI mode, the WarpedVRT reprojection.
 
 ## License
 

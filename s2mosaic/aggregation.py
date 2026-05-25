@@ -171,13 +171,24 @@ def _contributing_scene_indices(
     masks: List[Optional[npt.NDArray[Any]]],
     tile_coverage: npt.NDArray[Any],
     min_observations: Optional[int],
+    max_observations: Optional[int],
 ) -> List[int]:
-    """Scene indices that contribute to a tile before min_observations is met."""
+    """Scene indices that contribute to a tile before the early-stop fires.
+
+    Tracks per-pixel observation counts when either bound is set. Stops once
+    every coverable pixel has hit the effective target — ``min_observations``
+    if set, else ``max_observations``. Scenes whose entire useful contribution
+    would land on already-capped pixels are skipped.
+    """
     r, c, h, w = spec
     contributing: List[int] = []
     observation_count: Optional[npt.NDArray[Any]] = None
-    if min_observations is not None:
+    effective_target: Optional[int] = None
+    if min_observations is not None or max_observations is not None:
         observation_count = np.zeros((h, w), dtype=np.uint16)
+        effective_target = (
+            min_observations if min_observations is not None else max_observations
+        )
 
     for scene_idx, m in enumerate(masks):
         if m is None:
@@ -185,16 +196,24 @@ def _contributing_scene_indices(
         mask_tile = m[r : r + h, c : c + w]
         if not mask_tile.any():
             continue
+
+        if max_observations is not None and observation_count is not None:
+            uncapped = observation_count < max_observations
+            if not (mask_tile & uncapped).any():
+                continue
         contributing.append(scene_idx)
 
         if observation_count is not None:
+            contribution = mask_tile & tile_coverage
+            if max_observations is not None:
+                contribution = contribution & (observation_count < max_observations)
             np.add(
                 observation_count,
-                mask_tile & tile_coverage,
+                contribution,
                 out=observation_count,
                 casting="unsafe",
             )
-            if ((observation_count >= min_observations) | ~tile_coverage).all():
+            if ((observation_count >= effective_target) | ~tile_coverage).all():
                 break
 
     return contributing
@@ -208,6 +227,7 @@ def tile_percentile(
     percentile: float,
     coverage_mask: npt.NDArray[Any],
     min_observations: Optional[int],
+    max_observations: Optional[int],
     out_dtype: "np.dtype[Any]",
 ) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
     r, c, h, w = spec
@@ -216,7 +236,7 @@ def tile_percentile(
         return spec, _empty_tile(spec, bands_count, out_dtype)
 
     contributing = _contributing_scene_indices(
-        spec, masks, tile_coverage, min_observations
+        spec, masks, tile_coverage, min_observations, max_observations
     )
 
     if not contributing:
@@ -233,15 +253,24 @@ def tile_percentile(
         )
 
     stack = np.empty((len(contributing), bands_count, h, w), dtype=np.float32)
+    pixel_count = (
+        np.zeros((h, w), dtype=np.uint16) if max_observations is not None else None
+    )
     for k, scene_idx in enumerate(contributing):
         mask = masks[scene_idx]
         if mask is None:
             raise RuntimeError(f"Missing mask for contributing scene {scene_idx}")
         mask_tile = mask[r : r + h, c : c + w]
+        if pixel_count is not None and max_observations is not None:
+            pick = mask_tile & (pixel_count < max_observations)
+        else:
+            pick = mask_tile
         band_data = _read_scene_bands(read_fn, scene_idx, bands_count, spec)
         for j, data in enumerate(band_data):
             stack[k, j].fill(np.nan)
-            np.copyto(stack[k, j], data, where=mask_tile, casting="unsafe")
+            np.copyto(stack[k, j], data, where=pick, casting="unsafe")
+        if pixel_count is not None:
+            np.add(pixel_count, pick, out=pixel_count, casting="unsafe")
 
     res = _nanquantile_axis0(stack, percentile / 100.0)
     res = np.nan_to_num(res, nan=0.0)
@@ -255,6 +284,7 @@ def tile_mean(
     bands_count: int,
     coverage_mask: npt.NDArray[Any],
     min_observations: Optional[int],
+    max_observations: Optional[int],
     out_dtype: "np.dtype[Any]",
 ) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
     r, c, h, w = spec
@@ -263,7 +293,7 @@ def tile_mean(
         return spec, _empty_tile(spec, bands_count, out_dtype)
 
     contributing = _contributing_scene_indices(
-        spec, masks, tile_coverage, min_observations
+        spec, masks, tile_coverage, min_observations, max_observations
     )
 
     if not contributing:
@@ -286,10 +316,16 @@ def tile_mean(
         if mask is None:
             raise RuntimeError(f"Missing mask for contributing scene {scene_idx}")
         mask_tile = mask[r : r + h, c : c + w]
+        if max_observations is not None:
+            pick = mask_tile & (count < max_observations)
+            if not pick.any():
+                continue
+        else:
+            pick = mask_tile
         band_data = _read_scene_bands(read_fn, scene_idx, bands_count, spec)
         for j, data in enumerate(band_data):
-            np.add(sum_block[j], data, out=sum_block[j], where=mask_tile)
-        np.add(count, mask_tile, out=count, casting="unsafe")
+            np.add(sum_block[j], data, out=sum_block[j], where=pick)
+        np.add(count, pick, out=count, casting="unsafe")
     result = np.divide(sum_block, count, out=np.zeros_like(sum_block), where=count != 0)
     return spec, _finalise_tile(result, out_dtype)
 
@@ -300,7 +336,6 @@ def tile_first(
     read_fn: ReaderFn,
     bands_count: int,
     coverage_mask: npt.NDArray[Any],
-    early_stop_missing_fraction: Optional[float],
     out_dtype: "np.dtype[Any]",
 ) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
     r, c, h, w = spec
@@ -429,13 +464,13 @@ def run_tile_aggregation(
     height: int,
     width: int,
     coverage_mask: npt.NDArray[Any],
-    early_stop_missing_fraction: Optional[float],
     mosaic_method: str,
     percentile: Optional[float],
     tile_size: int,
     tile_workers: Optional[int],
     out_dtype: "np.dtype[Any]" = DEFAULT_OUTPUT_DTYPE,
     min_observations: Optional[int] = None,
+    max_observations: Optional[int] = None,
     adaptive_tiling: bool = True,
     tile_specs: Optional[List[Tuple[int, int, int, int]]] = None,
     show_progress: bool = False,
@@ -456,13 +491,13 @@ def run_tile_aggregation(
         height=height,
         width=width,
         coverage_mask=coverage_mask,
-        early_stop_missing_fraction=early_stop_missing_fraction,
         mosaic_method=mosaic_method,
         percentile=percentile,
         tile_size=tile_size,
         tile_workers=tile_workers,
         out_dtype=out_dtype,
         min_observations=min_observations,
+        max_observations=max_observations,
         adaptive_tiling=adaptive_tiling,
         tile_specs=tile_specs,
         show_progress=show_progress,
@@ -480,13 +515,13 @@ def iter_tile_aggregation(
     height: int,
     width: int,
     coverage_mask: npt.NDArray[Any],
-    early_stop_missing_fraction: Optional[float],
     mosaic_method: str,
     percentile: Optional[float],
     tile_size: int,
     tile_workers: Optional[int],
     out_dtype: "np.dtype[Any]" = DEFAULT_OUTPUT_DTYPE,
     min_observations: Optional[int] = None,
+    max_observations: Optional[int] = None,
     adaptive_tiling: bool = True,
     tile_specs: Optional[List[Tuple[int, int, int, int]]] = None,
     show_progress: bool = False,
@@ -550,6 +585,7 @@ def iter_tile_aggregation(
                 pv,
                 coverage_mask,
                 min_observations,
+                max_observations,
                 out_dtype,
             )
 
@@ -566,6 +602,7 @@ def iter_tile_aggregation(
                 bands_count,
                 coverage_mask,
                 min_observations,
+                max_observations,
                 out_dtype,
             )
 
@@ -581,7 +618,6 @@ def iter_tile_aggregation(
                 effective_read_fn,
                 bands_count,
                 coverage_mask,
-                early_stop_missing_fraction,
                 out_dtype,
             )
 
@@ -625,13 +661,13 @@ def write_tile_aggregation_geotiff(
     width: int,
     coverage_mask: npt.NDArray[Any],
     output_coverage_mask: Optional[npt.NDArray[Any]],
-    early_stop_missing_fraction: Optional[float],
     mosaic_method: str,
     percentile: Optional[float],
     tile_size: int,
     tile_workers: Optional[int],
     out_dtype: "np.dtype[Any]" = DEFAULT_OUTPUT_DTYPE,
     min_observations: Optional[int] = None,
+    max_observations: Optional[int] = None,
     adaptive_tiling: bool = True,
     tile_specs: Optional[List[Tuple[int, int, int, int]]] = None,
     show_progress: bool = False,
@@ -664,13 +700,13 @@ def write_tile_aggregation_geotiff(
                 height=height,
                 width=width,
                 coverage_mask=coverage_mask,
-                early_stop_missing_fraction=early_stop_missing_fraction,
                 mosaic_method=mosaic_method,
                 percentile=percentile,
                 tile_size=tile_size,
                 tile_workers=tile_workers,
                 out_dtype=out_dtype,
                 min_observations=min_observations,
+                max_observations=max_observations,
                 adaptive_tiling=adaptive_tiling,
                 tile_specs=tile_specs,
                 show_progress=show_progress,

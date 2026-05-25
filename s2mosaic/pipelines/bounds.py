@@ -36,13 +36,11 @@ from ..config import (
     CLOUD_MASK_OCM,
     CLOUD_MASK_SCL,
     MOSAIC_FIRST,
-    MOSAIC_PERCENTILE,
     MosaicRequest,
 )
 from ..helpers import (
     SceneFetchError,
     define_dates,
-    disk_cache,
     get_band_template,
     get_rasterio_resampling,
     pick_ocm_resolution,
@@ -239,21 +237,6 @@ class _WindowedBoolMask:
         return bool(self._block.any())
 
 
-def _fetch_one_ocm_key(
-    item: _BoundsItemLike,
-    source: Source,
-    bounds_target: Bbox,
-    target_crs: int,
-    ocm_resolution: int,
-    scene_window: SceneWindow,
-) -> str:
-    return (
-        f"{source.name}|{item.id}|{bounds_target}|{target_crs}|"
-        f"{ocm_resolution}|{scene_window}"
-    )
-
-
-@disk_cache("ocm_v2", key_fn=_fetch_one_ocm_key)
 @with_scene_retry()
 def _fetch_one_ocm(
     item: _BoundsItemLike,
@@ -377,8 +360,6 @@ def _stream_bounds_combo_masks(
     coverage_mask: npt.NDArray[Any],
     cloud_mask: str,
     mosaic_method: str,
-    early_stop_missing_fraction: Optional[float],
-    possible_pixel_count: int,
     tile_workers: Optional[int],
     ocm_batch_size: int,
     ocm_inference_dtype: str,
@@ -539,35 +520,16 @@ def _stream_bounds_combo_masks(
             combo_block
         )
 
-        if (
-            early_stop_missing_fraction is not None
-            and mosaic_method != MOSAIC_PERCENTILE
-            and possible_pixel_count > 0
-        ):
-            completed = int((coverage_mask & good_pixel_tracker).sum())
-            no_data_sum = possible_pixel_count - completed
-            no_data_pct = (1 - completed / possible_pixel_count) * 100
-            logger.info(
-                f"Scene {scene_idx + 1}/{n_time} kept; no-data {no_data_pct:.1f}%"
-            )
-            if no_data_sum < possible_pixel_count * early_stop_missing_fraction:
-                logger.info(
-                    "early_stop_missing_fraction met after "
-                    f"{len(kept_combo_masks)} kept scenes "
-                    f"({scene_idx + 1}/{n_time} examined)"
-                )
-                break
-
     if mask_fetch_iter is not None:
         close = getattr(mask_fetch_iter, "close", None)
         if close is not None:
             close()
 
     if mask_progress is not None:
-        # `first` mode and early_stop_missing_fraction can break the loop early. Snap
-        # the bar to total so tqdm renders it as complete rather than red. Set ``n``
-        # directly and force a refresh — ``update`` honours min-interval throttling
-        # and a quick ``close`` after may skip the final redraw in tqdm.notebook.
+        # `first` mode can break the loop early. Snap the bar to total so tqdm
+        # renders it as complete rather than red. Set ``n`` directly and force
+        # a refresh — ``update`` honours min-interval throttling and a quick
+        # ``close`` after may skip the final redraw in tqdm.notebook.
         if mask_progress.n < mask_progress.total:
             mask_progress.n = mask_progress.total
             mask_progress.refresh()
@@ -633,9 +595,6 @@ def run_bounds_pipeline(
             / ``resolution`` during the WarpedVRT read.
         additional_query: Extra STAC query filters
             (e.g. ``{"eo:cloud_cover": {"lt": 50}}``).
-        early_stop_missing_fraction: Stop early once the uncovered fraction within the
-            coverage mask drops below this during scene selection. Set to
-            ``None`` (default) or ``0.0`` to examine every scene.
         min_observations: Optional per-tile early-stop target for
             ``mean`` and ``percentile``. When set, user-band aggregation stops
             reading later scenes for a tile once every coverable pixel has at
@@ -842,8 +801,6 @@ def run_bounds_pipeline(
         coverage_mask=coverage_mask_ocm,
         cloud_mask=request.cloud_mask,
         mosaic_method=request.mosaic_method,
-        early_stop_missing_fraction=request.early_stop_missing_fraction,
-        possible_pixel_count=possible_pixel_count,
         tile_workers=request.tile_workers,
         ocm_batch_size=request.ocm_batch_size,
         ocm_inference_dtype=request.ocm_inference_dtype,
@@ -924,8 +881,8 @@ def run_bounds_pipeline(
         resampling_method=request.resampling_method,
         prewarm=should_prewarm_sources(
             request.mosaic_method,
-            request.early_stop_missing_fraction,
             request.min_observations,
+            request.max_observations,
         ),
     )
 
@@ -936,7 +893,7 @@ def run_bounds_pipeline(
     # Tile small AOIs as a single tile; cap large AOIs at 2048 so each
     # tile read from PC stays one big range request. Smaller tiles trade
     # round-trip latency for worker utilisation — a bad deal when reads
-    # are network-bound (i.e., production with no debug cache).
+    # are network-bound.
     tile_size = min(2048, max(h, w))
     logger.info(
         "Tile-streaming %d scenes x %d bands at tile=%d (%dx%d output)",
@@ -993,8 +950,8 @@ def run_bounds_pipeline(
                 width=w,
                 coverage_mask=coverage_mask,
                 output_coverage_mask=output_coverage_mask,
-                early_stop_missing_fraction=request.early_stop_missing_fraction,
                 min_observations=request.min_observations,
+                max_observations=request.max_observations,
                 mosaic_method=request.mosaic_method,
                 percentile=request.percentile,
                 tile_size=tile_size,
@@ -1014,8 +971,8 @@ def run_bounds_pipeline(
             height=h,
             width=w,
             coverage_mask=coverage_mask,
-            early_stop_missing_fraction=request.early_stop_missing_fraction,
             min_observations=request.min_observations,
+            max_observations=request.max_observations,
             mosaic_method=request.mosaic_method,
             percentile=request.percentile,
             tile_size=tile_size,

@@ -1,4 +1,3 @@
-import json
 import logging
 import re
 from datetime import date
@@ -14,7 +13,6 @@ from shapely.geometry.polygon import Polygon
 from urllib3 import Retry
 
 from .config import SCENE_ORDER_NEWEST, SCENE_ORDER_OLDEST, SCENE_ORDER_VALID_DATA
-from .helpers import pickle_cache
 from .sources import Source
 
 logger = logging.getLogger(__name__)
@@ -116,54 +114,40 @@ def search_for_items(
         {start_date} to {end_date} with query: {query}"""
     )
 
-    # Cache the STAC query result so dev iteration survives PC outages and
-    # avoids redundant network calls. URLs in cached items aren't signed yet
-    # (signing happens at asset read time), so the cached payload is stable
-    # across runs.
-    cache_key = (
-        f"{source.name}|{grid_id}|{start_date.isoformat()}|{end_date.isoformat()}|"
-        f"{shapely.to_geojson(bounds)}|"
-        f"{json.dumps(additional_query or {}, sort_keys=True, default=str)}|"
-        f"dedupe={ignore_duplicate_items}"
+    retry = Retry(
+        total=5,
+        backoff_factor=1,
+        status_forcelist=STAC_RETRY_STATUS_CODES,
+        allowed_methods=None,
+        respect_retry_after_header=True,
     )
-
-    def _do_search() -> ItemCollection:
-        retry = Retry(
-            total=5,
-            backoff_factor=1,
-            status_forcelist=STAC_RETRY_STATUS_CODES,
-            allowed_methods=None,
-            respect_retry_after_header=True,
-        )
-        stac_api_io = StacApiIO(
-            max_retries=retry,
-            timeout=STAC_READ_TIMEOUT_SECONDS,
-        )
-        catalog = source.open_catalog(stac_io=stac_api_io)
-        items = catalog.search(**query).item_collection()
-        logger.info(f"Found {len(items)}")
-        # When the source can't filter by MGRS server-side (e.g. AWS — Earth
-        # Search rejects ``query`` combined with ``intersects``), the search
-        # also returns scenes from adjacent tiles that overlap the tile
-        # polygon. Filter those out client-side using the per-item tile ID
-        # so grid_id-mode output is restricted to the requested tile.
-        if mgrs_filter is None:
-            before = len(items)
-            kept = [it for it in items if _extract_mgrs_tile(it.properties) == grid_id]
-            items = ItemCollection(kept)
-            if len(items) != before:
-                logger.info(
-                    "Post-filtered %d -> %d items by grid_id=%s",
-                    before,
-                    len(items),
-                    grid_id,
-                )
-        if ignore_duplicate_items:
-            items = filter_latest_processing_baselines(items)
-            logger.info(f"After filtering, {len(items)} items remain")
-        return items
-
-    return pickle_cache("stac_search", cache_key, _do_search)
+    stac_api_io = StacApiIO(
+        max_retries=retry,
+        timeout=STAC_READ_TIMEOUT_SECONDS,
+    )
+    catalog = source.open_catalog(stac_io=stac_api_io)
+    items = catalog.search(**query).item_collection()
+    logger.info(f"Found {len(items)}")
+    # When the source can't filter by MGRS server-side (e.g. AWS — Earth
+    # Search rejects ``query`` combined with ``intersects``), the search
+    # also returns scenes from adjacent tiles that overlap the tile
+    # polygon. Filter those out client-side using the per-item tile ID
+    # so grid_id-mode output is restricted to the requested tile.
+    if mgrs_filter is None:
+        before = len(items)
+        kept = [it for it in items if _extract_mgrs_tile(it.properties) == grid_id]
+        items = ItemCollection(kept)
+        if len(items) != before:
+            logger.info(
+                "Post-filtered %d -> %d items by grid_id=%s",
+                before,
+                len(items),
+                grid_id,
+            )
+    if ignore_duplicate_items:
+        items = filter_latest_processing_baselines(items)
+        logger.info(f"After filtering, {len(items)} items remain")
+    return items
 
 
 def sort_items(items: DataFrame, scene_order: str) -> DataFrame:

@@ -1,9 +1,8 @@
 """Network-bottleneck benchmark for s2mosaic.
 
 Runs a fixed bounds mosaic N times and records wall-clock time, peak memory,
-and result-array fingerprint to JSONL. Caching is forced off so each run
-re-fetches over the network. Use SCL masking (one COG read per scene, no DL
-inference) so the measurement isolates network/I-O cost.
+and result-array fingerprint to JSONL. Use SCL masking (one COG read per
+scene, no DL inference) so the measurement isolates network/I-O cost.
 
 Usage:
     python scripts/benchmark_network.py --label baseline --runs 3
@@ -18,17 +17,12 @@ import argparse
 import gc
 import hashlib
 import json
-import os
 import platform
 import resource
 import sys
 import time
 from pathlib import Path
 from typing import Any, Dict
-
-# Force-disable the debug cache. The library reads this env var to decide whether
-# to materialise tiled GeoTIFFs locally; we want every run to hit the network.
-os.environ.pop("S2MOSAIC_DEBUG_CACHE", None)
 
 import numpy as np
 
@@ -112,9 +106,6 @@ def main() -> int:
     extra: Dict[str, Any] = {}
     if args.tile_workers is not None:
         extra["tile_workers"] = args.tile_workers
-
-    # Confirm cache is off so the comment in the file matches reality.
-    assert not os.environ.get("S2MOSAIC_DEBUG_CACHE"), "cache must be off for bench"
 
     print(
         f"== Benchmark {args.label} | runs={args.runs} | extra={extra} ==",

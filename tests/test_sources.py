@@ -127,7 +127,6 @@ class TestValidateInputsRejectsBadSource:
     BASE_KWARGS = {
         "scene_order": "valid_data",
         "mosaic_method": "mean",
-        "early_stop_missing_fraction": None,
         "min_observations": None,
         "bands": ["B04"],
         "grid_id": "50HMH",
@@ -344,8 +343,6 @@ class TestSearchPostFilter:
             "open",
             classmethod(lambda cls, *_, **__: _FakeCatalog()),
         )
-        # Skip the disk-cache wrapper so the search actually runs.
-        monkeypatch.setattr(stac_mod, "pickle_cache", lambda _p, _k, fn: fn())
 
         from datetime import date as _date
 
@@ -413,7 +410,6 @@ class TestStacDatetimeFormat:
         from s2mosaic.sources import MPC
 
         captured = self._capture_query(monkeypatch)
-        monkeypatch.setattr(stac_mod, "pickle_cache", lambda _p, _k, fn: fn())
 
         stac_mod.search_for_items(
             bounds=Polygon([(0, 0), (1, 0), (1, 1), (0, 1)]),

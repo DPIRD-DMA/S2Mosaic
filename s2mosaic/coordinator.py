@@ -40,8 +40,8 @@ def mosaic(
     resampling_method: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
     source: str = ...,
-    early_stop_missing_fraction: Union[float, None] = ...,
     min_observations: Optional[int] = ...,
+    max_observations: Optional[int] = ...,
     min_coverage_fraction: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
     scene_order: str = ...,
@@ -79,8 +79,8 @@ def mosaic(
     resampling_method: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
     source: str = ...,
-    early_stop_missing_fraction: Union[float, None] = ...,
     min_observations: Optional[int] = ...,
+    max_observations: Optional[int] = ...,
     min_coverage_fraction: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
     scene_order: str = ...,
@@ -118,8 +118,8 @@ def mosaic(
     resampling_method: str = ...,
     additional_query: Optional[Dict[str, Any]] = ...,
     source: str = ...,
-    early_stop_missing_fraction: Union[float, None] = ...,
     min_observations: Optional[int] = ...,
+    max_observations: Optional[int] = ...,
     min_coverage_fraction: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
     scene_order: str = ...,
@@ -156,8 +156,8 @@ def mosaic(
     resampling_method: str = "nearest",
     additional_query: Optional[Dict[str, Any]] = None,
     source: str = SOURCE_MPC,
-    early_stop_missing_fraction: Union[float, None] = None,
     min_observations: Optional[int] = None,
+    max_observations: Optional[int] = None,
     min_coverage_fraction: Optional[float] = None,
     ignore_duplicate_items: bool = True,
     scene_order: str = "valid_data",
@@ -224,16 +224,18 @@ def mosaic(
             Microsoft Planetary Computer (SAS-signed URLs); ``"AWS"`` uses
             Element 84 Earth Search on AWS Open Data (public S3, no auth).
             Defaults to "MPC".
-        early_stop_missing_fraction (float, optional): Early-stop fraction for scene
-            ingestion. Stops reading further scenes once the AOI's no-data
-            fraction drops below this value. Set to ``None`` (default) or
-            ``0.0`` to examine every available scene. Ignored for
-            ``percentile`` mosaic methods. Defaults to None.
         min_observations (int, optional): Per-tile early-stop target
             for ``mean`` and ``percentile``. When set, aggregation stops
             reading later scenes for a tile once every coverable pixel has at
             least this many valid observations. This is not an output quality
             filter. Defaults to None.
+        max_observations (int, optional): Per-pixel cap for ``mean`` and
+            ``percentile``. Each pixel accepts at most this many valid scenes,
+            in ``scene_order``; later valid scenes are dropped for that pixel.
+            Combined with ``scene_order="oldest"``/``"newest"`` this biases
+            the mosaic to early or late dates. Must be >= ``min_observations``
+            when both are set. Ignored by ``first`` (effectively N=1).
+            Defaults to None.
         min_coverage_fraction (float, optional): Drop pixels covered by fewer
             than this fraction of overlapping scenes. Set to None to disable.
             Defaults to None.
@@ -294,8 +296,8 @@ def mosaic(
         resampling_method=resampling_method,
         additional_query=additional_query,
         source=source,
-        early_stop_missing_fraction=early_stop_missing_fraction,
         min_observations=min_observations,
+        max_observations=max_observations,
         min_coverage_fraction=min_coverage_fraction,
         ignore_duplicate_items=ignore_duplicate_items,
         scene_order=scene_order,

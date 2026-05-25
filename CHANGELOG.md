@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- `max_observations` parameter on `mosaic()` for `"mean"` and `"percentile"` modes. Per-pixel cap: each pixel accepts at most N valid scenes (in `scene_order`), with later valid scenes dropped for that pixel. Pairs with `scene_order="oldest"`/`"newest"` to bias the mosaic toward early or late dates. Tile-streamed: `tile_mean` masks the accumulator on `count < max_observations`; `tile_percentile` writes NaN into the per-scene stack past the per-pixel cap, and the existing NaN-skipping quantile kernel handles the rest. Stop condition in `_contributing_scene_indices` uses `max(min_observations, max_observations)`, so reads halt once every coverable pixel saturates. Validated as a positive integer with `max_observations >= min_observations` when both are set; ignored by `"first"` (effectively N=1).
+
+### Removed
+- **Breaking:** `early_stop_missing_fraction` parameter on `mosaic()` removed. The whole-pipeline early-stop heuristic it controlled is gone; scene selection now examines every candidate scene (subject to `mosaic_method="first"` per-tile fill and `min_observations`). Callers passing `early_stop_missing_fraction=...` must drop the argument; behaviour for `None`/`0.0` was already a no-op, so most call sites need no other change.
+
 ## [2.0.0b1] - 2026-05-15
 
 ### Added
