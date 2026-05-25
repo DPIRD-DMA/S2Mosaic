@@ -19,6 +19,7 @@ captures the per-provider knowledge needed to search, sign, and read assets:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, Optional
 
@@ -103,9 +104,18 @@ def _aws_mgrs_query(grid_id: str) -> Dict[str, Any]:
     # builder in for parity/test coverage but the AWS source itself disables
     # ``mgrs_query`` (set to ``None`` below) — grid-mode precision is then
     # restored by ``search_for_items`` post-filtering on ``grid:code``.
-    utm_zone = grid_id[:-3]
-    latitude_band = grid_id[-3]
-    grid_square = grid_id[-2:]
+    match = re.fullmatch(
+        r"(?P<utm_zone>\d{1,2})(?P<latitude_band>[A-Z])"
+        r"(?P<grid_square>[A-Z]{2})",
+        grid_id,
+    )
+    if match is None:
+        raise ValueError(
+            f"Grid {grid_id!r} is invalid. It should be in the format '50HMH'."
+        )
+    utm_zone = match.group("utm_zone")
+    latitude_band = match.group("latitude_band")
+    grid_square = match.group("grid_square")
     return {
         "mgrs:utm_zone": {"eq": int(utm_zone)},
         "mgrs:latitude_band": {"eq": latitude_band},

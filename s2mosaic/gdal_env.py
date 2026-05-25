@@ -9,7 +9,8 @@ and the mask-streaming pipeline, so the settings would have no effect on
 hot-path COG reads.
 
 User-set values are respected; we only fill in defaults that aren't already
-present in the environment.
+present in the environment. Call :func:`apply_gdal_network_defaults` explicitly
+when a process wants these global GDAL defaults.
 """
 
 from __future__ import annotations
@@ -54,12 +55,8 @@ GDAL_NETWORK_DEFAULTS: dict[str, str] = {
 def apply_gdal_network_defaults() -> None:
     """Set network-tuned GDAL env vars, without overwriting any the user set.
 
-    Called once at library import so settings are visible to every rasterio
-    open across every thread (rasterio.Env is thread-local — it would not
-    reach the ThreadPoolExecutor workers used in the hot path).
-
-    Set ``S2MOSAIC_NO_GDAL_DEFAULTS=1`` to opt out (e.g. for A/B benchmarking
-    against the unconfigured baseline).
+    These are process-wide environment variables. They are intentionally not
+    applied at import time because they affect every GDAL user in the process.
     """
     if os.environ.get("S2MOSAIC_NO_GDAL_DEFAULTS", "").lower() in ("1", "true", "yes"):
         return

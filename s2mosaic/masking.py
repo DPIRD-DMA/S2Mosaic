@@ -1,7 +1,7 @@
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from typing import Any, Tuple
+from typing import Any, Tuple, Union
 
 import cv2
 import numpy as np
@@ -20,9 +20,9 @@ from .sources import Source
 #   3  cloud_shadow  9  cloud_high_probability
 #   4  vegetation   10  thin_cirrus
 #   5  bare_soil    11  snow
-# Treated as cloudy (excluded from "clear"): saturated, cloud shadow, both cloud
-# probabilities, thin cirrus.
-SCL_CLOUDY_CLASSES: Tuple[int, ...] = (1, 3, 8, 9, 10)
+# Treated as unsafe for "clear": saturated, dark/shadow, cloud shadow,
+# unclassified, both cloud probabilities, thin cirrus.
+SCL_CLOUDY_CLASSES: Tuple[int, ...] = (1, 2, 3, 7, 8, 9, 10)
 SCL_NO_DATA: int = 0
 
 
@@ -49,9 +49,9 @@ def compute_masks_from_scl(
     """Build (clear, valid) masks from an SCL band.
 
     Mirrors :func:`compute_masks_from_array` so OCM and SCL providers are
-    interchangeable. ``clear`` is True where the pixel's SCL class isn't in
-    :data:`SCL_CLOUDY_CLASSES`; ``valid`` is True where SCL != 0, dilated to
-    erode scene-edge no-data the same way the OCM path does.
+    interchangeable. ``clear`` is True where the pixel's SCL class is safe for
+    compositing; ``valid`` is True where SCL != 0, dilated to erode scene-edge
+    no-data the same way the OCM path does.
     """
     if scl.ndim == 3 and scl.shape[0] == 1:
         scl = scl[0]
@@ -122,7 +122,7 @@ def get_masks(
     batch_size: int = 6,
     inference_dtype: str = "bf16",
     max_dl_workers: int = 4,
-    target_size: int = 10980,
+    target_size: Union[int, Tuple[int, int]] = 10980,
     ocm_resolution: int = 20,
 ) -> Tuple[npt.NDArray[Any], npt.NDArray[Any]]:
     # download RG+NIR bands at OCM resolution for cloud masking
@@ -140,16 +140,19 @@ def get_masks(
     clear, valid = compute_masks_from_array(
         ocm_input, batch_size=batch_size, inference_dtype=inference_dtype
     )
-    # Resample masks from OCM resolution (20m) to the target output size
-    if clear.shape != (target_size, target_size):
+    # Resample masks from OCM resolution (20m) to the target output shape.
+    target_height, target_width = (
+        (target_size, target_size) if isinstance(target_size, int) else target_size
+    )
+    if clear.shape != (target_height, target_width):
         clear = cv2.resize(
             clear.astype(np.uint8),
-            (target_size, target_size),
+            (target_width, target_height),
             interpolation=cv2.INTER_NEAREST,
         ).astype(bool)
         valid = cv2.resize(
             valid.astype(np.uint8),
-            (target_size, target_size),
+            (target_width, target_height),
             interpolation=cv2.INTER_NEAREST,
         ).astype(bool)
     return clear, valid

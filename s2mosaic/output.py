@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import re
 from dataclasses import fields, is_dataclass
 from datetime import date
 from pathlib import Path
@@ -25,24 +26,41 @@ REQUEST_HASH_EXCLUDED_FIELDS = {
 }
 
 
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, BaseGeometry):
-        return mapping(value)
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, Mapping):
-        return {str(k): _jsonable(v) for k, v in sorted(value.items())}
-    if isinstance(value, tuple):
-        return [_jsonable(v) for v in value]
-    if isinstance(value, list):
-        return [_jsonable(v) for v in value]
-    if callable(value):
-        name = getattr(value, "__qualname__", repr(value))
-        module = getattr(value, "__module__", None)
-        return f"{module}.{name}" if module else name
-    return value
+def _jsonable(value: Any, _seen: Optional[set[int]] = None) -> Any:
+    if _seen is None:
+        _seen = set()
+    value_id = id(value)
+    is_container = isinstance(value, (Mapping, tuple, list, BaseGeometry))
+    if is_container:
+        if value_id in _seen:
+            raise ValueError("Cannot serialise recursive request metadata")
+        _seen.add(value_id)
+    try:
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, BaseGeometry):
+            return mapping(value)
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, Mapping):
+            return {str(k): _jsonable(v, _seen) for k, v in sorted(value.items())}
+        if isinstance(value, tuple):
+            return [_jsonable(v, _seen) for v in value]
+        if isinstance(value, list):
+            return [_jsonable(v, _seen) for v in value]
+        if callable(value):
+            name = getattr(value, "__qualname__", repr(value))
+            module = getattr(value, "__module__", None)
+            code = getattr(value, "__code__", None)
+            code_hash = ""
+            if code is not None:
+                code_hash = hashlib.sha256(code.co_code).hexdigest()[:10]
+            qualname = f"{module}.{name}" if module else name
+            return {"callable": qualname, "code_hash": code_hash}
+        return value
+    finally:
+        if is_container:
+            _seen.remove(value_id)
 
 
 def _request_metadata(request: Any) -> Dict[str, Any]:
@@ -90,7 +108,13 @@ def _hash_value(value: Any, length: int = 10) -> str:
 
 def _safe_token(value: Union[float, int, str]) -> str:
     token = f"{value:.4f}" if isinstance(value, float) else str(value)
-    return token.replace("-", "m").replace(".", "p").replace(" ", "")
+    token = token.strip()
+    sign = "neg" if token.startswith("-") else ""
+    if sign:
+        token = token[1:]
+    token = token.replace(".", "p")
+    token = re.sub(r"[^A-Za-z0-9p]+", "_", token).strip("_")
+    return f"{sign}{token}" if sign else token
 
 
 def _method_token(mosaic_method: str, percentile: Optional[float]) -> str:
@@ -234,10 +258,11 @@ def _export_tif(
     bands: List[str],
     nodata_value: Union[int, None] = 0,
 ) -> None:
-    profile.update(
+    write_profile = profile.copy()
+    write_profile.update(
         count=array.shape[0], dtype=array.dtype, nodata=nodata_value, compress="lzw"
     )
-    with rio.open(export_path, "w", **profile) as dst:
+    with rio.open(export_path, "w", **write_profile) as dst:
         dst.write(array)
         dst.descriptions = bands
 
@@ -261,7 +286,7 @@ def finalize_output(
     """Apply coverage mask, set band names + nodata, export or return."""
     if coverage_mask is not None:
         coverage = np.asarray(coverage_mask, dtype=bool)
-        np.multiply(array, coverage[None, :, :], out=array, casting="unsafe")
+        np.multiply(array, coverage[None, :, :], out=array)
 
     band_descriptions, nodata_value = output_band_metadata(bands)
 

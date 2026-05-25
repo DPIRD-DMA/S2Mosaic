@@ -44,6 +44,8 @@ from s2mosaic.config import MosaicRequest, validate_inputs
 from s2mosaic.output import (
     finalize_output,
     get_output_path,
+    _jsonable,
+    _safe_token,
     output_request_hash,
     output_sidecar_metadata,
     resolve_export_path,
@@ -57,6 +59,7 @@ from s2mosaic.frequent_coverage import (
 from s2mosaic.masking import (
     SCL_CLOUDY_CLASSES,
     compute_masks_from_scl,
+    get_masks,
     get_valid_mask,
 )
 from s2mosaic.aggregation import (
@@ -69,9 +72,10 @@ from s2mosaic.aggregation import (
     run_tile_aggregation,
     write_tile_aggregation_geotiff,
 )
-from s2mosaic.cache import iter_ordered_fetches
+from s2mosaic.streaming import iter_ordered_fetches
 from s2mosaic.pipelines.grid import stream_mosaic_pipeline
 from s2mosaic.pipelines.bounds import _mask_resolution_for_request
+from s2mosaic.pipelines.bounds_scl import _pick_overview_level
 from s2mosaic.readers import (
     BoundsTileReader,
     GridTileReader,
@@ -159,7 +163,8 @@ class TestComputeMasksFromScl:
         # One pixel of every class 0..11 in a single row.
         scl = np.arange(12, dtype=np.uint8).reshape(1, 12)
         clear, valid = compute_masks_from_scl(scl, dilation_count=0)
-        # Cloudy classes (1, 3, 8, 9, 10) → clear=False; everything else clear=True
+        # Unsafe classes are not clear; vegetation, bare soil, water, and snow
+        # remain clear. SCL no-data is invalid separately.
         for cls in range(12):
             expected_clear = cls not in SCL_CLOUDY_CLASSES
             assert bool(clear[0, cls]) == expected_clear, (
@@ -172,7 +177,7 @@ class TestComputeMasksFromScl:
 
     def test_cloudy_classes_match_constant(self):
         # Defensive: lock down the constant so changes are explicit
-        assert SCL_CLOUDY_CLASSES == (1, 3, 8, 9, 10)
+        assert SCL_CLOUDY_CLASSES == (1, 2, 3, 7, 8, 9, 10)
 
     def test_dilation_grows_invalid_around_no_data(self):
         # Single no-data pixel → 4-iter MORPH_CROSS dilate → diamond of invalids
@@ -249,6 +254,19 @@ class TestPickUtmEpsg:
     )
     def test_known_locations(self, lon, lat, expected):
         assert pick_utm_epsg(lon, lat) == expected
+
+    @pytest.mark.parametrize(
+        "lon, lat, match",
+        [
+            (-180.1, 0.0, "longitude"),
+            (180.1, 0.0, "longitude"),
+            (0.0, -90.1, "latitude"),
+            (0.0, 90.1, "latitude"),
+        ],
+    )
+    def test_invalid_coordinates_rejected(self, lon, lat, match):
+        with pytest.raises(ValueError, match=match):
+            pick_utm_epsg(lon, lat)
 
 
 class TestTargetGrid:
@@ -1401,6 +1419,204 @@ class TestNetworkDefaults:
 
         assert os.environ["GDAL_HTTP_TIMEOUT"] == "9"
 
+    def test_mosaic_applies_gdal_network_defaults_before_pipeline(self, monkeypatch):
+        for key in GDAL_NETWORK_DEFAULTS:
+            monkeypatch.delenv(key, raising=False)
+
+        seen = {}
+
+        def fake_run_grid_pipeline(request, source):
+            seen["timeout"] = os.environ.get("GDAL_HTTP_TIMEOUT")
+            return "ok"
+
+        monkeypatch.setattr(
+            "s2mosaic.coordinator.run_grid_pipeline", fake_run_grid_pipeline
+        )
+
+        result = mosaic(grid_id="50HMH", start_year=2023)
+
+        assert result == "ok"
+        assert seen["timeout"] == "120"
+
+    def test_mosaic_respects_gdal_defaults_opt_out(self, monkeypatch):
+        for key in GDAL_NETWORK_DEFAULTS:
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("S2MOSAIC_NO_GDAL_DEFAULTS", "1")
+
+        monkeypatch.setattr(
+            "s2mosaic.coordinator.run_grid_pipeline",
+            lambda request, source: "ok",
+        )
+
+        result = mosaic(grid_id="50HMH", start_year=2023)
+
+        assert result == "ok"
+        assert "GDAL_HTTP_TIMEOUT" not in os.environ
+
+
+class TestCoordinatorDispatch:
+    def test_mosaic_dispatches_bounds_requests_to_bounds_pipeline(self, monkeypatch):
+        calls = []
+
+        def fake_run_bounds_pipeline(request, source):
+            calls.append((request.bounds, source.name))
+            return "bounds-result"
+
+        monkeypatch.setattr(
+            "s2mosaic.coordinator.run_bounds_pipeline", fake_run_bounds_pipeline
+        )
+        monkeypatch.setattr(
+            "s2mosaic.coordinator.run_grid_pipeline",
+            lambda request, source: pytest.fail("grid pipeline should not run"),
+        )
+
+        result = mosaic(
+            bounds=(0.0, 0.0, 1.0, 1.0),
+            start_year=2023,
+            duration_days=1,
+        )
+
+        assert result == "bounds-result"
+        assert calls == [((0.0, 0.0, 1.0, 1.0), "MPC")]
+
+
+class TestStacBoundsSearch:
+    class FakeSearch:
+        def __init__(self, items):
+            self._items = items
+
+        def item_collection(self):
+            return self._items
+
+    class FakeCatalog:
+        def __init__(self, calls, items):
+            self._calls = calls
+            self._items = items
+
+        def search(self, **query):
+            self._calls.append(query)
+            return TestStacBoundsSearch.FakeSearch(self._items)
+
+    class FakeSource:
+        name = "fake"
+        collection_id = "sentinel-test"
+
+        def __init__(self, catalog):
+            self._catalog = catalog
+
+        def open_catalog(self, *, stac_io):
+            return self._catalog
+
+    def test_bbox_search_uses_bbox_query(self):
+        import s2mosaic.stac_bounds as stac_bounds
+
+        calls = []
+        items = ["scene-a"]
+        source = self.FakeSource(self.FakeCatalog(calls, items))
+
+        result = stac_bounds._search_for_items_by_bbox(
+            bbox_4326=(1.0, 2.0, 3.0, 4.0),
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 1, 15),
+            source=source,
+            additional_query={"eo:cloud_cover": {"lt": 50}},
+            ignore_duplicate_items=False,
+        )
+
+        assert result == items
+        assert calls == [
+            {
+                "collections": ["sentinel-test"],
+                "datetime": "2023-01-01T00:00:00Z/2023-01-15T00:00:00Z",
+                "bbox": [1.0, 2.0, 3.0, 4.0],
+                "query": {"eo:cloud_cover": {"lt": 50}},
+            }
+        ]
+
+    def test_aoi_search_uses_intersects_query(self):
+        import s2mosaic.stac_bounds as stac_bounds
+
+        calls = []
+        source = self.FakeSource(self.FakeCatalog(calls, ["scene-a"]))
+        aoi = Polygon([(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 0.0)])
+
+        stac_bounds._search_for_items_by_aoi(
+            aoi_4326=aoi,
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 1, 2),
+            source=source,
+            ignore_duplicate_items=False,
+        )
+
+        assert "bbox" not in calls[0]
+        assert calls[0]["intersects"]["type"] == "Polygon"
+
+    def test_search_dedupes_by_default(self, monkeypatch):
+        import s2mosaic.stac_bounds as stac_bounds
+
+        calls = []
+        items = ["scene-a", "scene-a-duplicate"]
+        source = self.FakeSource(self.FakeCatalog(calls, items))
+        dedupe_inputs = []
+
+        def fake_filter_latest_processing_baselines(items_arg):
+            dedupe_inputs.append(items_arg)
+            return ["scene-a"]
+
+        monkeypatch.setattr(
+            stac_bounds,
+            "filter_latest_processing_baselines",
+            fake_filter_latest_processing_baselines,
+        )
+
+        result = stac_bounds._search_for_items_by_bbox(
+            bbox_4326=(1.0, 2.0, 3.0, 4.0),
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 1, 15),
+            source=source,
+        )
+
+        assert result == ["scene-a"]
+        assert dedupe_inputs == [items]
+
+
+class TestBoundsSclHelpers:
+    def test_pick_overview_level_sorts_overview_factors(self):
+        assert _pick_overview_level(10, 80, [16, 2, 4, 8]) == 3
+
+
+class TestMaskingHelpers:
+    def test_get_masks_resizes_to_rectangular_target(self, monkeypatch):
+        class FakeAsset:
+            href = "remote.tif"
+
+        class FakeItem:
+            assets = {"B04": FakeAsset(), "B03": FakeAsset(), "B8A": FakeAsset()}
+
+        class FakeSource:
+            def asset_name(self, canonical):
+                return canonical
+
+        def fake_get_full_band(href, *, source, res):
+            return np.ones((1, 2, 2), dtype=np.uint16), {}
+
+        def fake_compute_masks_from_array(_array, batch_size, inference_dtype):
+            return (
+                np.array([[True, False], [False, True]]),
+                np.ones((2, 2), dtype=bool),
+            )
+
+        monkeypatch.setattr("s2mosaic.masking.get_full_band", fake_get_full_band)
+        monkeypatch.setattr(
+            "s2mosaic.masking.compute_masks_from_array",
+            fake_compute_masks_from_array,
+        )
+
+        clear, valid = get_masks(FakeItem(), FakeSource(), target_size=(3, 5))
+
+        assert clear.shape == (3, 5)
+        assert valid.shape == (3, 5)
+
 
 class TestBoundsMaskResolution:
     def test_scl_mask_resolution_uses_native_floor(self):
@@ -1596,6 +1812,18 @@ class TestExportPaths:
         assert sidecar["request"]["grid_id"] == "50HMH"
         assert sidecar["request"]["bands"] == ["B04"]
 
+    def test_jsonable_rejects_recursive_metadata(self):
+        recursive = {}
+        recursive["self"] = recursive
+
+        with pytest.raises(ValueError, match="recursive"):
+            _jsonable(recursive)
+
+    def test_safe_token_preserves_negative_and_decimal_distinctions(self):
+        assert _safe_token(-1.25) == "neg1p2500"
+        assert _safe_token("neg1p2500") == "neg1p2500"
+        assert _safe_token(-1.25) != _safe_token("m1p2500")
+
     def test_finalize_output_accepts_lazy_array_like_coverage_mask(self):
         class LazyMask:
             def __array__(self, dtype=None):
@@ -1615,6 +1843,40 @@ class TestExportPaths:
             result,
             np.array([[[7, 0], [0, 7]]], dtype=np.uint16),
         )
+
+    def test_finalize_output_export_does_not_mutate_profile(
+        self, monkeypatch, tmp_path
+    ):
+        profile = {"driver": "GTiff", "width": 2, "height": 2}
+        seen_profiles = []
+
+        class FakeWriter:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def write(self, _array):
+                return None
+
+        def fake_open(_path, _mode, **kwargs):
+            seen_profiles.append(kwargs)
+            return FakeWriter()
+
+        monkeypatch.setattr("s2mosaic.output.rio.open", fake_open)
+
+        result = finalize_output(
+            array=np.ones((1, 2, 2), dtype=np.uint16),
+            profile=profile,
+            bands=["B04"],
+            coverage_mask=None,
+            export_path=tmp_path / "out.tif",
+        )
+
+        assert result == tmp_path / "out.tif"
+        assert profile == {"driver": "GTiff", "width": 2, "height": 2}
+        assert seen_profiles[0]["count"] == 1
 
     def test_output_path_is_used_directly(self, tmp_path):
         path = resolve_export_path(
@@ -1834,6 +2096,20 @@ class TestSceneRetry:
         text = caplog.text
         assert "RuntimeError: band B04 failed" in text
         assert "RasterioIOError: low-level read failed" in text
+
+    def test_retry_does_not_retry_programming_errors(self, monkeypatch):
+        monkeypatch.setattr("s2mosaic.helpers.time.sleep", lambda _: None)
+        calls = {"n": 0}
+
+        @with_scene_retry(attempts=3, base_delay=0.01)
+        def fails_with_programming_error():
+            calls["n"] += 1
+            raise RuntimeError("bug")
+
+        with pytest.raises(RuntimeError, match="bug"):
+            fails_with_programming_error()
+
+        assert calls["n"] == 1
 
 
 class TestGridOrderedMaskStreaming:
@@ -2157,6 +2433,60 @@ class TestBoundsOcmContext:
 
         assert prefetch_workers == [2]
         assert len(aggregation_calls[0]["masks"]) == 3
+
+    def test_bounds_mask_stream_closes_iterator_on_unexpected_error(self, monkeypatch):
+        import s2mosaic.pipelines.bounds as bounds_mod
+
+        class FailingIterator:
+            def __init__(self):
+                self.closed = False
+                self._used = False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                if self._used:
+                    raise StopIteration
+                self._used = True
+                return 0, ValueError("boom")
+
+            def close(self):
+                self.closed = True
+
+        iterator = FailingIterator()
+
+        monkeypatch.setattr(
+            bounds_mod,
+            "_scene_window_for_item",
+            lambda item, bounds_target, target_crs, resolution: (0, 0, 1, 1),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "iter_ordered_fetches",
+            lambda **_: iterator,
+        )
+
+        with pytest.raises(ValueError, match="boom"):
+            bounds_mod._stream_bounds_combo_masks(
+                items_list=[self.FakeItem()],
+                source=MPC,
+                bounds_target=(0.0, 0.0, 10.0, 10.0),
+                target_crs=32750,
+                mask_resolution=10,
+                mask_w=1,
+                mask_h=1,
+                coverage_mask=np.ones((1, 1), dtype=bool),
+                cloud_mask="SCL",
+                mosaic_method="mean",
+                tile_workers=1,
+                ocm_batch_size=1,
+                ocm_inference_dtype="bf16",
+                scl_tile_specs=None,
+                show_progress=False,
+            )
+
+        assert iterator.closed
 
     def test_rasterize_aoi_mask_uses_polygon_shape(self):
         aoi = Polygon([(0.0, 0.0), (40.0, 0.0), (40.0, 40.0)])
@@ -2812,6 +3142,13 @@ class TestTileReaderHelpers:
         assert first is second
         assert calls == {"resolver": 1, "open": 1}
 
+    def test_handle_cache_rejects_reads_after_close(self):
+        cache = _HandleCache([[lambda refresh=False: "lazy-source.tif"]])
+        cache.close()
+
+        with pytest.raises(RuntimeError, match="closed"):
+            cache.get(0, 0)
+
     def test_lazy_signed_url_refreshes_after_ttl(self, monkeypatch):
         now = {"value": 100.0}
         calls = []
@@ -3190,6 +3527,21 @@ class TestTileReaderHelpers:
         np.testing.assert_array_equal(data, np.ones((2, 3), dtype=np.uint16))
         assert resolver_calls == [False, True]
         assert open_calls == ["bounds-refresh-False.tif", "bounds-refresh-True.tif"]
+
+    def test_bounds_reader_rejects_reads_after_close(self):
+        read_fn = BoundsTileReader(
+            sources=[[lambda refresh=False: "bounds.tif"]],
+            href_band_indices=[1],
+            target_crs_obj=CRS.from_epsg(32750),
+            user_transform=from_origin(0, 10, 1, 1),
+            width=10,
+            height=10,
+            rio_resampling=Resampling.nearest,
+        )
+        read_fn.close()
+
+        with pytest.raises(RuntimeError, match="closed"):
+            read_fn(0, 0, (0, 0, 2, 3))
 
 
 class TestMosaicSharedParamsValidation:

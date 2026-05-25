@@ -11,8 +11,6 @@ from .pipelines.bounds import run_bounds_pipeline
 from .pipelines.grid import run_grid_pipeline
 from .sources import SOURCE_MPC, get_source
 
-apply_gdal_network_defaults()
-
 logger = logging.getLogger(__name__)
 
 
@@ -274,6 +272,8 @@ def mosaic(
         - If 'visual' is included in bands, it will be replaced with 'Red', 'Green', 'Blue' in the output.
         - The time range for scene selection is inclusive of the start date and exclusive of the end date.
     """  # noqa: E501
+    apply_gdal_network_defaults()
+
     request = MosaicRequest(
         grid_id=grid_id,
         bounds=bounds,

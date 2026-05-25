@@ -97,8 +97,7 @@ array, profile = mosaic(
     start_month=6,
     duration_months=2,
     bands=["B04", "B03", "B02"],
-    mosaic_method="percentile",
-    percentile=50,
+    mosaic_method="median",
 )
 
 print(f"Shape: {array.shape}")

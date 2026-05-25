@@ -25,18 +25,17 @@ def set_log_level(level: Union[int, str] = _logging.INFO) -> None:
         s2mosaic.set_log_level("INFO")
 
     Pass a string ("DEBUG", "INFO", "WARNING") or a logging level constant.
-    Calling again replaces the previous handler.
+    Calling again updates the package logger level and reuses the existing
+    s2mosaic handler, without removing handlers configured by the host app.
     """
     pkg_logger = _logging.getLogger(__name__)
-    for h in list(pkg_logger.handlers):
-        pkg_logger.removeHandler(h)
-    handler = _logging.StreamHandler()
-    handler.setFormatter(
-        _logging.Formatter("%(asctime)s %(name)s %(levelname)s: %(message)s")
-    )
-    pkg_logger.addHandler(handler)
+    if not pkg_logger.handlers:
+        handler = _logging.StreamHandler()
+        handler.setFormatter(
+            _logging.Formatter("%(asctime)s %(name)s %(levelname)s: %(message)s")
+        )
+        pkg_logger.addHandler(handler)
     pkg_logger.setLevel(level)
-    pkg_logger.propagate = False
 
 
 __all__ = [

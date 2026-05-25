@@ -1,7 +1,6 @@
 """Raster tile readers."""
 
 import logging
-import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -28,8 +27,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_TILE_WORKERS = 8
 SIGNED_URL_TTL_SECONDS = 45 * 60
 REMOTE_RASTER_ATTEMPTS = 3
+MAX_PREWARM_WORKERS = 16
 GridSourceResolver = Callable[[bool], str]
 BoundsSourceResolver = Callable[[bool], str]
+RasterOpener = Callable[[bool], rio.DatasetReader]
 
 
 def _lazy_signed_url(
@@ -44,23 +45,36 @@ def _lazy_signed_url(
 
     def get(refresh: bool = False) -> str:
         nonlocal signed_url, signed_at
-        now = time.monotonic()
-        expired = (
-            signed_at is not None and ttl_seconds > 0 and now - signed_at >= ttl_seconds
-        )
-        if signed_url is None or refresh or expired:
-            with lock:
-                expired = (
-                    signed_at is not None
-                    and ttl_seconds > 0
-                    and time.monotonic() - signed_at >= ttl_seconds
-                )
-                if signed_url is None or refresh or expired:
-                    signed_url = source.sign(href)
-                    signed_at = time.monotonic()
-        return signed_url
+        with lock:
+            now = time.monotonic()
+            expired = (
+                signed_at is not None
+                and ttl_seconds > 0
+                and now - signed_at >= ttl_seconds
+            )
+            if signed_url is None or refresh or expired:
+                signed_url = source.sign(href)
+                signed_at = now
+            return signed_url
 
     return get
+
+
+def _retry_open_raster(
+    open_source: RasterOpener, *, refresh: bool
+) -> rio.DatasetReader:
+    """Open a remote raster with retry/backoff and optional source refresh."""
+    last_error: Optional[RasterioIOError] = None
+    for attempt in range(REMOTE_RASTER_ATTEMPTS):
+        try:
+            return open_source(refresh or attempt > 0)
+        except RasterioIOError as exc:
+            last_error = exc
+            if attempt < REMOTE_RASTER_ATTEMPTS - 1:
+                time.sleep(0.5 * (attempt + 1))
+    if last_error is None:
+        raise RasterioIOError("Remote raster open failed")
+    raise last_error
 
 
 def _compute_one_scene_mask(
@@ -124,10 +138,13 @@ class _HandleCache:
         # source_resolvers[scene_idx][band_idx]() -> local cache path or signed URL
         self._source_resolvers = source_resolvers
         self._local = threading.local()
-        self._handles: List[rio.DatasetReader] = []
+        self._handles: Dict[int, rio.DatasetReader] = {}
         self._handles_lock = threading.Lock()
+        self._closed = False
 
     def get(self, scene_idx: int, band_idx: int) -> rio.DatasetReader:
+        if self._closed:
+            raise RuntimeError("Cannot read from a closed raster handle cache")
         per_thread = getattr(self._local, "handles", None)
         if per_thread is None:
             per_thread = {}
@@ -135,26 +152,20 @@ class _HandleCache:
         key = (scene_idx, band_idx)
         h = per_thread.get(key)
         if h is None:
-            last_error: Optional[RasterioIOError] = None
-            for attempt in range(REMOTE_RASTER_ATTEMPTS):
-                try:
-                    h = rio.open(
-                        self._source_resolvers[scene_idx][band_idx](attempt > 0)
-                    )
-                    break
-                except RasterioIOError as exc:
-                    last_error = exc
-                    if attempt < REMOTE_RASTER_ATTEMPTS - 1:
-                        time.sleep(0.5 * (attempt + 1))
-            else:
-                assert last_error is not None
-                raise last_error
+            h = _retry_open_raster(
+                lambda refresh: rio.open(
+                    self._source_resolvers[scene_idx][band_idx](refresh)
+                ),
+                refresh=False,
+            )
             per_thread[key] = h
             with self._handles_lock:
-                self._handles.append(h)
+                self._handles[id(h)] = h
         return h
 
     def reopen(self, scene_idx: int, band_idx: int) -> rio.DatasetReader:
+        if self._closed:
+            raise RuntimeError("Cannot read from a closed raster handle cache")
         per_thread = getattr(self._local, "handles", None)
         if per_thread is None:
             per_thread = {}
@@ -163,30 +174,26 @@ class _HandleCache:
         old = per_thread.pop(key, None)
         if old is not None:
             with self._handles_lock:
-                if old in self._handles:
-                    self._handles.remove(old)
+                self._handles.pop(id(old), None)
             old.close()
-        last_error: Optional[RasterioIOError] = None
-        for attempt in range(REMOTE_RASTER_ATTEMPTS):
-            try:
-                h = rio.open(self._source_resolvers[scene_idx][band_idx](True))
-                break
-            except RasterioIOError as exc:
-                last_error = exc
-                if attempt < REMOTE_RASTER_ATTEMPTS - 1:
-                    time.sleep(0.5 * (attempt + 1))
-        else:
-            assert last_error is not None
-            raise last_error
+        h = _retry_open_raster(
+            lambda refresh: rio.open(
+                self._source_resolvers[scene_idx][band_idx](refresh)
+            ),
+            refresh=True,
+        )
         per_thread[key] = h
         with self._handles_lock:
-            self._handles.append(h)
+            self._handles[id(h)] = h
         return h
 
     def close(self) -> None:
         with self._handles_lock:
-            handles = self._handles
-            self._handles = []
+            self._closed = True
+            handles = list(self._handles.values())
+            self._handles = {}
+        if hasattr(self._local, "handles"):
+            self._local.handles = {}
         for handle in handles:
             handle.close()
 
@@ -228,7 +235,8 @@ class GridTileReader:
                 last_error = exc
                 if attempt < REMOTE_RASTER_ATTEMPTS - 1:
                     time.sleep(0.5 * (attempt + 1))
-        assert last_error is not None
+        if last_error is None:
+            raise RasterioIOError("Remote raster read failed")
         raise last_error
 
     def close(self) -> None:
@@ -314,16 +322,15 @@ def _prewarm_sources(sources: List[List[Callable[..., Any]]]) -> None:
     ]
     if not flat:
         return
-    n_workers = min(len(flat), (os.cpu_count() or 8) * 2)
+    n_workers = min(len(flat), MAX_PREWARM_WORKERS)
     with ThreadPoolExecutor(max_workers=n_workers) as ex:
-        # Drain exceptions; the lazy path still raises on first read, but this
-        # makes prewarm-only failures visible under DEBUG.
+        # Drain exceptions; the lazy path still raises on first read.
         futures = [ex.submit(resolver) for resolver in flat]
         for future in as_completed(futures):
             try:
                 future.result()
             except Exception as exc:
-                logger.debug("Prewarm failure: %r", exc)
+                logger.warning("Prewarm source signing failed: %r", exc)
 
 
 def should_prewarm_sources(
@@ -422,25 +429,21 @@ class BoundsTileReader:
         self._height = height
         self._rio_resampling = rio_resampling
         self._local = threading.local()
-        self._entries: List[Tuple[Any, Any]] = []
+        self._entries: Dict[int, Tuple[Any, Any]] = {}
         self._entries_lock = threading.Lock()
+        self._closed = False
 
     def _open_entry(
         self, scene_idx: int, asset_idx: int, refresh: bool
     ) -> Tuple[Any, Any]:
-        last_error: Optional[RasterioIOError] = None
-        for attempt in range(REMOTE_RASTER_ATTEMPTS):
-            href = self._sources[scene_idx][asset_idx](refresh or attempt > 0)
-            try:
-                src = rio.open(href)
-                break
-            except RasterioIOError as exc:
-                last_error = exc
-                if attempt < REMOTE_RASTER_ATTEMPTS - 1:
-                    time.sleep(0.5 * (attempt + 1))
-        else:
-            assert last_error is not None
-            raise last_error
+        if self._closed:
+            raise RuntimeError("Cannot read from a closed bounds tile reader")
+
+        def open_source(refresh_attempt: bool) -> rio.DatasetReader:
+            href = self._sources[scene_idx][asset_idx](refresh_attempt)
+            return rio.open(href)
+
+        src = _retry_open_raster(open_source, refresh=refresh)
         handle = WarpedVRT(
             src,
             crs=self._target_crs_obj,
@@ -452,6 +455,8 @@ class BoundsTileReader:
         return src, handle
 
     def _get_source(self, scene_idx: int, asset_idx: int) -> Any:
+        if self._closed:
+            raise RuntimeError("Cannot read from a closed bounds tile reader")
         per_thread = getattr(self._local, "handles", None)
         if per_thread is None:
             per_thread = {}
@@ -462,10 +467,12 @@ class BoundsTileReader:
             entry = self._open_entry(scene_idx, asset_idx, refresh=False)
             per_thread[key] = entry
             with self._entries_lock:
-                self._entries.append(entry)
+                self._entries[id(entry)] = entry
         return entry[1]
 
     def _reopen_source(self, scene_idx: int, asset_idx: int) -> Any:
+        if self._closed:
+            raise RuntimeError("Cannot read from a closed bounds tile reader")
         per_thread = getattr(self._local, "handles", None)
         if per_thread is None:
             per_thread = {}
@@ -474,15 +481,14 @@ class BoundsTileReader:
         old = per_thread.pop(key, None)
         if old is not None:
             with self._entries_lock:
-                if old in self._entries:
-                    self._entries.remove(old)
+                self._entries.pop(id(old), None)
             src, handle = old
             handle.close()
             src.close()
         entry = self._open_entry(scene_idx, asset_idx, refresh=True)
         per_thread[key] = entry
         with self._entries_lock:
-            self._entries.append(entry)
+            self._entries[id(entry)] = entry
         return entry[1]
 
     def __call__(
@@ -507,13 +513,17 @@ class BoundsTileReader:
                 last_error = exc
                 if attempt < REMOTE_RASTER_ATTEMPTS - 1:
                     time.sleep(0.5 * (attempt + 1))
-        assert last_error is not None
+        if last_error is None:
+            raise RasterioIOError("Remote raster read failed")
         raise last_error
 
     def close(self) -> None:
         with self._entries_lock:
-            entries = self._entries
-            self._entries = []
+            self._closed = True
+            entries = list(self._entries.values())
+            self._entries = {}
+        if hasattr(self._local, "handles"):
+            self._local.handles = {}
         for src, handle in entries:
             handle.close()
             src.close()

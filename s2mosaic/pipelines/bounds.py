@@ -52,7 +52,7 @@ from ..aggregation import (
     run_tile_aggregation,
     write_tile_aggregation_geotiff,
 )
-from ..cache import (
+from ..streaming import (
     iter_ordered_fetches,
 )
 from ..readers import (
@@ -455,85 +455,86 @@ def _stream_bounds_combo_masks(
             max_workers=min(2, phase1_workers),
         )
 
-    for scene_position in range(n_time):
-        # FIRST mode: stop scanning once everything in coverage is filled.
-        if (
-            mosaic_method == MOSAIC_FIRST
-            and (good_pixel_tracker | ~coverage_mask).all()
-        ):
-            logger.info(
-                "All in-coverage pixels filled after "
-                f"{scene_position}/{n_time} scenes — "
-                "skipping remaining cloud-mask fetches"
-            )
-            break
+    try:
+        for scene_position in range(n_time):
+            # FIRST mode: stop scanning once everything in coverage is filled.
+            if (
+                mosaic_method == MOSAIC_FIRST
+                and (good_pixel_tracker | ~coverage_mask).all()
+            ):
+                logger.info(
+                    "All in-coverage pixels filled after "
+                    f"{scene_position}/{n_time} scenes — "
+                    "skipping remaining cloud-mask fetches"
+                )
+                break
 
-        try:
-            assert mask_fetch_iter is not None
-            scene_idx, mask_result = next(mask_fetch_iter)
+            try:
+                assert mask_fetch_iter is not None
+                scene_idx, mask_result = next(mask_fetch_iter)
+            except StopIteration:
+                break
             if isinstance(mask_result, Exception):
+                if isinstance(mask_result, SceneFetchError):
+                    n_mask_fetch_failed += 1
+                    logger.warning(
+                        f"Scene {scene_idx + 1}/{n_time} "
+                        f"({items_list[scene_idx].id}): mask fetch failed, "
+                        f"skipping ({mask_result})"
+                    )
+                    if mask_progress is not None:
+                        mask_progress.update(1)
+                    continue
                 raise mask_result
-        except StopIteration:
-            break
-        except SceneFetchError as e:
-            n_mask_fetch_failed += 1
-            logger.warning(
-                f"Scene {scene_idx + 1}/{n_time} "
-                f"({items_list[scene_idx].id}): mask fetch failed, "
-                f"skipping ({e})"
-            )
+
+            if cloud_mask == CLOUD_MASK_SCL:
+                clear, valid = compute_masks_from_scl(mask_result.arr)
+            else:
+                clear, valid = compute_masks_from_array(
+                    mask_result.arr,
+                    batch_size=ocm_batch_size,
+                    inference_dtype=ocm_inference_dtype,
+                )
+            clear = clear[mask_result.crop]
+            valid = valid[mask_result.crop]
             if mask_progress is not None:
                 mask_progress.update(1)
-            continue
+            combo_block = clear & valid
 
-        if cloud_mask == CLOUD_MASK_SCL:
-            clear, valid = compute_masks_from_scl(mask_result.arr)
-        else:
-            clear, valid = compute_masks_from_array(
-                mask_result.arr,
-                batch_size=ocm_batch_size,
-                inference_dtype=ocm_inference_dtype,
-            )
-        clear = clear[mask_result.crop]
-        valid = valid[mask_result.crop]
-        if mask_progress is not None:
-            mask_progress.update(1)
-        combo_block = clear & valid
-
-        col_off, row_off, win_w, win_h = mask_result.target_window
-        if mosaic_method == MOSAIC_FIRST:
-            tracker_slice = good_pixel_tracker[
-                row_off : row_off + win_h, col_off : col_off + win_w
-            ]
-            new_pixels = combo_block & ~tracker_slice
-            if not new_pixels.any():
+            col_off, row_off, win_w, win_h = mask_result.target_window
+            if mosaic_method == MOSAIC_FIRST:
+                tracker_slice = good_pixel_tracker[
+                    row_off : row_off + win_h, col_off : col_off + win_w
+                ]
+                new_pixels = combo_block & ~tracker_slice
+                if not new_pixels.any():
+                    continue
+                combo_block = new_pixels
+            elif not combo_block.any():
+                # All-cloud scene — no contribution to mean/percentile either.
                 continue
-            combo_block = new_pixels
-        elif not combo_block.any():
-            # All-cloud scene — no contribution to mean/percentile either.
-            continue
 
-        kept_combo_masks[scene_idx] = _WindowedBoolMask(
-            combo_block, col_off, row_off, (mask_h, mask_w)
-        )
-        good_pixel_tracker[row_off : row_off + win_h, col_off : col_off + win_w] |= (
-            combo_block
-        )
+            kept_combo_masks[scene_idx] = _WindowedBoolMask(
+                combo_block, col_off, row_off, (mask_h, mask_w)
+            )
+            good_pixel_tracker[
+                row_off : row_off + win_h, col_off : col_off + win_w
+            ] |= combo_block
+    finally:
+        if mask_fetch_iter is not None:
+            close = getattr(mask_fetch_iter, "close", None)
+            if close is not None:
+                close()
 
-    if mask_fetch_iter is not None:
-        close = getattr(mask_fetch_iter, "close", None)
-        if close is not None:
-            close()
-
-    if mask_progress is not None:
-        # `first` mode can break the loop early. Snap the bar to total so tqdm
-        # renders it as complete rather than red. Set ``n`` directly and force
-        # a refresh — ``update`` honours min-interval throttling and a quick
-        # ``close`` after may skip the final redraw in tqdm.notebook.
-        if mask_progress.n < mask_progress.total:
-            mask_progress.n = mask_progress.total
-            mask_progress.refresh()
-        mask_progress.close()
+        if mask_progress is not None:
+            # `first` mode can break the loop early. Snap the bar to total so tqdm
+            # renders it as complete rather than red. Set ``n`` directly and force
+            # a refresh — ``update`` honours min-interval throttling and a quick
+            # ``close`` after may skip the final redraw in tqdm.notebook.
+            if mask_progress.n < mask_progress.total:
+                mask_progress.n = mask_progress.total
+                mask_progress.refresh()
+            mask_progress.close()
 
     if n_mask_fetch_failed:
         logger.warning(
@@ -779,7 +780,7 @@ def run_bounds_pipeline(
             max_tile_size=min(2048, max(mask_h, mask_w)),
         )
         if not _should_use_tiled_scl_fetch(
-            items_list[0],
+            items_list,
             source,
             bounds_target,
             target_crs,

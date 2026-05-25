@@ -1,6 +1,7 @@
 """SCL mask fetch helpers for bounds/AOI mosaics."""
 
-from typing import Any, List, Tuple, Union
+from collections.abc import Sequence as SequenceABC
+from typing import Any, List, Sequence, Tuple, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -58,7 +59,7 @@ def _pick_overview_level(
     if target_res <= src_native_res or not overview_factors:
         return -1
     best_level = -1
-    for idx, factor in enumerate(overview_factors):
+    for idx, factor in sorted(enumerate(overview_factors), key=lambda item: item[1]):
         if src_native_res * factor <= target_res:
             best_level = idx
         else:
@@ -88,6 +89,14 @@ def _read_band_at_target_window(
     fast path, just with a reprojection step on top.
     """
     target_res = (read_bounds[2] - read_bounds[0]) / target_width
+    transform = Affine(
+        (read_bounds[2] - read_bounds[0]) / target_width,
+        0,
+        read_bounds[0],
+        0,
+        -(read_bounds[3] - read_bounds[1]) / target_height,
+        read_bounds[3],
+    )
     with rio.open(href) as src:
         if src.crs == target_crs_obj:
             window = from_bounds(*read_bounds, transform=src.transform)
@@ -101,17 +110,12 @@ def _read_band_at_target_window(
             )
         src_native_res = abs(src.transform.a)
         overview_factors = src.overviews(band_idx)
-    overview_level = _pick_overview_level(src_native_res, target_res, overview_factors)
-    open_kwargs = {} if overview_level < 0 else {"OVERVIEW_LEVEL": overview_level}
-    transform = Affine(
-        (read_bounds[2] - read_bounds[0]) / target_width,
-        0,
-        read_bounds[0],
-        0,
-        -(read_bounds[3] - read_bounds[1]) / target_height,
-        read_bounds[3],
-    )
-    with rio.open(href, **open_kwargs) as src:
+        overview_level = _pick_overview_level(
+            src_native_res, target_res, overview_factors
+        )
+        warp_extras = (
+            {} if overview_level < 0 else {"OVERVIEW_LEVEL": str(overview_level)}
+        )
         with WarpedVRT(
             src,
             crs=target_crs_obj,
@@ -119,6 +123,7 @@ def _read_band_at_target_window(
             width=target_width,
             height=target_height,
             resampling=rio_resampling,
+            warp_extras=warp_extras,
         ) as vrt:
             return vrt.read(band_idx)  # type: ignore[no-any-return]
 
@@ -184,7 +189,34 @@ def _fetch_one_scl_tiled(
 
     rio_resampling = get_rasterio_resampling("nearest")
     href = source.sign(item.assets[source.asset_name("SCL")].href)
-    out = np.zeros((height, width), dtype=np.uint8)
+    scene_col, scene_row, scene_w, scene_h = scene_window
+    scene_col_stop = scene_col + scene_w
+    scene_row_stop = scene_row + scene_h
+    relevant_specs: List[Tuple[int, int, int, int]] = []
+    for r, c, h, w in tile_specs:
+        row_start = max(r, scene_row)
+        row_stop = min(r + h, scene_row_stop)
+        col_start = max(c, scene_col)
+        col_stop = min(c + w, scene_col_stop)
+        if row_start < row_stop and col_start < col_stop:
+            relevant_specs.append(
+                (row_start, col_start, row_stop - row_start, col_stop - col_start)
+            )
+
+    if not relevant_specs:
+        return _MaskFetch(
+            arr=np.zeros((scene_h, scene_w), dtype=np.uint8),
+            target_window=scene_window,
+            crop=(slice(0, scene_h), slice(0, scene_w)),
+        )
+
+    min_r = min(r for r, _, _, _ in relevant_specs)
+    min_c = min(c for _, c, _, _ in relevant_specs)
+    max_r = max(r + h for r, _, h, _ in relevant_specs)
+    max_c = max(c + w for _, c, _, w in relevant_specs)
+    out_h = max_r - min_r
+    out_w = max_c - min_c
+    out = np.zeros((out_h, out_w), dtype=np.uint8)
     with rio.open(href) as src:
         with WarpedVRT(
             src,
@@ -195,12 +227,15 @@ def _fetch_one_scl_tiled(
             resampling=rio_resampling,
         ) as vrt:
             window_cls: Any = Window
-            for r, c, h, w in tile_specs:
-                out[r : r + h, c : c + w] = vrt.read(1, window=window_cls(c, r, w, h))
+            for r, c, h, w in relevant_specs:
+                out[
+                    r - min_r : r - min_r + h,
+                    c - min_c : c - min_c + w,
+                ] = vrt.read(1, window=window_cls(c, r, w, h))
     return _MaskFetch(
         arr=out,
-        target_window=(0, 0, width, height),
-        crop=(slice(0, height), slice(0, width)),
+        target_window=(min_c, min_r, out_w, out_h),
+        crop=(slice(0, out_h), slice(0, out_w)),
     )
 
 
@@ -255,7 +290,7 @@ def _source_block_count_for_scl_tiles(
 
 
 def _should_use_tiled_scl_fetch(
-    item: _BoundsItemLike,
+    items: Union[_BoundsItemLike, Sequence[_BoundsItemLike]],
     source: Source,
     bounds_target: Bbox,
     target_crs: int,
@@ -269,26 +304,36 @@ def _should_use_tiled_scl_fetch(
     if tile_specs == full_spec:
         return False
 
-    full_blocks = _source_block_count_for_scl_tiles(
-        item,
-        source,
-        bounds_target,
-        target_crs,
-        mask_resolution,
-        width,
-        height,
-        full_spec,
-    )
-    tiled_blocks = _source_block_count_for_scl_tiles(
-        item,
-        source,
-        bounds_target,
-        target_crs,
-        mask_resolution,
-        width,
-        height,
-        tile_specs,
-    )
+    sample_items = list(items) if isinstance(items, SequenceABC) else [items]
+    if not sample_items:
+        return False
+    if len(sample_items) > 5:
+        step = max(1, len(sample_items) // 5)
+        sample_items = sample_items[::step][:5]
+
+    full_blocks = 0
+    tiled_blocks = 0
+    for item in sample_items:
+        full_blocks += _source_block_count_for_scl_tiles(
+            item,
+            source,
+            bounds_target,
+            target_crs,
+            mask_resolution,
+            width,
+            height,
+            full_spec,
+        )
+        tiled_blocks += _source_block_count_for_scl_tiles(
+            item,
+            source,
+            bounds_target,
+            target_crs,
+            mask_resolution,
+            width,
+            height,
+            tile_specs,
+        )
     if full_blocks <= 0:
         return False
     return tiled_blocks <= full_blocks * _SCL_ADAPTIVE_BLOCK_SAVING_FRACTION

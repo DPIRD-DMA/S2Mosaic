@@ -10,11 +10,12 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 from ..aggregation import run_tile_aggregation, write_tile_aggregation_geotiff
-from ..cache import iter_ordered_fetches
+from ..streaming import iter_ordered_fetches
 from ..config import CLOUD_MASK_OCM, MOSAIC_FIRST, MosaicRequest
 from ..frequent_coverage import get_frequent_coverage
 from ..helpers import (
     MGRS_TILE_SIZE_M,
+    SceneFetchError,
     define_dates,
     get_band_template,
     get_extent_from_grid_id,
@@ -302,6 +303,16 @@ def stream_mosaic_pipeline(
             except StopIteration:
                 break
             if isinstance(combo_result, Exception):
+                if isinstance(combo_result, SceneFetchError):
+                    n_mask_fetch_failed += 1
+                    logger.warning(
+                        "Scene %d/%d (%s): mask fetch failed, skipping (%s)",
+                        scene_idx + 1,
+                        n_scenes,
+                        items[scene_idx].id,
+                        combo_result,
+                    )
+                    continue
                 raise combo_result
             combo = combo_result
             logger.info(

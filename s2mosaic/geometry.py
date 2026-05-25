@@ -17,6 +17,10 @@ Aoi: TypeAlias = Polygon
 
 def pick_utm_epsg(lon: float, lat: float) -> int:
     """EPSG code of the UTM zone containing (lon, lat)."""
+    if not -180.0 <= lon <= 180.0:
+        raise ValueError(f"longitude must be in [-180, 180], got {lon}")
+    if not -90.0 <= lat <= 90.0:
+        raise ValueError(f"latitude must be in [-90, 90], got {lat}")
     zone = min(60, max(1, int((lon + 180) / 6) + 1))
     return (32700 if lat < 0 else 32600) + zone
 
@@ -26,9 +30,7 @@ def reproject_bbox(bbox: Bbox, src_epsg: int, dst_epsg: int) -> Bbox:
     if src_epsg == dst_epsg:
         return bbox
     transformer = Transformer.from_crs(src_epsg, dst_epsg, always_xy=True)
-    minx, miny, maxx, maxy = bbox
-    xs, ys = transformer.transform([minx, maxx, minx, maxx], [miny, miny, maxy, maxy])
-    return (min(xs), min(ys), max(xs), max(ys))
+    return transformer.transform_bounds(*bbox, densify_pts=21)
 
 
 def reproject_aoi(aoi: Aoi, src_epsg: int, dst_epsg: int) -> Aoi:

@@ -17,7 +17,9 @@ from typing import (
 
 import geopandas as gpd
 from dateutil.relativedelta import relativedelta
+from rasterio.errors import RasterioIOError
 from shapely.geometry.polygon import Polygon
+from urllib3.exceptions import HTTPError
 
 if TYPE_CHECKING:
     from rasterio.enums import Resampling
@@ -48,9 +50,28 @@ def _exception_chain_summary(exc: BaseException) -> str:
     return " <- ".join(parts)
 
 
+def _is_retryable_exception(
+    exc: BaseException, retry_exceptions: Tuple[type[BaseException], ...]
+) -> bool:
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, retry_exceptions):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def with_scene_retry(
     attempts: int = 3,
     base_delay: float = 1.0,
+    retry_exceptions: Tuple[type[BaseException], ...] = (
+        RasterioIOError,
+        OSError,
+        TimeoutError,
+        HTTPError,
+    ),
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """Decorator: retry a per-scene fetcher with exponential backoff.
 
@@ -68,6 +89,8 @@ def with_scene_retry(
                 try:
                     return fn(*args, **kwargs)
                 except Exception as e:
+                    if not _is_retryable_exception(e, retry_exceptions):
+                        raise
                     last_exc = e
                     if attempt < attempts - 1:
                         delay = base_delay * (2**attempt)
@@ -77,7 +100,8 @@ def with_scene_retry(
                             f"retrying in {delay:.1f}s"
                         )
                         time.sleep(delay)
-            assert last_exc is not None
+            if last_exc is None:
+                raise SceneFetchError(f"{fn.__name__} failed without an exception")
             raise SceneFetchError(
                 f"{fn.__name__} failed after {attempts} attempts: "
                 f"{_exception_chain_summary(last_exc)}"

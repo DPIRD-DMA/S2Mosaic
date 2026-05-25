@@ -2,15 +2,8 @@
 
 All notable changes to this project will be documented in this file.
 
+
 ## [Unreleased]
-
-### Added
-- `max_observations` parameter on `mosaic()` for `"mean"` and `"percentile"` modes. Per-pixel cap: each pixel accepts at most N valid scenes (in `scene_order`), with later valid scenes dropped for that pixel. Pairs with `scene_order="oldest"`/`"newest"` to bias the mosaic toward early or late dates. Tile-streamed: `tile_mean` masks the accumulator on `count < max_observations`; `tile_percentile` writes NaN into the per-scene stack past the per-pixel cap, and the existing NaN-skipping quantile kernel handles the rest. Stop condition in `_contributing_scene_indices` uses `max(min_observations, max_observations)`, so reads halt once every coverable pixel saturates. Validated as a positive integer with `max_observations >= min_observations` when both are set; ignored by `"first"` (effectively N=1).
-
-### Removed
-- **Breaking:** `early_stop_missing_fraction` parameter on `mosaic()` removed. The whole-pipeline early-stop heuristic it controlled is gone; scene selection now examines every candidate scene (subject to `mosaic_method="first"` per-tile fill and `min_observations`). Callers passing `early_stop_missing_fraction=...` must drop the argument; behaviour for `None`/`0.0` was already a no-op, so most call sites need no other change.
-
-## [2.0.0b1] - 2026-05-15
 
 ### Added
 - `source` parameter on `mosaic()` selects the STAC imagery source: `"MPC"` (default, Microsoft Planetary Computer with SAS-signed URLs) or `"AWS"` (Element 84 Earth Search on AWS Open Data — public S3, no auth). The `sentinel-2-l2a` collection is used on both providers (L1C, C1, and pre-C1 collections are not searched). Asset-name differences (`B04` vs `red`, `SCL` vs `scl`) are handled internally by the `s2mosaic.sources.Source` abstraction; on AWS, `sat:relative_orbit` is recovered from `s2:product_uri`'s `R\\d+` token, and `s2:mgrs_tile` from `grid:code` (`MGRS-50HMH` → `50HMH`). Element 84 returns 0 items when STAC `query` is combined with `intersects`, so grid-mode precision is restored by client-side post-filtering on `grid:code` after the search.
@@ -27,6 +20,8 @@ All notable changes to this project will be documented in this file.
 - Per-tile `early_stop_missing_fraction` short-circuit: each tile's per-scene time series walks scenes in priority order and stops once the tile's coverage of `coverage_mask` exceeds `1 - tolerance`. Clear tiles finish after one scene; cloudy tiles process more. Replaces the old global short-circuit, which stopped the whole pipeline for every method when one region of the mosaic was sufficiently covered.
 - STAC search results are now cached when `S2MOSAIC_DEBUG_CACHE` is set, so dev iteration survives transient PC outages.
 - `output_dir` exports now write a JSON sidecar beside the GeoTIFF with the normalized request metadata, source, date window, resolved CRS where relevant, and filename hash inputs.
+- `max_observations` parameter on `mosaic()` for `"mean"` and `"percentile"` modes. Per-pixel cap: each pixel accepts at most N valid scenes (in `scene_order`), with later valid scenes dropped for that pixel. Pairs with `scene_order="oldest"`/`"newest"` to bias the mosaic toward early or late dates. Tile-streamed: `tile_mean` masks the accumulator on `count < max_observations`; `tile_percentile` writes NaN into the per-scene stack past the per-pixel cap, and the existing NaN-skipping quantile kernel handles the rest. Stop condition in `_contributing_scene_indices` uses `max(min_observations, max_observations)`, so reads halt once every coverable pixel saturates. Validated as a positive integer with `max_observations >= min_observations` when both are set; ignored by `"first"` (effectively N=1).
+
 
 ### Changed
 - **Breaking:** `start_year` is now a required keyword-only argument on `mosaic()`. Callers passing it positionally (`mosaic("50HMH", 2023)`) must switch to keyword form (`mosaic("50HMH", start_year=2023)`). The type is now `int` (was `Optional[int]` with a runtime check). All README/notebook examples already use the keyword form.
@@ -47,6 +42,8 @@ All notable changes to this project will be documented in this file.
 - **Breaking:** auto-generated `output_dir` filenames now use a v2 format with a readable request summary plus a short deterministic hash of output-affecting fields. This avoids collisions between requests that previously shared the same name despite differing in source, resolution, cloud mask, query filters, CRS, or AOI geometry. Use `output_path` when an exact filename is required.
 - `stackstac` removed from dependencies.
 - `uv.lock` is no longer tracked in the repo.
+- **Breaking:** `early_stop_missing_fraction` parameter on `mosaic()` removed. The whole-pipeline early-stop heuristic it controlled is gone; scene selection now examines every candidate scene (subject to `mosaic_method="first"` per-tile fill and `min_observations`). Callers passing `early_stop_missing_fraction=...` must drop the argument; behaviour for `None`/`0.0` was already a no-op, so most call sites need no other change.
+
 
 ## [1.1.0] - 2026-01-22
 

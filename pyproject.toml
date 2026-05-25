@@ -70,7 +70,7 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["s2mosaic"]
+packages = ["s2mosaic", "s2mosaic.pipelines"]
 
 [tool.mypy]
 files = ["s2mosaic"]

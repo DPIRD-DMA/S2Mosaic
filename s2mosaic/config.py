@@ -70,6 +70,15 @@ BOUNDS_LARGE_PIXEL_WARNING_COUNT = 20_000 * 20_000
 
 @dataclass(frozen=True)
 class MosaicRequest:
+    """Normalized configuration for a single mosaic request.
+
+    Exactly one of ``grid_id``, ``bounds``, or ``aoi`` selects the spatial
+    mode. ``grid_id`` mosaics a full Sentinel-2 MGRS tile; ``bounds`` and
+    ``aoi`` stream intersecting scenes onto a common output grid. Call
+    :meth:`normalized` before :meth:`validate` so optional public inputs such as
+    ``bands`` and ``additional_query`` are expanded to concrete values.
+    """
+
     grid_id: Optional[str] = None
     bounds: Optional[Bbox] = None
     aoi: Optional[Aoi] = None
@@ -129,6 +138,8 @@ class MosaicRequest:
             raise ValueError("Exactly one of grid_id, bounds, or aoi must be provided")
         if self.bands is None:
             raise ValueError("MosaicRequest must be normalized before validation")
+        if self.start_year <= 0:
+            raise ValueError("start_year must be provided as a positive year")
         validate_inputs(
             scene_order=self.scene_order,
             mosaic_method=self.mosaic_method,
@@ -226,7 +237,9 @@ def validate_inputs(
     if resolution is not None and resolution <= 0:
         raise ValueError(f"resolution must be positive, got {resolution}")
 
-    bounds_to_validate = bounds if bounds is not None else aoi.bounds if aoi else None
+    bounds_to_validate = (
+        bounds if bounds is not None else (aoi.bounds if aoi is not None else None)
+    )
     if bounds_to_validate is not None:
         _validate_bounds(bounds_to_validate, input_crs, resolution)
 

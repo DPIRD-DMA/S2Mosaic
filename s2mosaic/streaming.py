@@ -1,7 +1,7 @@
-"""Concurrent fetch helpers."""
+"""Concurrent streaming helpers."""
 
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, Callable, Dict, Generator, Optional, List, Tuple, TypeVar, Union
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, TypeVar, Union
 
 T = TypeVar("T")
 
@@ -20,7 +20,7 @@ def iter_ordered_fetches(
 
     ``on_complete`` fires once per item as soon as that item's fetch finishes,
     regardless of yield order. Use it to drive a progress bar so it ticks per
-    completion instead of jumping when the in-order yields catch up — the
+    completion instead of jumping when the in-order yields catch up -- the
     slowest in-flight fetch otherwise blocks all earlier-completed yields.
     """
     n_items = len(items)
@@ -66,4 +66,4 @@ def iter_ordered_fetches(
     finally:
         for future in futures.values():
             future.cancel()
-        executor.shutdown(wait=False, cancel_futures=True)
+        executor.shutdown(wait=True, cancel_futures=True)

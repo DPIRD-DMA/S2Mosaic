@@ -106,6 +106,15 @@ class TestMgrsQuery:
             "mgrs:grid_square": {"eq": "MH"},
         }
 
+    def test_aws_split_field_builder_handles_single_digit_zone(self):
+        from s2mosaic.sources import _aws_mgrs_query
+
+        assert _aws_mgrs_query("1CCV") == {
+            "mgrs:utm_zone": {"eq": 1},
+            "mgrs:latitude_band": {"eq": "C"},
+            "mgrs:grid_square": {"eq": "CV"},
+        }
+
 
 class TestSourceCatalogConfig:
     def test_mpc_points_at_planetary_computer(self):

@@ -2,8 +2,9 @@
 
 import logging
 import os
+import tempfile
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Executor, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
@@ -26,6 +27,7 @@ DEFAULT_OUTPUT_DTYPE = np.dtype(np.uint16)
 # 400 Mbps Starlink benchmark — more workers gave diminishing returns and
 # multiplied concurrent requests against the source server.
 DEFAULT_TILE_WORKERS = 8
+DEFAULT_BAND_READ_WORKERS = 16
 DEFAULT_ADAPTIVE_TILE_MIN_SIZE = 512
 DEFAULT_ADAPTIVE_TILE_DENSE_FRACTION = 0.75
 EXPECTED_READ_EXACT_SCAN_LIMIT = 50_000
@@ -49,18 +51,22 @@ def _read_scene_bands(
     scene_idx: int,
     bands_count: int,
     spec: Tuple[int, int, int, int],
+    band_executor: Optional[Executor] = None,
 ) -> List[npt.NDArray[Any]]:
     """Read all bands for one (scene, tile) concurrently.
 
-    Per-tile band reads are network-bound, so issuing them in parallel lets
-    HTTP/2 multiplexing fan out the range requests onto a single TCP
-    connection. For bands_count==1 we skip the executor and just call
-    read_fn directly to avoid the thread-pool overhead.
+    Per-tile band reads are network-bound. When a shared executor is supplied,
+    issuing them in parallel lets HTTP/2 multiplex range requests without
+    constructing a new thread pool for every scene/tile pair. For
+    ``bands_count == 1`` we skip the executor overhead entirely.
     """
     if bands_count <= 1:
         return [read_fn(scene_idx, 0, spec)]
-    with ThreadPoolExecutor(max_workers=bands_count) as ex:
-        return list(ex.map(lambda j: read_fn(scene_idx, j, spec), range(bands_count)))
+    if band_executor is None:
+        return [read_fn(scene_idx, j, spec) for j in range(bands_count)]
+    return list(
+        band_executor.map(lambda j: read_fn(scene_idx, j, spec), range(bands_count))
+    )
 
 
 def _finalise_tile(
@@ -156,11 +162,12 @@ def _copy_single_scene_tile(
     scene_idx: int,
     bands_count: int,
     out_dtype: "np.dtype[Any]",
+    band_executor: Optional[Executor] = None,
 ) -> npt.NDArray[Any]:
     """Copy one contributing scene into an output tile, zeroing masked pixels."""
     _, _, h, w = spec
     out = np.zeros((bands_count, h, w), dtype=out_dtype)
-    band_data = _read_scene_bands(read_fn, scene_idx, bands_count, spec)
+    band_data = _read_scene_bands(read_fn, scene_idx, bands_count, spec, band_executor)
     for j, data in enumerate(band_data):
         np.copyto(out[j], data, where=mask_tile, casting="unsafe")
     return out
@@ -175,10 +182,9 @@ def _contributing_scene_indices(
 ) -> List[int]:
     """Scene indices that contribute to a tile before the early-stop fires.
 
-    Tracks per-pixel observation counts when either bound is set. Stops once
-    every coverable pixel has hit the effective target — ``min_observations``
-    if set, else ``max_observations``. Scenes whose entire useful contribution
-    would land on already-capped pixels are skipped.
+    Observation counts are driven by the cloud/valid mask. Pixel value ``0`` is
+    allowed as source data; output nodata is also represented as ``0`` where
+    the mask says no scene contributed.
     """
     r, c, h, w = spec
     contributing: List[int] = []
@@ -229,6 +235,7 @@ def tile_percentile(
     min_observations: Optional[int],
     max_observations: Optional[int],
     out_dtype: "np.dtype[Any]",
+    band_executor: Optional[Executor] = None,
 ) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
     r, c, h, w = spec
     tile_coverage = coverage_mask[r : r + h, c : c + w]
@@ -249,7 +256,13 @@ def tile_percentile(
             raise RuntimeError(f"Missing mask for contributing scene {scene_idx}")
         mask_tile = mask[r : r + h, c : c + w]
         return spec, _copy_single_scene_tile(
-            spec, mask_tile, read_fn, scene_idx, bands_count, out_dtype
+            spec,
+            mask_tile,
+            read_fn,
+            scene_idx,
+            bands_count,
+            out_dtype,
+            band_executor,
         )
 
     stack = np.empty((len(contributing), bands_count, h, w), dtype=np.float32)
@@ -265,7 +278,9 @@ def tile_percentile(
             pick = mask_tile & (pixel_count < max_observations)
         else:
             pick = mask_tile
-        band_data = _read_scene_bands(read_fn, scene_idx, bands_count, spec)
+        band_data = _read_scene_bands(
+            read_fn, scene_idx, bands_count, spec, band_executor
+        )
         for j, data in enumerate(band_data):
             stack[k, j].fill(np.nan)
             np.copyto(stack[k, j], data, where=pick, casting="unsafe")
@@ -286,6 +301,7 @@ def tile_mean(
     min_observations: Optional[int],
     max_observations: Optional[int],
     out_dtype: "np.dtype[Any]",
+    band_executor: Optional[Executor] = None,
 ) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
     r, c, h, w = spec
     tile_coverage = coverage_mask[r : r + h, c : c + w]
@@ -306,7 +322,13 @@ def tile_mean(
             raise RuntimeError(f"Missing mask for contributing scene {scene_idx}")
         mask_tile = mask[r : r + h, c : c + w]
         return spec, _copy_single_scene_tile(
-            spec, mask_tile, read_fn, scene_idx, bands_count, out_dtype
+            spec,
+            mask_tile,
+            read_fn,
+            scene_idx,
+            bands_count,
+            out_dtype,
+            band_executor,
         )
 
     sum_block = np.zeros((bands_count, h, w), dtype=np.float32)
@@ -322,7 +344,9 @@ def tile_mean(
                 continue
         else:
             pick = mask_tile
-        band_data = _read_scene_bands(read_fn, scene_idx, bands_count, spec)
+        band_data = _read_scene_bands(
+            read_fn, scene_idx, bands_count, spec, band_executor
+        )
         for j, data in enumerate(band_data):
             np.add(sum_block[j], data, out=sum_block[j], where=pick)
         np.add(count, pick, out=count, casting="unsafe")
@@ -337,6 +361,7 @@ def tile_first(
     bands_count: int,
     coverage_mask: npt.NDArray[Any],
     out_dtype: "np.dtype[Any]",
+    band_executor: Optional[Executor] = None,
 ) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
     r, c, h, w = spec
     tile_coverage = coverage_mask[r : r + h, c : c + w]
@@ -353,7 +378,9 @@ def tile_first(
         new_pixels = mask_tile & ~filled
         if not new_pixels.any():
             continue
-        band_data = _read_scene_bands(read_fn, scene_idx, bands_count, spec)
+        band_data = _read_scene_bands(
+            read_fn, scene_idx, bands_count, spec, band_executor
+        )
         for j, data in enumerate(band_data):
             result[j][new_pixels] = data[new_pixels]
         filled |= new_pixels
@@ -572,7 +599,27 @@ def iter_tile_aggregation(
     if mosaic_method == MOSAIC_PERCENTILE:
         _warm_nanquantile_axis0()
         pv = percentile if percentile is not None else 50.0
-        n_workers = tile_workers if tile_workers is not None else DEFAULT_TILE_WORKERS
+
+    elif mosaic_method == MOSAIC_MEAN:
+        pv = 50.0
+
+    elif mosaic_method == MOSAIC_FIRST:
+        pv = 50.0
+
+    else:
+        raise ValueError(f"Unknown mosaic_method: {mosaic_method}")
+
+    n_workers = tile_workers if tile_workers is not None else DEFAULT_TILE_WORKERS
+    band_read_workers = (
+        min(DEFAULT_BAND_READ_WORKERS, max(bands_count, n_workers * bands_count))
+        if bands_count > 1
+        else 0
+    )
+    completed = 0
+    log_every = max(1, len(specs) // 10)
+    band_executor: Optional[Executor] = None
+
+    if mosaic_method == MOSAIC_PERCENTILE:
 
         def worker_fn(
             s: Tuple[int, int, int, int],
@@ -587,10 +634,10 @@ def iter_tile_aggregation(
                 min_observations,
                 max_observations,
                 out_dtype,
+                band_executor,
             )
 
     elif mosaic_method == MOSAIC_MEAN:
-        n_workers = tile_workers if tile_workers is not None else DEFAULT_TILE_WORKERS
 
         def worker_fn(
             s: Tuple[int, int, int, int],
@@ -604,10 +651,10 @@ def iter_tile_aggregation(
                 min_observations,
                 max_observations,
                 out_dtype,
+                band_executor,
             )
 
-    elif mosaic_method == MOSAIC_FIRST:
-        n_workers = tile_workers if tile_workers is not None else DEFAULT_TILE_WORKERS
+    else:
 
         def worker_fn(
             s: Tuple[int, int, int, int],
@@ -619,28 +666,34 @@ def iter_tile_aggregation(
                 bands_count,
                 coverage_mask,
                 out_dtype,
+                band_executor,
             )
 
-    else:
-        raise ValueError(f"Unknown mosaic_method: {mosaic_method}")
-
-    completed = 0
-    log_every = max(1, len(specs) // 10)
+    band_executor_cm: Optional[ThreadPoolExecutor] = None
     try:
+        if band_read_workers > 0:
+            band_executor_cm = ThreadPoolExecutor(max_workers=band_read_workers)
+            band_executor = band_executor_cm
         if n_workers <= 1:
-            for spec, tile_data in map(worker_fn, specs):
+            tile_results: Iterator[
+                Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]
+            ] = map(worker_fn, specs)
+            for spec, tile_data in tile_results:
                 completed += 1
                 if completed % log_every == 0 or completed == len(specs):
                     logger.info("Phase 2: %d/%d tiles done", completed, len(specs))
                 yield spec, tile_data
         else:
-            with ThreadPoolExecutor(max_workers=n_workers) as ex:
-                for spec, tile_data in ex.map(worker_fn, specs):
+            with ThreadPoolExecutor(max_workers=n_workers) as tile_executor:
+                tile_results = tile_executor.map(worker_fn, specs)
+                for spec, tile_data in tile_results:
                     completed += 1
                     if completed % log_every == 0 or completed == len(specs):
                         logger.info("Phase 2: %d/%d tiles done", completed, len(specs))
                     yield spec, tile_data
     finally:
+        if band_executor_cm is not None:
+            band_executor_cm.shutdown(wait=True)
         if progress_bar is not None:
             # Early-stop modes (first, min_observations) skip reads, so the
             # bar may not have reached total. Snap to total so it shows done.
@@ -686,9 +739,14 @@ def write_tile_aggregation_geotiff(
         compress="lzw",
         BIGTIFF="IF_SAFER",
     )
-    tmp_path = export_path.with_suffix(
-        f".tmp.{os.getpid()}.{threading.get_ident()}{export_path.suffix}"
+    tmp_file = tempfile.NamedTemporaryFile(
+        delete=False,
+        dir=export_path.parent,
+        prefix=f".{export_path.stem}.{os.getpid()}.{threading.get_ident()}.",
+        suffix=export_path.suffix,
     )
+    tmp_path = Path(tmp_file.name)
+    tmp_file.close()
     logger.info("Writing streamed GeoTIFF to %s via %s", export_path, tmp_path)
     try:
         with rio.open(tmp_path, "w", **write_profile) as dst:
@@ -719,7 +777,6 @@ def write_tile_aggregation_geotiff(
                         tile_data,
                         coverage_tile[None, :, :],
                         out=tile_data,
-                        casting="unsafe",
                     )
                 window_cls: Any = Window
                 dst.write(tile_data, window=window_cls(c, r, w, h))
