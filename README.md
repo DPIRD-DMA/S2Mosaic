@@ -1,4 +1,6 @@
-## S2Mosaic
+<p align="center">
+  <img src="assets/s2mosaic-heading.svg" alt="S2Mosaic" width="600">
+</p>
 
 [![PyPI version](https://img.shields.io/pypi/v/s2mosaic.svg)](https://pypi.org/project/s2mosaic/)
 [![Python versions](https://img.shields.io/pypi/pyversions/s2mosaic.svg)](https://pypi.org/project/s2mosaic/)
