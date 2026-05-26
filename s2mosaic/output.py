@@ -3,10 +3,14 @@
 import hashlib
 import json
 import logging
+import os
 import re
+import tempfile
+import threading
 from dataclasses import fields, is_dataclass
 from datetime import date
 from pathlib import Path
+from types import FunctionType, MethodType
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 import numpy as np
@@ -26,11 +30,76 @@ REQUEST_HASH_EXCLUDED_FIELDS = {
 }
 
 
+def _jsonable_callable(value: Any, _seen: set[int]) -> Dict[str, Any]:
+    module = getattr(value, "__module__", None)
+    qualname = getattr(value, "__qualname__", None)
+
+    if isinstance(value, MethodType):
+        self_obj = value.__self__
+        function = value.__func__
+        return {
+            "callable": "method",
+            "module": function.__module__,
+            "qualname": function.__qualname__,
+            "self": _jsonable_callable(self_obj, _seen)
+            if callable(self_obj)
+            else _jsonable(self_obj, _seen),
+        }
+
+    if isinstance(value, FunctionType):
+        code = value.__code__
+        closure_values: List[Any] = []
+        if value.__closure__ is not None:
+            for cell in value.__closure__:
+                try:
+                    closure_values.append(_jsonable(cell.cell_contents, _seen))
+                except ValueError:
+                    closure_values.append({"empty_cell": True})
+        descriptor = {
+            "callable": "function",
+            "module": module,
+            "qualname": qualname,
+            "code": {
+                "bytes": hashlib.sha256(code.co_code).hexdigest(),
+                "consts": _jsonable(code.co_consts, _seen),
+                "names": list(code.co_names),
+            },
+            "defaults": _jsonable(value.__defaults__, _seen),
+            "kwdefaults": _jsonable(value.__kwdefaults__, _seen),
+            "closure": closure_values,
+        }
+    else:
+        cls = value.__class__
+        state: Dict[str, Any] = {}
+        if hasattr(value, "__dict__"):
+            state.update(_jsonable(vars(value), _seen))
+        for slot in getattr(cls, "__slots__", ()):
+            if isinstance(slot, str) and hasattr(value, slot):
+                state[slot] = _jsonable(getattr(value, slot), _seen)
+        descriptor = {
+            "callable": "instance",
+            "module": cls.__module__,
+            "qualname": cls.__qualname__,
+            "state": state,
+        }
+
+    try:
+        json.dumps(descriptor, sort_keys=True, separators=(",", ":"))
+    except TypeError as exc:
+        raise ValueError(
+            "Callable request parameters must have JSON-serialisable defaults, "
+            "closure values, and instance state for stable output hashing"
+        ) from exc
+    return descriptor
+
+
 def _jsonable(value: Any, _seen: Optional[set[int]] = None) -> Any:
     if _seen is None:
         _seen = set()
     value_id = id(value)
-    is_container = isinstance(value, (Mapping, tuple, list, BaseGeometry))
+    is_container = isinstance(value, (Mapping, tuple, list, BaseGeometry)) or callable(
+        value
+    )
     if is_container:
         if value_id in _seen:
             raise ValueError("Cannot serialise recursive request metadata")
@@ -49,14 +118,7 @@ def _jsonable(value: Any, _seen: Optional[set[int]] = None) -> Any:
         if isinstance(value, list):
             return [_jsonable(v, _seen) for v in value]
         if callable(value):
-            name = getattr(value, "__qualname__", repr(value))
-            module = getattr(value, "__module__", None)
-            code = getattr(value, "__code__", None)
-            code_hash = ""
-            if code is not None:
-                code_hash = hashlib.sha256(code.co_code).hexdigest()[:10]
-            qualname = f"{module}.{name}" if module else name
-            return {"callable": qualname, "code_hash": code_hash}
+            return _jsonable_callable(value, _seen)
         return value
     finally:
         if is_container:
@@ -151,10 +213,23 @@ def output_sidecar_metadata(
 def write_output_sidecar(export_path: Path, metadata: Dict[str, Any]) -> None:
     """Write a JSON metadata sidecar beside an exported GeoTIFF."""
     sidecar_path = export_path.with_suffix(".json")
-    sidecar_path.write_text(
-        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+    payload = json.dumps(metadata, indent=2, sort_keys=True) + "\n"
+    tmp_file = tempfile.NamedTemporaryFile(
+        mode="w",
+        delete=False,
+        dir=sidecar_path.parent,
+        prefix=f".{sidecar_path.stem}.{os.getpid()}.{threading.get_ident()}.",
+        suffix=sidecar_path.suffix,
         encoding="utf-8",
     )
+    tmp_path = Path(tmp_file.name)
+    try:
+        with tmp_file:
+            tmp_file.write(payload)
+        tmp_path.replace(sidecar_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
 
 
 def get_output_path(
@@ -262,9 +337,22 @@ def _export_tif(
     write_profile.update(
         count=array.shape[0], dtype=array.dtype, nodata=nodata_value, compress="lzw"
     )
-    with rio.open(export_path, "w", **write_profile) as dst:
-        dst.write(array)
-        dst.descriptions = bands
+    tmp_file = tempfile.NamedTemporaryFile(
+        delete=False,
+        dir=export_path.parent,
+        prefix=f".{export_path.stem}.{os.getpid()}.{threading.get_ident()}.",
+        suffix=export_path.suffix,
+    )
+    tmp_path = Path(tmp_file.name)
+    tmp_file.close()
+    try:
+        with rio.open(tmp_path, "w", **write_profile) as dst:
+            dst.write(array)
+            dst.descriptions = bands
+        tmp_path.replace(export_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
 
 
 def output_band_metadata(

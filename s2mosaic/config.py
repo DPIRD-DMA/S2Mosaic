@@ -83,7 +83,7 @@ class MosaicRequest:
     bounds: Optional[Bbox] = None
     aoi: Optional[Aoi] = None
     input_crs: int = 4326
-    start_year: int = 0
+    start_year: Optional[int] = None
     start_month: int = 1
     start_day: int = 1
     duration_years: int = 0
@@ -138,8 +138,10 @@ class MosaicRequest:
             raise ValueError("Exactly one of grid_id, bounds, or aoi must be provided")
         if self.bands is None:
             raise ValueError("MosaicRequest must be normalized before validation")
+        if self.start_year is None:
+            raise ValueError("start_year must be provided")
         if self.start_year <= 0:
-            raise ValueError("start_year must be provided as a positive year")
+            raise ValueError(f"start_year must be positive, got {self.start_year}")
         validate_inputs(
             scene_order=self.scene_order,
             mosaic_method=self.mosaic_method,

@@ -21,7 +21,7 @@ from .geometry import Bbox
 from .helpers import SceneFetchError, get_rasterio_resampling
 from .masking import get_masks, get_scl_masks
 from .sources import Source
-from .stac_bounds import _BoundsItemLike
+from ._types import BoundsItemLike
 
 logger = logging.getLogger(__name__)
 DEFAULT_TILE_WORKERS = 8
@@ -353,7 +353,7 @@ def should_prewarm_sources(
 
 
 def make_bounds_tile_reader(
-    items: List[_BoundsItemLike],
+    items: List[BoundsItemLike],
     href_template: List[Tuple[str, int]],
     source: Source,
     bounds_target: Bbox,

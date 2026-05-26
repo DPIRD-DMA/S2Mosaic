@@ -80,6 +80,8 @@ def with_scene_retry(
     swallowing inference or programming errors that arise outside the fetch.
     Backoff doubles each attempt (``base_delay``, ``2 * base_delay``, ...).
     """
+    if attempts < 1:
+        raise ValueError(f"attempts must be >= 1, got {attempts}")
 
     def decorator(fn: Callable[..., T]) -> Callable[..., T]:
         @functools.wraps(fn)
@@ -100,8 +102,7 @@ def with_scene_retry(
                             f"retrying in {delay:.1f}s"
                         )
                         time.sleep(delay)
-            if last_exc is None:
-                raise SceneFetchError(f"{fn.__name__} failed without an exception")
+            assert last_exc is not None
             raise SceneFetchError(
                 f"{fn.__name__} failed after {attempts} attempts: "
                 f"{_exception_chain_summary(last_exc)}"

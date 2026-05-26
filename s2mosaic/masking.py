@@ -1,6 +1,5 @@
 import warnings
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 from typing import Any, Tuple, Union
 
 import cv2
@@ -112,7 +111,9 @@ def get_scl_masks(
     Layer rather than re-running cloud detection.
     """
     href = item.assets[source.asset_name("SCL")].href
-    arr, _ = get_full_band(href=href, source=source, res=user_resolution)
+    arr, _ = get_full_band(
+        href=href, source=source, res=user_resolution, asset_name="SCL"
+    )
     return compute_masks_from_scl(arr)
 
 
@@ -126,16 +127,23 @@ def get_masks(
     ocm_resolution: int = 20,
 ) -> Tuple[npt.NDArray[Any], npt.NDArray[Any]]:
     # download RG+NIR bands at OCM resolution for cloud masking
-    bands = ["B04", "B03", "B8A"]
-    get_band_at_ocm_res = partial(get_full_band, source=source, res=ocm_resolution)
+    ocm_bands = ["B04", "B03", "B8A"]
 
-    hrefs = [item.assets[source.asset_name(band)].href for band in bands]
+    def get_band_at_ocm_res(
+        band: str,
+    ) -> Tuple[npt.NDArray[np.uint16], dict[str, Any]]:
+        return get_full_band(
+            href=item.assets[source.asset_name(band)].href,
+            source=source,
+            res=ocm_resolution,
+            asset_name=band,
+        )
 
     with ThreadPoolExecutor(max_workers=max_dl_workers) as executor:
-        bands_and_profiles = list(executor.map(get_band_at_ocm_res, hrefs))
+        bands_and_profiles = list(executor.map(get_band_at_ocm_res, ocm_bands))
 
-    bands, _ = zip(*bands_and_profiles, strict=False)
-    ocm_input = np.vstack(bands)
+    band_arrays, _ = zip(*bands_and_profiles, strict=False)
+    ocm_input = np.vstack(band_arrays)
 
     clear, valid = compute_masks_from_array(
         ocm_input, batch_size=batch_size, inference_dtype=inference_dtype

@@ -158,6 +158,7 @@ def _warm_nanquantile_axis0() -> None:
 def _copy_single_scene_tile(
     spec: Tuple[int, int, int, int],
     mask_tile: npt.NDArray[Any],
+    tile_coverage: npt.NDArray[Any],
     read_fn: ReaderFn,
     scene_idx: int,
     bands_count: int,
@@ -167,9 +168,12 @@ def _copy_single_scene_tile(
     """Copy one contributing scene into an output tile, zeroing masked pixels."""
     _, _, h, w = spec
     out = np.zeros((bands_count, h, w), dtype=out_dtype)
+    pick = mask_tile & tile_coverage
+    if not pick.any():
+        return out
     band_data = _read_scene_bands(read_fn, scene_idx, bands_count, spec, band_executor)
     for j, data in enumerate(band_data):
-        np.copyto(out[j], data, where=mask_tile, casting="unsafe")
+        np.copyto(out[j], data, where=pick, casting="unsafe")
     return out
 
 
@@ -258,6 +262,7 @@ def tile_percentile(
         return spec, _copy_single_scene_tile(
             spec,
             mask_tile,
+            tile_coverage,
             read_fn,
             scene_idx,
             bands_count,
@@ -275,9 +280,9 @@ def tile_percentile(
             raise RuntimeError(f"Missing mask for contributing scene {scene_idx}")
         mask_tile = mask[r : r + h, c : c + w]
         if pixel_count is not None and max_observations is not None:
-            pick = mask_tile & (pixel_count < max_observations)
+            pick = mask_tile & tile_coverage & (pixel_count < max_observations)
         else:
-            pick = mask_tile
+            pick = mask_tile & tile_coverage
         band_data = _read_scene_bands(
             read_fn, scene_idx, bands_count, spec, band_executor
         )
@@ -324,6 +329,7 @@ def tile_mean(
         return spec, _copy_single_scene_tile(
             spec,
             mask_tile,
+            tile_coverage,
             read_fn,
             scene_idx,
             bands_count,
@@ -339,11 +345,11 @@ def tile_mean(
             raise RuntimeError(f"Missing mask for contributing scene {scene_idx}")
         mask_tile = mask[r : r + h, c : c + w]
         if max_observations is not None:
-            pick = mask_tile & (count < max_observations)
+            pick = mask_tile & tile_coverage & (count < max_observations)
             if not pick.any():
                 continue
         else:
-            pick = mask_tile
+            pick = mask_tile & tile_coverage
         band_data = _read_scene_bands(
             read_fn, scene_idx, bands_count, spec, band_executor
         )
@@ -375,7 +381,7 @@ def tile_first(
         if m is None:
             continue
         mask_tile = m[r : r + h, c : c + w]
-        new_pixels = mask_tile & ~filled
+        new_pixels = mask_tile & tile_coverage & ~filled
         if not new_pixels.any():
             continue
         band_data = _read_scene_bands(
@@ -600,13 +606,7 @@ def iter_tile_aggregation(
         _warm_nanquantile_axis0()
         pv = percentile if percentile is not None else 50.0
 
-    elif mosaic_method == MOSAIC_MEAN:
-        pv = 50.0
-
-    elif mosaic_method == MOSAIC_FIRST:
-        pv = 50.0
-
-    else:
+    elif mosaic_method not in (MOSAIC_MEAN, MOSAIC_FIRST):
         raise ValueError(f"Unknown mosaic_method: {mosaic_method}")
 
     n_workers = tile_workers if tile_workers is not None else DEFAULT_TILE_WORKERS

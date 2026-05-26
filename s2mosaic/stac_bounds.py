@@ -2,7 +2,7 @@
 
 import logging
 from datetime import date
-from typing import Any, Dict, Optional, Protocol, Union
+from typing import Any, Dict, Optional, Union
 
 from pystac.item_collection import ItemCollection
 from pystac_client.stac_api_io import StacApiIO
@@ -18,17 +18,6 @@ from .stac import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-class _AssetLike(Protocol):
-    href: str
-
-
-class _BoundsItemLike(Protocol):
-    id: str
-    assets: Any
-    bbox: Any
-    geometry: Any
 
 
 def _search_for_items_by_bbox(

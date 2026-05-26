@@ -11,12 +11,12 @@ from .sources import Source
 
 @with_scene_retry()
 def get_full_band(
-    href: str, source: Source, res: int = 10
+    href: str, source: Source, res: int = 10, asset_name: str = ""
 ) -> Tuple[npt.NDArray[np.uint16], Dict[str, Any]]:
     spatial_ratio = res / 10
 
     signed_href = source.sign(href)
-    is_tci = "TCI_10m" in href or "/visual/" in href or href.endswith("_TCI.tif")
+    is_tci = asset_name == "visual"
     with rio.open(signed_href) as src:
         target_side = int(10980 / spatial_ratio)
         # Passing an explicit window is required for rasterio to use COG

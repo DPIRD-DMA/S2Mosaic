@@ -75,8 +75,6 @@ from ..stac import (
 from ..geometry import (
     Aoi,
     Bbox,
-    SceneWindow,
-    _MaskFetch,
     _OCM_BANDS,
     _expand_window_for_ocm_context,
     _grid_shape_for_bounds,
@@ -89,12 +87,9 @@ from ..geometry import (
     reproject_aoi,
     reproject_bbox,
 )
+from .._types import BoundsItemLike, MaskFetch, SceneWindow
 from ..readers import make_bounds_tile_reader
-from ..stac_bounds import (
-    _BoundsItemLike,
-    _search_for_items_by_aoi,
-    _search_for_items_by_bbox,
-)
+from ..stac_bounds import _search_for_items_by_aoi, _search_for_items_by_bbox
 from .bounds_scl import (
     _fetch_one_scl,
     _fetch_one_scl_tiled,
@@ -239,13 +234,13 @@ class _WindowedBoolMask:
 
 @with_scene_retry()
 def _fetch_one_ocm(
-    item: _BoundsItemLike,
+    item: BoundsItemLike,
     source: Source,
     bounds_target: Bbox,
     target_crs: int,
     ocm_resolution: int,
     scene_window: SceneWindow,
-) -> _MaskFetch:
+) -> MaskFetch:
     """Fetch R+G+NIR over the scene's footprint within ``bounds_target``.
 
     Reading at the scene's footprint (rather than the full bounds) is the
@@ -278,7 +273,7 @@ def _fetch_one_ocm(
     with ThreadPoolExecutor(max_workers=len(_OCM_BANDS)) as executor:
         bands = list(executor.map(_read_band, _OCM_BANDS))
     arr = np.stack(bands, axis=0).astype(np.uint16)
-    return _MaskFetch(arr=arr, target_window=scene_window, crop=crop)
+    return MaskFetch(arr=arr, target_window=scene_window, crop=crop)
 
 
 def _search_and_sort_bounds_items(
@@ -293,7 +288,7 @@ def _search_and_sort_bounds_items(
     ignore_duplicate_items: bool,
     scene_order: str,
     scene_sort_fn: Optional[Callable[..., Any]],
-) -> Tuple[ItemCollection, Any, List[_BoundsItemLike]]:
+) -> Tuple[ItemCollection, Any, List[BoundsItemLike]]:
     """Search bounds/AOI scenes and return sorted STAC items."""
     if aoi_4326 is not None:
         items = _search_for_items_by_aoi(
@@ -327,12 +322,12 @@ def _search_and_sort_bounds_items(
     return (
         items,
         sorted_items,
-        cast(List[_BoundsItemLike], sorted_items[ITEM_COL].tolist()),
+        cast(List[BoundsItemLike], sorted_items[ITEM_COL].tolist()),
     )
 
 
 def _scene_window_for_item(
-    item: _BoundsItemLike,
+    item: BoundsItemLike,
     bounds_target: Bbox,
     target_crs: int,
     resolution: int,
@@ -350,7 +345,7 @@ def _scene_window_for_item(
 
 def _stream_bounds_combo_masks(
     *,
-    items_list: List[_BoundsItemLike],
+    items_list: List[BoundsItemLike],
     source: Source,
     bounds_target: Bbox,
     target_crs: int,
@@ -410,10 +405,10 @@ def _stream_bounds_combo_masks(
 
     # For ordered iteration we still walk through all items_list positions;
     # entries without a window are no-ops below.
-    mask_fetch_iter: Optional[Iterator[Tuple[int, Union[_MaskFetch, Exception]]]] = None
+    mask_fetch_iter: Optional[Iterator[Tuple[int, Union[MaskFetch, Exception]]]] = None
     phase1_workers = tile_workers if tile_workers is not None else DEFAULT_TILE_WORKERS
 
-    def _fetch_scene(idx: int, item: _BoundsItemLike) -> _MaskFetch:
+    def _fetch_scene(idx: int, item: BoundsItemLike) -> MaskFetch:
         window = scene_windows[idx]
         if window is None:
             raise SceneFetchError(
@@ -555,65 +550,24 @@ def run_bounds_pipeline(
     *,
     source: Source,
 ) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
-    """Bounds/AOI-mode pipeline. Called from mosaic() for non-grid AOIs.
+    """Bounds/AOI-mode pipeline. Called from :func:`s2mosaic.mosaic` for non-grid AOIs.
 
     Searches the configured STAC source for Sentinel-2 L2A scenes intersecting
-    ``bounds`` or ``aoi`` over the date window, streams per-scene cloud masks (skipping
-    scenes that contribute no new pixels), then fetches user bands only for the
-    kept scenes and aggregates them into a single mosaic on a UTM grid.
+    ``request.bounds`` or ``request.aoi`` over the date window, streams per-scene
+    cloud masks (skipping scenes that contribute no new pixels), then fetches user
+    bands only for the kept scenes and aggregates them into a single mosaic on a
+    UTM grid.
 
     Differs from the grid-mode pipeline in that the AOI is an arbitrary bbox
     (possibly spanning multiple MGRS tiles, possibly intersecting tiles in
     different UTM-zone projections), so each per-scene read goes through a
-    rasterio WarpedVRT to land on one common grid in ``output_crs``.
+    rasterio WarpedVRT to land on one common grid in ``request.output_crs``.
 
     Args:
-        bounds: ``(minx, miny, maxx, maxy)`` in ``input_crs`` units. Validated
-            for orientation, minimum area, and (for EPSG:4326) lon/lat range;
-            very large AOIs emit a warning but are not rejected.
-        aoi: Single polygon AOI in ``input_crs`` units. The output raster uses
-            the polygon bounds, and pixels outside the polygon are skipped and
-            written as nodata.
-        input_crs: EPSG code of ``bounds``. Defaults to 4326 (lon/lat).
-        start_year, start_month, start_day, duration_years, duration_months,
-            duration_days: Date window for the STAC search (start inclusive,
-            end exclusive).
-        bands: Spectral bands to fetch (e.g. ``["B04", "B03", "B02"]``)
-            or ``["visual"]`` for the 3-band uint8 TCI asset.
-        mosaic_method, percentile: As for :func:`s2mosaic.mosaic`.
-        output_dir: Directory to write the GeoTIFF using an auto-generated
-            filename. Mutually exclusive with ``output_path``. If neither is
-            provided, returns the array + profile instead.
-        output_path: Full GeoTIFF path to write, including the filename.
-            Mutually exclusive with ``output_dir``.
-        overwrite: If ``False`` and the output file already exists, skip the
-            mosaic and return the existing path.
-        output_crs: EPSG code of the output grid. If ``None``, auto-picked as
-            the UTM zone containing the bbox centroid.
-        resolution: Output pixel size in metres. Reads come from the nearest
-            COG overview for non-native resolutions.
-        resampling_method: How source COGs are resampled to ``output_crs``
-            / ``resolution`` during the WarpedVRT read.
-        additional_query: Extra STAC query filters
-            (e.g. ``{"eo:cloud_cover": {"lt": 50}}``).
-        min_observations: Optional per-tile early-stop target for
-            ``mean`` and ``percentile``. When set, user-band aggregation stops
-            reading later scenes for a tile once every coverable pixel has at
-            least this many valid observations. This is not an output quality
-            filter.
-        min_coverage_fraction: Drop pixels covered by fewer than this fraction
-            of overlapping scenes (scene-edge pixels). ``None`` disables.
-        ignore_duplicate_items: Keep only the latest processing baseline per scene.
-        scene_order, scene_sort_fn: As for :func:`s2mosaic.mosaic`.
-        cloud_mask: ``"OCM"`` (deep-learning, default) or ``"SCL"`` (L2A scene
-            classification layer — cheaper, less accurate).
-        ocm_batch_size, ocm_inference_dtype: Only used when ``cloud_mask="OCM"``.
-        tile_workers: Number of output tiles to aggregate concurrently.
-            Defaults to ``min(4, os.cpu_count() or 1)``.
-        adaptive_tiling: Split sparse output tiles based on the actual
-            cloud-valid contribution masks. Defaults to True.
-        show_progress: Show tqdm progress bars for the cloud-mask streaming
-            and tile-aggregation phases. Defaults to False.
+        request: Normalized and validated :class:`MosaicRequest`. See
+            :func:`s2mosaic.mosaic` for the meaning of each field.
+        source: STAC source provider (e.g. MPC, AWS) supplying the catalog,
+            asset signing, and band/asset naming.
 
     Returns:
         ``(array, profile)`` if no export path is requested, otherwise the
@@ -621,12 +575,13 @@ def run_bounds_pipeline(
         ``(bands, height, width)`` and dtype ``uint8`` (visual) or ``uint16``.
 
     Raises:
-        ValueError: If inputs fail validation or no scenes are found.
+        ValueError: If no scenes are found for the requested AOI / date window.
         RuntimeError: If scenes were found but every scene was fully
-            cloud-masked or invalid.
+            cloud-masked, invalid, or failed to fetch.
     """
     bands = request.bands
     additional_query = request.additional_query
+    assert request.start_year is not None
     assert bands is not None
     assert additional_query is not None
 

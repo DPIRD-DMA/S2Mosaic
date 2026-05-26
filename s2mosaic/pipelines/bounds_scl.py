@@ -14,15 +14,13 @@ from rasterio.windows import Window, bounds as window_bounds, from_bounds
 
 from ..geometry import (
     Bbox,
-    SceneWindow,
-    _MaskFetch,
     _SCL_ADAPTIVE_BLOCK_SAVING_FRACTION,
     _target_grid,
     _window_bounds_in_target,
 )
+from .._types import BoundsItemLike, MaskFetch, SceneWindow
 from ..helpers import get_rasterio_resampling, with_scene_retry
 from ..sources import Source
-from ..stac_bounds import _BoundsItemLike
 
 
 def _read_warpvrt(
@@ -130,13 +128,13 @@ def _read_band_at_target_window(
 
 @with_scene_retry()
 def _fetch_one_scl(
-    item: _BoundsItemLike,
+    item: BoundsItemLike,
     source: Source,
     bounds_target: Bbox,
     target_crs: int,
     mask_resolution: int,
     scene_window: SceneWindow,
-) -> _MaskFetch:
+) -> MaskFetch:
     """Fetch the scene's SCL band over its footprint within ``bounds_target``.
 
     Like the OCM fetcher, this reads only the scene's window in the target
@@ -153,7 +151,7 @@ def _fetch_one_scl(
     arr = _read_band_at_target_window(
         href, 1, read_bounds, target_crs_obj, width, height, rio_resampling
     )
-    return _MaskFetch(
+    return MaskFetch(
         arr=arr.astype(np.uint8),
         target_window=scene_window,
         crop=(slice(0, win_h), slice(0, win_w)),
@@ -162,7 +160,7 @@ def _fetch_one_scl(
 
 @with_scene_retry()
 def _fetch_one_scl_tiled(
-    item: _BoundsItemLike,
+    item: BoundsItemLike,
     source: Source,
     bounds_target: Bbox,
     target_crs: int,
@@ -171,7 +169,7 @@ def _fetch_one_scl_tiled(
     height: int,
     tile_specs: List[Tuple[int, int, int, int]],
     scene_window: SceneWindow,
-) -> _MaskFetch:
+) -> MaskFetch:
     """Fetch one scene's SCL band using sparse AOI tile windows."""
     if tile_specs == [(0, 0, height, width)]:
         return _fetch_one_scl(
@@ -204,7 +202,7 @@ def _fetch_one_scl_tiled(
             )
 
     if not relevant_specs:
-        return _MaskFetch(
+        return MaskFetch(
             arr=np.zeros((scene_h, scene_w), dtype=np.uint8),
             target_window=scene_window,
             crop=(slice(0, scene_h), slice(0, scene_w)),
@@ -232,7 +230,7 @@ def _fetch_one_scl_tiled(
                     r - min_r : r - min_r + h,
                     c - min_c : c - min_c + w,
                 ] = vrt.read(1, window=window_cls(c, r, w, h))
-    return _MaskFetch(
+    return MaskFetch(
         arr=out,
         target_window=(min_c, min_r, out_w, out_h),
         crop=(slice(0, out_h), slice(0, out_w)),
@@ -240,7 +238,7 @@ def _fetch_one_scl_tiled(
 
 
 def _source_block_count_for_scl_tiles(
-    item: _BoundsItemLike,
+    item: BoundsItemLike,
     source: Source,
     bounds_target: Bbox,
     target_crs: int,
@@ -290,7 +288,7 @@ def _source_block_count_for_scl_tiles(
 
 
 def _should_use_tiled_scl_fetch(
-    items: Union[_BoundsItemLike, Sequence[_BoundsItemLike]],
+    items: Union[BoundsItemLike, Sequence[BoundsItemLike]],
     source: Source,
     bounds_target: Bbox,
     target_crs: int,

@@ -1,6 +1,6 @@
 """Geometry and target-grid helpers for bounds/AOI mosaics."""
 
-from typing import Any, NamedTuple, Optional, Tuple, TypeAlias, cast
+from typing import Any, Optional, Tuple, TypeAlias, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -10,6 +10,8 @@ from rasterio.features import rasterize
 from rasterio.transform import Affine
 from shapely.geometry import MultiPolygon, Polygon, box, shape
 from shapely.ops import transform as shapely_transform
+
+from ._types import SceneWindow
 
 Bbox = Tuple[float, float, float, float]
 Aoi: TypeAlias = Polygon
@@ -21,6 +23,11 @@ def pick_utm_epsg(lon: float, lat: float) -> int:
         raise ValueError(f"longitude must be in [-180, 180], got {lon}")
     if not -90.0 <= lat <= 90.0:
         raise ValueError(f"latitude must be in [-90, 90], got {lat}")
+    if not -80.0 <= lat <= 84.0:
+        raise ValueError(
+            "Automatic output_crs selection only supports UTM latitudes "
+            f"[-80, 84], got {lat}; pass output_crs explicitly for polar regions"
+        )
     zone = min(60, max(1, int((lon + 180) / 6) + 1))
     return (32700 if lat < 0 else 32600) + zone
 
@@ -87,22 +94,6 @@ def _grid_shape_for_bounds(bounds_target: Bbox, resolution: int) -> Tuple[int, i
     width = max(1, int(round((maxx - minx) / resolution)))
     height = max(1, int(round((maxy - miny) / resolution)))
     return width, height
-
-
-SceneWindow = Tuple[int, int, int, int]  # (col_off, row_off, width, height)
-
-
-class _MaskFetch(NamedTuple):
-    """Per-scene mask-fetch result, sized to the scene's footprint window.
-
-    ``arr`` holds the read pixels at ``crop``'s pre-crop shape; the caller
-    applies ``crop`` after mask compute to undo any OCM-context padding,
-    yielding a block that lands at ``target_window`` in the bounds grid.
-    """
-
-    arr: npt.NDArray[Any]
-    target_window: SceneWindow
-    crop: Tuple[slice, slice]
 
 
 def _window_from_target_bounds(

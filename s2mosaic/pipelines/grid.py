@@ -50,6 +50,7 @@ def run_grid_pipeline(
     bands = request.bands
     additional_query = request.additional_query
     assert request.grid_id is not None
+    assert request.start_year is not None
     assert bands is not None
     assert additional_query is not None
 

@@ -16,6 +16,7 @@ when a process wants these global GDAL defaults.
 from __future__ import annotations
 
 import os
+from typing import Optional
 
 
 # Defaults below were picked from titiler/gdalcubes guidance for remote COG
@@ -52,13 +53,29 @@ GDAL_NETWORK_DEFAULTS: dict[str, str] = {
 }
 
 
-def apply_gdal_network_defaults() -> None:
+GdalEnvSnapshot = dict[str, Optional[str]]
+
+
+def apply_gdal_network_defaults() -> GdalEnvSnapshot:
     """Set network-tuned GDAL env vars, without overwriting any the user set.
 
     These are process-wide environment variables. They are intentionally not
     applied at import time because they affect every GDAL user in the process.
+    Returns the previous values for the managed keys so callers can restore
+    the process environment with :func:`restore_gdal_network_env`.
     """
+    previous = {key: os.environ.get(key) for key in GDAL_NETWORK_DEFAULTS}
     if os.environ.get("S2MOSAIC_NO_GDAL_DEFAULTS", "").lower() in ("1", "true", "yes"):
-        return
+        return previous
     for key, value in GDAL_NETWORK_DEFAULTS.items():
         os.environ.setdefault(key, value)
+    return previous
+
+
+def restore_gdal_network_env(snapshot: GdalEnvSnapshot) -> None:
+    """Restore GDAL env vars captured by :func:`apply_gdal_network_defaults`."""
+    for key, value in snapshot.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
