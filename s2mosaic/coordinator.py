@@ -162,7 +162,7 @@ def mosaic(
     scene_sort_fn: Optional[Callable[..., Any]] = None,
     cloud_mask: str = "OCM",
     ocm_batch_size: int = 1,
-    ocm_inference_dtype: str = "bf16",
+    ocm_inference_dtype: str = "fp16",
     tile_workers: Optional[int] = None,
     adaptive_tiling: bool = True,
     show_progress: bool = False,
@@ -245,7 +245,10 @@ def mosaic(
             Scene Classification Layer published with the scene. SCL is much cheaper
             (one COG read, no inference) but lower accuracy.
         ocm_batch_size (int, optional): Batch size for OCM inference. Defaults to 1.
-        ocm_inference_dtype (str, optional): Data type for OCM inference. Defaults to "bf16".
+        ocm_inference_dtype (str, optional): Data type for OCM inference.
+            Defaults to "fp16" for broad GPU/MPS compatibility. Use "fp32" for
+            CPU inference (most CPUs lack efficient fp16/bf16 paths), or "bf16"
+            on devices that support it.
         tile_workers (int, optional): Number of output tiles to aggregate
             concurrently. Higher values can improve throughput for
             network-bound reads, but increase memory use and simultaneous

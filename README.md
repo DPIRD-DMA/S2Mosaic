@@ -129,7 +129,7 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 - `percentile` (`None`): percentile to compute when `mosaic_method="percentile"` (0–100).
 - `min_observations` (`None`): minimum valid observations to read per pixel for `"mean"` and `"percentile"`. When set, tile aggregation stops reading later scenes once every coverable pixel has reached the target. This is not an output quality guarantee; pixels that cannot reach the target use whatever observations are available.
 - `max_observations` (`None`): per-pixel cap on valid observations for `"mean"` and `"percentile"`. Each pixel accepts at most this many scenes (in `scene_order`); later valid scenes are dropped for that pixel. Combined with `scene_order="oldest"` or `"newest"` this biases the mosaic toward early or late dates. Must be `>= min_observations` when both are set; ignored by `"first"` (effectively N=1).
-- `tile_workers` (`min(4, os.cpu_count() or 1)`): number of output tiles to aggregate concurrently. Higher values can improve throughput for network-bound reads, but increase memory use and simultaneous source reads.
+- `tile_workers` (`8`): number of output tiles to aggregate concurrently. Tuned higher than CPU count because the work is I/O-bound on remote COG reads. Raise for faster networks; lower if memory or simultaneous-connection limits matter more than throughput.
 - `adaptive_tiling` (`True`): split sparse output tiles based on the actual cloud-valid contribution masks. This reduces wasted reads for irregular AOIs, sparse coverage, and heavily masked scenes. Set to `False` to use fixed-size output tiles.
 
 **Output destination**
@@ -140,7 +140,7 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 
 **Output grid**
 
-- `output_crs` (`None`): EPSG of the output. In bounds mode, auto-picked from the AOI centroid (UTM zone) if omitted. Ignored in grid mode.
+- `output_crs` (`None`): EPSG of the output. In bounds/AOI mode, auto-picked as the UTM zone containing the AOI centroid if omitted. Ignored in grid mode (the tile's native UTM zone is used).
 - `resolution` (`10`): output pixel size in metres. At lower resolutions rasterio reads from COG overviews — much less data over the wire.
 - `resampling_method` (`"nearest"`): how the source is resampled to the output grid. Also accepts `"bilinear"`, `"cubic"`, `"average"`, `"lanczos"`.
 
@@ -160,7 +160,7 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 
 - `cloud_mask` (`"OCM"`): provider — `"OCM"` runs the OmniCloudMask deep-learning model on R+G+NIR bands (most accurate); `"SCL"` reads the L2A Scene Classification Layer (much cheaper, lower accuracy).
 - `ocm_batch_size` (`1`): OCM inference batch size. Only used with `cloud_mask="OCM"`.
-- `ocm_inference_dtype` (`"bf16"`): OCM inference dtype. Only used with `cloud_mask="OCM"`.
+- `ocm_inference_dtype` (`"fp16"`): OCM inference dtype. Defaults to `"fp16"` for broad GPU/MPS compatibility; use `"fp32"` for CPU inference, or `"bf16"` on devices that support it. Only used with `cloud_mask="OCM"`.
 
 **Diagnostics**
 
@@ -187,11 +187,11 @@ If your application already configures the `logging` module, the package logger 
 ## Performance Tips
 - `cloud_mask`: Default `"OCM"` runs the OmniCloudMask deep-learning model — most accurate but needs reasonable compute (GPU/MPS recommended). Switch to `"SCL"` on CPU-only machines or for bulk processing — it skips inference entirely and just reads the L2A Scene Classification Layer.
 - `ocm_batch_size`: If using a GPU, setting this above the default value (1) will speed up cloud masking. In most cases, a value of 4 works well. If you encounter CUDA errors, try using a lower number.
-- `ocm_inference_dtype`: if the device supports it 'bf16' tends to be the fastest option, failing this try 'fp16' then 'fp32'.
+- `ocm_inference_dtype`: defaults to `'fp16'` for the widest GPU/MPS support. Use `'fp32'` for CPU inference — most CPUs don't have efficient fp16/bf16 paths, so fp32 is both more compatible and faster there.
 - `scene_order`: Using `"valid_data"` tends to work well with early stopping because clear scenes are considered first.
 - `min_observations`: For large `"mean"` or `"percentile"` jobs, set this to the number of observations per pixel you actually need to avoid reading later scenes for already-satisfied tiles.
 - `max_observations`: Caps each pixel at N valid scenes. Combine with `scene_order="oldest"` (or `"newest"`) to bias the mosaic toward early/late dates over a long search window without paying for the extra reads.
-- `mosaic_method`: Using `"first"` can be a lot faster than `"mean"` as only valid, non-cloudy, new pixels are downloaded.
+- `mosaic_method`: Roughly ordered fastest to slowest, `"first"` < `"mean"` < `"percentile"`/`"median"`. `"first"` only reads pixels needed to fill each tile and stops as soon as it can, so cloud-free scenes can finish a tile in one pass. `"mean"` streams every contributing scene but accumulates incrementally, so its memory stays small. `"percentile"` and `"median"` hold each tile's per-scene stack in memory to compute the quantile, so they use more RAM and — without `min_observations`/`max_observations` — read every contributing scene. Set `min_observations` (and/or `max_observations`) to cap reads once every coverable pixel has enough samples.
 
 ## Known limitations
 

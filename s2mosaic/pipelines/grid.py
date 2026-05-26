@@ -198,7 +198,7 @@ def stream_mosaic_pipeline(
     output_coverage_mask: Optional[npt.NDArray[Any]] = None,
     mosaic_method: str = "mean",
     ocm_batch_size: int = 6,
-    ocm_inference_dtype: str = "bf16",
+    ocm_inference_dtype: str = "fp16",
     max_dl_workers: int = 4,
     percentile: Optional[float] = 50.0,
     s2_scene_size: int = 10980,

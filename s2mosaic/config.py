@@ -108,7 +108,7 @@ class MosaicRequest:
     scene_sort_fn: Optional[Callable[..., Any]] = None
     cloud_mask: str = CLOUD_MASK_OCM
     ocm_batch_size: int = 1
-    ocm_inference_dtype: str = "bf16"
+    ocm_inference_dtype: str = "fp16"
     tile_workers: Optional[int] = None
     adaptive_tiling: bool = True
     show_progress: bool = False
