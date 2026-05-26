@@ -173,6 +173,7 @@ def run_grid_pipeline(
         tile_workers=request.tile_workers,
         adaptive_tiling=request.adaptive_tiling,
         show_progress=request.show_progress,
+        include_observation_count=request.include_observation_count,
     )
     if export_path is not None:
         write_output_sidecar(export_path, sidecar_metadata)
@@ -184,6 +185,7 @@ def run_grid_pipeline(
         bands=bands,
         coverage_mask=output_coverage_mask,
         export_path=export_path,
+        include_observation_count=request.include_observation_count,
     )
 
 
@@ -209,6 +211,7 @@ def stream_mosaic_pipeline(
     tile_workers: Optional[int] = None,
     adaptive_tiling: bool = True,
     show_progress: bool = False,
+    include_observation_count: bool = False,
 ) -> Tuple[Optional[npt.NDArray[Any]], Dict[str, Any]]:
     """Tile-streamed mosaic for grid_id mode.
 
@@ -391,8 +394,14 @@ def stream_mosaic_pipeline(
             tile_size,
         )
         out_dtype = np.dtype(np.uint8) if is_visual else np.dtype(np.uint16)
-        last_profile["dtype"] = out_dtype
-        last_profile["count"] = bands_count
+        output_dtype = (
+            np.promote_types(out_dtype, np.dtype(np.uint16))
+            if include_observation_count
+            else out_dtype
+        )
+        output_bands_count = bands_count + (1 if include_observation_count else 0)
+        last_profile["dtype"] = output_dtype
+        last_profile["count"] = output_bands_count
 
         # Pick the smallest adaptive sub-tile that still aligns with source
         # COG blocks for every band being read. AWS Earth Search uses
@@ -429,6 +438,7 @@ def stream_mosaic_pipeline(
                 adaptive_tiling=adaptive_tiling,
                 show_progress=show_progress,
                 min_tile_size=min_tile_size,
+                include_observation_count=include_observation_count,
             )
             return None, last_profile
 
@@ -449,6 +459,7 @@ def stream_mosaic_pipeline(
             adaptive_tiling=adaptive_tiling,
             show_progress=show_progress,
             min_tile_size=min_tile_size,
+            include_observation_count=include_observation_count,
         )
         return out, last_profile
     finally:

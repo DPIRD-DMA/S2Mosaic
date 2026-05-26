@@ -30,16 +30,11 @@ def mosaic(
     bands: Optional[List[str]] = ...,
     mosaic_method: str = ...,
     percentile: Optional[float] = ...,
-    output_dir: None = None,
-    output_path: None = None,
-    overwrite: bool = ...,
-    output_crs: Optional[int] = ...,
-    resolution: int = ...,
-    resampling_method: str = ...,
-    additional_query: Optional[Dict[str, Any]] = ...,
-    source: str = ...,
     min_observations: Optional[int] = ...,
     max_observations: Optional[int] = ...,
+    include_observation_count: bool = ...,
+    source: str = ...,
+    additional_query: Optional[Dict[str, Any]] = ...,
     min_coverage_fraction: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
     scene_order: str = ...,
@@ -47,6 +42,13 @@ def mosaic(
     cloud_mask: str = ...,
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
+    output_crs: Optional[int] = ...,
+    resolution: int = ...,
+    resampling_method: str = ...,
+    snap_to_source_grid: bool = ...,
+    output_dir: None = None,
+    output_path: None = None,
+    overwrite: bool = ...,
     tile_workers: Optional[int] = ...,
     adaptive_tiling: bool = ...,
     show_progress: bool = ...,
@@ -69,16 +71,11 @@ def mosaic(
     bands: Optional[List[str]] = ...,
     mosaic_method: str = ...,
     percentile: Optional[float] = ...,
-    output_dir: Union[Path, str],
-    output_path: None = None,
-    overwrite: bool = ...,
-    output_crs: Optional[int] = ...,
-    resolution: int = ...,
-    resampling_method: str = ...,
-    additional_query: Optional[Dict[str, Any]] = ...,
-    source: str = ...,
     min_observations: Optional[int] = ...,
     max_observations: Optional[int] = ...,
+    include_observation_count: bool = ...,
+    source: str = ...,
+    additional_query: Optional[Dict[str, Any]] = ...,
     min_coverage_fraction: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
     scene_order: str = ...,
@@ -86,6 +83,13 @@ def mosaic(
     cloud_mask: str = ...,
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
+    output_crs: Optional[int] = ...,
+    resolution: int = ...,
+    resampling_method: str = ...,
+    snap_to_source_grid: bool = ...,
+    output_dir: Union[Path, str],
+    output_path: None = None,
+    overwrite: bool = ...,
     tile_workers: Optional[int] = ...,
     adaptive_tiling: bool = ...,
     show_progress: bool = ...,
@@ -108,16 +112,11 @@ def mosaic(
     bands: Optional[List[str]] = ...,
     mosaic_method: str = ...,
     percentile: Optional[float] = ...,
-    output_dir: None = None,
-    output_path: Union[Path, str],
-    overwrite: bool = ...,
-    output_crs: Optional[int] = ...,
-    resolution: int = ...,
-    resampling_method: str = ...,
-    additional_query: Optional[Dict[str, Any]] = ...,
-    source: str = ...,
     min_observations: Optional[int] = ...,
     max_observations: Optional[int] = ...,
+    include_observation_count: bool = ...,
+    source: str = ...,
+    additional_query: Optional[Dict[str, Any]] = ...,
     min_coverage_fraction: Optional[float] = ...,
     ignore_duplicate_items: bool = ...,
     scene_order: str = ...,
@@ -125,6 +124,13 @@ def mosaic(
     cloud_mask: str = ...,
     ocm_batch_size: int = ...,
     ocm_inference_dtype: str = ...,
+    output_crs: Optional[int] = ...,
+    resolution: int = ...,
+    resampling_method: str = ...,
+    snap_to_source_grid: bool = ...,
+    output_dir: None = None,
+    output_path: Union[Path, str],
+    overwrite: bool = ...,
     tile_workers: Optional[int] = ...,
     adaptive_tiling: bool = ...,
     show_progress: bool = ...,
@@ -146,16 +152,11 @@ def mosaic(
     bands: Optional[List[str]] = None,
     mosaic_method: str = "mean",
     percentile: Optional[float] = None,
-    output_dir: Optional[Union[Path, str]] = None,
-    output_path: Optional[Union[Path, str]] = None,
-    overwrite: bool = True,
-    output_crs: Optional[int] = None,
-    resolution: int = 10,
-    resampling_method: str = "nearest",
-    additional_query: Optional[Dict[str, Any]] = None,
-    source: str = SOURCE_MPC,
     min_observations: Optional[int] = None,
     max_observations: Optional[int] = None,
+    include_observation_count: bool = False,
+    source: str = SOURCE_MPC,
+    additional_query: Optional[Dict[str, Any]] = None,
     min_coverage_fraction: Optional[float] = None,
     ignore_duplicate_items: bool = True,
     scene_order: str = "valid_data",
@@ -163,6 +164,13 @@ def mosaic(
     cloud_mask: str = "OCM",
     ocm_batch_size: int = 1,
     ocm_inference_dtype: str = "fp16",
+    output_crs: Optional[int] = None,
+    resolution: int = 10,
+    resampling_method: str = "nearest",
+    snap_to_source_grid: bool = False,
+    output_dir: Optional[Union[Path, str]] = None,
+    output_path: Optional[Union[Path, str]] = None,
+    overwrite: bool = True,
     tile_workers: Optional[int] = None,
     adaptive_tiling: bool = True,
     show_progress: bool = False,
@@ -201,27 +209,6 @@ def mosaic(
         mosaic_method (str, optional): Method to create the mosaic. Options are "mean", "first", "median" or "percentile". Defaults to "mean".
         percentile (Optional[float], optional): Percentile to calculate
             when using ``mosaic_method="percentile"``. Must be between 0 and 100.
-        output_dir (Optional[Union[Path, str]], optional): Directory to save
-            the output GeoTIFF using an auto-generated filename. Mutually
-            exclusive with ``output_path``. If neither is provided, the mosaic
-            is returned instead. Defaults to None.
-        output_path (Optional[Union[Path, str]], optional): Full GeoTIFF path
-            to write, including the filename. Mutually exclusive with
-            ``output_dir``. Defaults to None.
-        overwrite (bool, optional): Whether to overwrite existing output files. Defaults to True.
-        output_crs (int, optional): EPSG code for the output grid. In bounds
-            mode, defaults to the UTM zone containing the AOI centroid. Ignored
-            in grid mode.
-        resolution (int, optional): Output pixel size in metres. Defaults to 10.
-        resampling_method (str, optional): Rasterio resampling method used when
-            reading source COGs onto the output grid. Options include "nearest",
-            "bilinear", "cubic", "average", and "lanczos". Defaults to "nearest".
-        additional_query (Dict[str, Any], optional): Additional query parameters for STAC API.
-            Defaults to {"eo:cloud_cover": {"lt": 100}}.
-        source (str, optional): STAC imagery source. ``"MPC"`` (default) uses
-            Microsoft Planetary Computer (SAS-signed URLs); ``"AWS"`` uses
-            Element 84 Earth Search on AWS Open Data (public S3, no auth).
-            Defaults to "MPC".
         min_observations (int, optional): Per-tile early-stop target
             for ``mean`` and ``percentile``. When set, aggregation stops
             reading later scenes for a tile once every coverable pixel has at
@@ -234,6 +221,17 @@ def mosaic(
             the mosaic to early or late dates. Must be >= ``min_observations``
             when both are set. Ignored by ``first`` (effectively N=1).
             Defaults to None.
+        include_observation_count (bool, optional): Append an ``Observation count``
+            band containing the number of valid source scenes contributing to
+            each output pixel. For visual exports, enabling this writes the
+            GeoTIFF/returned array as ``uint16`` so the count band is not
+            limited to 255. Defaults to False.
+        source (str, optional): STAC imagery source. ``"MPC"`` (default) uses
+            Microsoft Planetary Computer (SAS-signed URLs); ``"AWS"`` uses
+            Element 84 Earth Search on AWS Open Data (public S3, no auth).
+            Defaults to "MPC".
+        additional_query (Dict[str, Any], optional): Additional query parameters for STAC API.
+            Defaults to {"eo:cloud_cover": {"lt": 100}}.
         min_coverage_fraction (float, optional): Drop pixels covered by fewer
             than this fraction of overlapping scenes. Set to None to disable.
             Defaults to None.
@@ -249,6 +247,34 @@ def mosaic(
             Defaults to "fp16" for broad GPU/MPS compatibility. Use "fp32" for
             CPU inference (most CPUs lack efficient fp16/bf16 paths), or "bf16"
             on devices that support it.
+        output_crs (int, optional): EPSG code for the output grid. In bounds
+            mode, defaults to the UTM zone containing the AOI centroid. Ignored
+            in grid mode.
+        resolution (int, optional): Output pixel size in metres. Defaults to 10.
+        resampling_method (str, optional): Rasterio resampling method used when
+            reading source COGs onto the output grid. Options include "nearest",
+            "bilinear", "cubic", "average", and "lanczos". Defaults to "nearest".
+        snap_to_source_grid (bool, optional): Bounds/AOI mode only. When True,
+            expand the output extent outward to whole multiples of
+            ``resolution`` in the target CRS, so repeat runs over the same area
+            produce identical grids and (at ``resolution=10``) align with the
+            native Sentinel-2 pixel grid — making reads zero-cost copies
+            instead of sub-pixel resamples. The output may grow by up to one
+            pixel on each side. Defaults to False (use the exact requested
+            bounds; sub-pixel offsets are absorbed by ``resampling_method``).
+            For repeatable cross-run alignment, also pass ``output_crs``
+            explicitly — otherwise the auto-picked UTM zone can shift between
+            runs (e.g. if bounds are tweaked slightly across the centroid's
+            UTM-zone boundary), and snapping in a different CRS does not
+            preserve the grid.
+        output_dir (Optional[Union[Path, str]], optional): Directory to save
+            the output GeoTIFF using an auto-generated filename. Mutually
+            exclusive with ``output_path``. If neither is provided, the mosaic
+            is returned instead. Defaults to None.
+        output_path (Optional[Union[Path, str]], optional): Full GeoTIFF path
+            to write, including the filename. Mutually exclusive with
+            ``output_dir``. Defaults to None.
+        overwrite (bool, optional): Whether to overwrite existing output files. Defaults to True.
         tile_workers (int, optional): Number of output tiles to aggregate
             concurrently. Higher values can improve throughput for
             network-bound reads, but increase memory use and simultaneous
@@ -291,16 +317,11 @@ def mosaic(
         bands=bands,
         mosaic_method=mosaic_method,
         percentile=percentile,
-        output_dir=output_dir,
-        output_path=output_path,
-        overwrite=overwrite,
-        output_crs=output_crs,
-        resolution=resolution,
-        resampling_method=resampling_method,
-        additional_query=additional_query,
-        source=source,
         min_observations=min_observations,
         max_observations=max_observations,
+        include_observation_count=include_observation_count,
+        source=source,
+        additional_query=additional_query,
         min_coverage_fraction=min_coverage_fraction,
         ignore_duplicate_items=ignore_duplicate_items,
         scene_order=scene_order,
@@ -308,6 +329,13 @@ def mosaic(
         cloud_mask=cloud_mask,
         ocm_batch_size=ocm_batch_size,
         ocm_inference_dtype=ocm_inference_dtype,
+        output_crs=output_crs,
+        resolution=resolution,
+        resampling_method=resampling_method,
+        snap_to_source_grid=snap_to_source_grid,
+        output_dir=output_dir,
+        output_path=output_path,
+        overwrite=overwrite,
         tile_workers=tile_workers,
         adaptive_tiling=adaptive_tiling,
         show_progress=show_progress,

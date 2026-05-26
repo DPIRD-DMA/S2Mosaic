@@ -53,7 +53,6 @@ Homepage = "https://github.com/DPIRD-DMA/S2Mosaic"
 Repository = "https://github.com/DPIRD-DMA/S2Mosaic"
 Issues = "https://github.com/DPIRD-DMA/S2Mosaic/issues"
 Changelog = "https://github.com/DPIRD-DMA/S2Mosaic/blob/main/CHANGELOG.md"
-Blog = "https://dpird-dma.github.io/blog/S2Mosaic-Creating-Cloud-Free-Sentinel-2-Mosaics/"
 
 [tool.setuptools.package-data]
 s2mosaic = ["sentinel_2_index.gpkg", "py.typed"]

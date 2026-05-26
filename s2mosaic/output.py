@@ -370,13 +370,20 @@ def finalize_output(
     bands: List[str],
     coverage_mask: Optional[npt.NDArray[Any]],
     export_path: Optional[Path],
+    include_observation_count: bool = False,
 ) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
-    """Apply coverage mask, set band names + nodata, export or return."""
+    """Apply coverage mask, set band names + nodata, export or return.
+
+    ``include_observation_count`` tells the output metadata that ``array`` has
+    an extra final per-pixel observation-count band.
+    """
     if coverage_mask is not None:
         coverage = np.asarray(coverage_mask, dtype=bool)
         np.multiply(array, coverage[None, :, :], out=array)
 
     band_descriptions, nodata_value = output_band_metadata(bands)
+    if include_observation_count:
+        band_descriptions = [*band_descriptions, "Observation count"]
 
     if export_path is not None:
         logger.info(f"Writing GeoTIFF to {export_path}")

@@ -23,28 +23,6 @@ from ..helpers import get_rasterio_resampling, with_scene_retry
 from ..sources import Source
 
 
-def _read_warpvrt(
-    href: str,
-    indices: Union[int, List[int]],
-    transform: Affine,
-    width: int,
-    height: int,
-    target_crs_obj: CRS,
-    rio_resampling: Any,
-) -> npt.NDArray[Any]:
-    """Open ``href`` and read ``indices`` through a WarpedVRT snapped to the grid."""
-    with rio.open(href) as src:
-        with WarpedVRT(
-            src,
-            crs=target_crs_obj,
-            transform=transform,
-            width=width,
-            height=height,
-            resampling=rio_resampling,
-        ) as vrt:
-            return vrt.read(indices)  # type: ignore[no-any-return, unused-ignore]
-
-
 def _pick_overview_level(
     src_native_res: float, target_res: float, overview_factors: List[int]
 ) -> int:
@@ -76,15 +54,17 @@ def _read_band_at_target_window(
 ) -> npt.NDArray[Any]:
     """Read one band over ``read_bounds`` at target grid (width × height).
 
-    Fast path when the source COG is already in ``target_crs``: a direct
-    ``src.read(window, out_shape)`` lets rasterio pick the right COG overview,
-    which is roughly an order of magnitude faster than asking WarpedVRT to
-    warp full-resolution source data and resample to the same target grid.
+    Uses ``WarpedVRT`` for both same-CRS and cross-CRS reads so the source
+    extent is honoured uniformly: pixels whose centres fall outside the
+    source COG return 0, matching the behaviour of the user-band reader in
+    :class:`~s2mosaic.readers.BoundsTileReader`. The ``src.read(window, out_shape,
+    boundless=True)`` fast path was faster but its boundless padding interacted
+    badly with ``out_shape`` downsampling at source-extent boundaries, returning
+    in-data values for out-of-source pixels and producing 1-pixel dark stripes
+    at MGRS overlap-zone edges in the final mosaic.
 
-    Cross-CRS path uses WarpedVRT, but first picks the appropriate source
-    OVERVIEW_LEVEL so the warp reads from the closest-finer-than-target
-    overview instead of full-resolution source — same byte savings as the
-    fast path, just with a reprojection step on top.
+    ``OVERVIEW_LEVEL`` is picked from the source overviews so the warp reads
+    the smallest source array that's still finer than the target resolution.
     """
     target_res = (read_bounds[2] - read_bounds[0]) / target_width
     transform = Affine(
@@ -96,16 +76,6 @@ def _read_band_at_target_window(
         read_bounds[3],
     )
     with rio.open(href) as src:
-        if src.crs == target_crs_obj:
-            window = from_bounds(*read_bounds, transform=src.transform)
-            return src.read(  # type: ignore[no-any-return]
-                band_idx,
-                window=window,
-                out_shape=(target_height, target_width),
-                resampling=rio_resampling,
-                boundless=True,
-                fill_value=0,
-            )
         src_native_res = abs(src.transform.a)
         overview_factors = src.overviews(band_idx)
         overview_level = _pick_overview_level(

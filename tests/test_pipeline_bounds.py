@@ -12,7 +12,10 @@ from s2mosaic.geometry import (
     _rasterize_aoi_mask,
 )
 from s2mosaic.pipelines.bounds import _mask_resolution_for_request
-from s2mosaic.pipelines.bounds_scl import _pick_overview_level
+from s2mosaic.pipelines.bounds_scl import (
+    _pick_overview_level,
+    _read_band_at_target_window,
+)
 from s2mosaic.sources import MPC
 
 
@@ -36,6 +39,92 @@ def _fake_scl_fetch_full_window(item, source, bt, tc, mr, scene_window):
 class TestBoundsSclHelpers:
     def test_pick_overview_level_sorts_overview_factors(self):
         assert _pick_overview_level(10, 80, [16, 2, 4, 8]) == 3
+
+
+class TestReadBandAtTargetWindow:
+    """Boundary behaviour at the source-COG extent.
+
+    Regression: a previous same-CRS fast path used
+    ``src.read(window, out_shape=..., boundless=True, fill_value=0)``. When
+    the requested window extended west of the source extent, ``out_shape``
+    downsampling did not honour the boundless padding for the leftmost
+    output pixels — they came back with valid in-data values instead of 0.
+    That made SCL/OCM masks claim "valid" for out-of-source pixels while
+    the WarpedVRT-based band reader correctly returned nodata, producing
+    1-pixel dark stripes at MGRS overlap-zone edges in the final mosaic.
+    """
+
+    @staticmethod
+    def _write_source(tmp_path, *, src_minx, src_maxy, native_res, size, fill):
+        """Write a tiny single-band COG-like GeoTIFF filled with ``fill``."""
+        import rasterio as rio
+        from rasterio.transform import Affine
+
+        path = tmp_path / "src.tif"
+        transform = Affine(native_res, 0, src_minx, 0, -native_res, src_maxy)
+        profile = {
+            "driver": "GTiff",
+            "dtype": "uint8",
+            "count": 1,
+            "width": size,
+            "height": size,
+            "crs": "EPSG:32750",
+            "transform": transform,
+        }
+        with rio.open(path, "w", **profile) as dst:
+            dst.write(np.full((size, size), fill, dtype=np.uint8), 1)
+        return path
+
+    def test_pixels_west_of_source_return_zero(self, tmp_path):
+        """Output pixel whose centre is west of source must be 0.
+
+        Uses a *fractional* source col_off — the failure mode in production
+        only appears when the target grid origin is misaligned to the source
+        pixel grid. Integer-aligned offsets accidentally hide the bug.
+        """
+        from rasterio.crs import CRS
+
+        from s2mosaic.helpers import get_rasterio_resampling
+
+        # Source: UTM x ∈ [100_000, 102_000) at 20 m native.
+        src_path = self._write_source(
+            tmp_path,
+            src_minx=100_000.0,
+            src_maxy=200_000.0,
+            native_res=20.0,
+            size=100,
+            fill=5,
+        )
+
+        # Target grid at 60 m starting at x = 99_953.36 so source col_off is
+        # the fractional value (-2.332) that triggered the production bug.
+        # Output pixel 0 covers x ∈ [99_953.36, 100_013.36) — centre 99_983.36
+        # is *outside* source (west of 100_000); pixel 1 onward is inside.
+        target_minx = 99_953.36
+        target_res = 60.0
+        target_width = 6
+        target_height = 10
+        read_bounds = (
+            target_minx,
+            200_000.0 - target_height * target_res,
+            target_minx + target_width * target_res,
+            200_000.0,
+        )
+        arr = _read_band_at_target_window(
+            str(src_path),
+            band_idx=1,
+            read_bounds=read_bounds,
+            target_crs_obj=CRS.from_epsg(32750),
+            target_width=target_width,
+            target_height=target_height,
+            rio_resampling=get_rasterio_resampling("nearest"),
+        )
+
+        assert arr.shape == (target_height, target_width)
+        # Leftmost output pixel's centre is west of source — must be nodata.
+        np.testing.assert_array_equal(arr[:, 0], 0)
+        # Inside columns must carry the source fill.
+        np.testing.assert_array_equal(arr[:, 1:], 5)
 
 
 class TestBoundsMaskResolution:

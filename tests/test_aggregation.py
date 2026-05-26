@@ -59,6 +59,137 @@ class TestRunTileAggregation:
 
         np.testing.assert_allclose(out, 20.0)
 
+    def test_mean_ignores_all_zero_multi_band_source_pixels(self):
+        scenes = np.stack(
+            [
+                np.full((3, self.H, self.W), 0, dtype=np.uint16),
+                np.full((3, self.H, self.W), 30, dtype=np.uint16),
+            ],
+            axis=0,
+        )
+        scenes[0, :, :, 1:] = 10
+        masks = [
+            np.ones((self.H, self.W), dtype=bool),
+            np.ones((self.H, self.W), dtype=bool),
+        ]
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=self._read_fn_for(scenes),
+            bands_count=3,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            mosaic_method="mean",
+            percentile=None,
+            tile_size=3,
+            tile_workers=1,
+        )
+
+        expected = np.full((3, self.H, self.W), 20, dtype=np.uint16)
+        expected[:, :, 0] = 30
+        np.testing.assert_array_equal(out, expected)
+
+    def test_mean_max_observations_does_not_count_all_zero_multi_band_pixels(self):
+        scenes = np.stack(
+            [
+                np.zeros((3, self.H, self.W), dtype=np.uint16),
+                np.full((3, self.H, self.W), 20, dtype=np.uint16),
+                np.full((3, self.H, self.W), 40, dtype=np.uint16),
+            ],
+            axis=0,
+        )
+        masks = [
+            np.ones((self.H, self.W), dtype=bool),
+            np.ones((self.H, self.W), dtype=bool),
+            np.ones((self.H, self.W), dtype=bool),
+        ]
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=self._read_fn_for(scenes),
+            bands_count=3,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            mosaic_method="mean",
+            percentile=None,
+            tile_size=3,
+            tile_workers=1,
+            max_observations=2,
+        )
+
+        np.testing.assert_array_equal(out, np.full((3, self.H, self.W), 30))
+
+    def test_mean_can_append_observation_count_band(self):
+        scenes = np.stack(
+            [
+                np.full((1, self.H, self.W), 10, dtype=np.uint16),
+                np.full((1, self.H, self.W), 30, dtype=np.uint16),
+            ],
+            axis=0,
+        )
+        masks = [
+            np.ones((self.H, self.W), dtype=bool),
+            np.ones((self.H, self.W), dtype=bool),
+        ]
+        masks[0][0, 0] = False
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=self._read_fn_for(scenes),
+            bands_count=1,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            mosaic_method="mean",
+            percentile=None,
+            tile_size=3,
+            tile_workers=1,
+            include_observation_count=True,
+        )
+
+        expected_value = np.full((self.H, self.W), 20, dtype=np.uint16)
+        expected_value[0, 0] = 30
+        expected_count = np.full((self.H, self.W), 2, dtype=np.uint16)
+        expected_count[0, 0] = 1
+        assert out.shape == (2, self.H, self.W)
+        np.testing.assert_array_equal(out[0], expected_value)
+        np.testing.assert_array_equal(out[1], expected_count)
+
+    def test_visual_observation_count_uses_uint16_output(self):
+        scenes = np.stack(
+            [
+                np.full((3, self.H, self.W), 10, dtype=np.uint8),
+                np.full((3, self.H, self.W), 30, dtype=np.uint8),
+            ],
+            axis=0,
+        )
+        masks = [
+            np.ones((self.H, self.W), dtype=bool),
+            np.ones((self.H, self.W), dtype=bool),
+        ]
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=self._read_fn_for(scenes),
+            bands_count=3,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            mosaic_method="mean",
+            percentile=None,
+            tile_size=3,
+            tile_workers=1,
+            out_dtype=np.dtype(np.uint8),
+            include_observation_count=True,
+        )
+
+        assert out.dtype == np.uint16
+        assert out.shape == (4, self.H, self.W)
+        np.testing.assert_array_equal(out[:3], np.full((3, self.H, self.W), 20))
+        np.testing.assert_array_equal(out[3], np.full((self.H, self.W), 2))
+
     def test_first_picks_first_valid_pixel(self):
         scenes = np.stack(
             [
@@ -89,6 +220,34 @@ class TestRunTileAggregation:
 
         np.testing.assert_allclose(out, 20.0)
 
+    def test_first_skips_all_zero_multi_band_source_pixels(self):
+        scenes = np.stack(
+            [
+                np.zeros((3, self.H, self.W), dtype=np.uint16),
+                np.full((3, self.H, self.W), 20, dtype=np.uint16),
+            ],
+            axis=0,
+        )
+        masks = [
+            np.ones((self.H, self.W), dtype=bool),
+            np.ones((self.H, self.W), dtype=bool),
+        ]
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=self._read_fn_for(scenes),
+            bands_count=3,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            mosaic_method="first",
+            percentile=None,
+            tile_size=4,
+            tile_workers=1,
+        )
+
+        np.testing.assert_array_equal(out, np.full((3, self.H, self.W), 20))
+
     def test_percentile_skips_nan_masked_pixels(self):
         scenes = np.stack(
             [
@@ -116,6 +275,37 @@ class TestRunTileAggregation:
         )
 
         np.testing.assert_allclose(out, 15.0)
+
+    def test_percentile_ignores_all_zero_multi_band_source_pixels(self):
+        scenes = np.stack(
+            [
+                np.full((3, self.H, self.W), 0, dtype=np.uint16),
+                np.full((3, self.H, self.W), 15, dtype=np.uint16),
+            ],
+            axis=0,
+        )
+        scenes[0, :, :, 1:] = 5
+        masks = [
+            np.ones((self.H, self.W), dtype=bool),
+            np.ones((self.H, self.W), dtype=bool),
+        ]
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=self._read_fn_for(scenes),
+            bands_count=3,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            mosaic_method="percentile",
+            percentile=50.0,
+            tile_size=2,
+            tile_workers=1,
+        )
+
+        expected = np.full((3, self.H, self.W), 10, dtype=np.uint16)
+        expected[:, :, 0] = 15
+        np.testing.assert_array_equal(out, expected)
 
     def test_adaptive_tile_specs_skip_empty_and_split_sparse_tiles(self):
         mask = np.zeros((2048, 2048), dtype=bool)
@@ -629,6 +819,54 @@ class TestRunTileAggregation:
             assert src.descriptions == ("B04",)
             np.testing.assert_array_equal(
                 src.read(1), np.full((self.H, self.W), 20, dtype=np.uint16)
+            )
+
+    def test_write_tile_aggregation_geotiff_appends_observation_count(self, tmp_path):
+        def read_fn(scene_idx, band_idx, spec):
+            _, _, h, w = spec
+            return np.full((h, w), 10 + scene_idx * 20, dtype=np.uint16)
+
+        export_path = tmp_path / "with-count.tif"
+
+        write_tile_aggregation_geotiff(
+            export_path=export_path,
+            profile={
+                "driver": "GTiff",
+                "dtype": np.dtype(np.uint16),
+                "width": self.W,
+                "height": self.H,
+                "count": 1,
+                "crs": None,
+                "transform": from_origin(0, self.H, 1, 1),
+            },
+            bands=["B04"],
+            masks=[
+                np.ones((self.H, self.W), dtype=bool),
+                np.ones((self.H, self.W), dtype=bool),
+            ],
+            read_fn=read_fn,
+            bands_count=1,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            output_coverage_mask=None,
+            mosaic_method="mean",
+            percentile=None,
+            tile_size=3,
+            tile_workers=1,
+            out_dtype=np.dtype(np.uint16),
+            include_observation_count=True,
+        )
+
+        with rio.open(export_path) as src:
+            assert src.count == 2
+            assert src.dtypes == ("uint16", "uint16")
+            assert src.descriptions == ("B04", "Observation count")
+            np.testing.assert_array_equal(
+                src.read(1), np.full((self.H, self.W), 20, dtype=np.uint16)
+            )
+            np.testing.assert_array_equal(
+                src.read(2), np.full((self.H, self.W), 2, dtype=np.uint16)
             )
 
     def test_write_tile_aggregation_geotiff_commits_final_path_after_close(

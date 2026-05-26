@@ -26,6 +26,8 @@ All notable changes to this project will be documented in this file.
 - `adaptive_tiling` parameter on `mosaic()` (on by default). Splits sparse output tiles based on the actual cloud-valid contribution masks, so irregular AOIs and sparse scene coverage stop paying full-tile read cost for mostly-empty tiles.
 - `tile_workers` parameter on `mosaic()` for explicit control over the streaming-aggregation pool size. Defaults are tuned higher than CPU count (the work is I/O-bound on remote COG reads); raise for faster networks, lower if memory-constrained.
 - `apply_gdal_network_defaults()` is invoked at the top of `mosaic()` so HTTP/2, byte-range caching, and connect/read timeouts are applied to every worker thread (previously these were set via `rasterio.Env`, which is thread-local and never reached the pool workers used in the hot path).
+- `snap_to_source_grid` parameter on `mosaic()` (default `False`). When `True`, the bounds/AOI output extent is expanded outward to whole multiples of `resolution` in the target CRS. Repeat runs over the same area produce identical grids (useful for compositing and change detection), and at `resolution=10` the output aligns with the native Sentinel-2 10m grid so reads become true zero-cost copies instead of sub-pixel resamples. The output may grow by up to one pixel on each side; AOI polygons are still respected (pixels outside the polygon write nodata).
+- `include_observation_count` parameter on `mosaic()` (default `False`). When enabled, outputs append a final `Observation count` band containing the number of valid source scenes that contributed to each pixel. Works for both returned arrays and GeoTIFF exports. Visual RGB outputs are promoted to `uint16` when this flag is enabled so the count band is not limited to 255; RGB values remain in the usual 0–255 range.
 
 
 ### Changed
@@ -56,6 +58,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - Streaming-pipeline robustness fixes around partial scene failures, mask/scene alignment, and propagation of non-fetch errors out of the grid pipeline (so programming bugs surface as real tracebacks instead of being swallowed as "All scenes failed to fetch masks").
+- Bounds/AOI visual mosaics now treat all-zero multi-band source reads as source nodata during tile aggregation. This prevents one-pixel black strips at some Sentinel-2 overlap edges where the SCL/footprint mask can mark a pixel valid but the warped TCI read falls just outside the real source data. The fix also applies when `max_observations` is set, so zero edge pixels are not counted toward the per-pixel observation cap.
+- Bounds/AOI per-scene mask reads now use `WarpedVRT` for both same-CRS and cross-CRS sources so out-of-source pixels return nodata consistently with the band reader. The previous same-CRS fast path (`src.read(window, out_shape, boundless=True)`) returned in-data values for output pixels whose centres fell west of the source extent when the target grid origin was fractionally misaligned to the source pixel grid — making SCL/OCM masks claim "valid" for pixels the visual band correctly reported as nodata. With `max_observations` set, this mismatch could exhaust the per-pixel observation budget on zero-data scenes and starve later valid scenes, leaving 1-pixel dark vertical stripes at MGRS column boundaries in wide-area mosaics.
 
 
 ## [1.1.0] - 2026-01-22

@@ -46,6 +46,21 @@ def _empty_tile(
     return np.zeros((bands_count, h, w), dtype=out_dtype)
 
 
+def _empty_output_tile(
+    spec: Tuple[int, int, int, int],
+    bands_count: int,
+    out_dtype: "np.dtype[Any]",
+    include_observation_count: bool,
+) -> npt.NDArray[Any]:
+    dtype = (
+        np.promote_types(out_dtype, np.dtype(np.uint16))
+        if include_observation_count
+        else out_dtype
+    )
+    count = bands_count + (1 if include_observation_count else 0)
+    return _empty_tile(spec, count, dtype)
+
+
 def _read_scene_bands(
     read_fn: ReaderFn,
     scene_idx: int,
@@ -67,6 +82,30 @@ def _read_scene_bands(
     return list(
         band_executor.map(lambda j: read_fn(scene_idx, j, spec), range(bands_count))
     )
+
+
+def _source_valid_from_bands(
+    band_data: List[npt.NDArray[Any]],
+) -> Optional[npt.NDArray[np.bool_]]:
+    """Pixels with at least one non-zero band in a multi-band source read."""
+    if len(band_data) <= 1:
+        return None
+    valid = np.zeros(band_data[0].shape, dtype=bool)
+    for data in band_data:
+        valid |= data != 0
+    return valid
+
+
+def _append_observation_count(
+    tile_data: npt.NDArray[Any],
+    count: npt.NDArray[Any],
+) -> npt.NDArray[Any]:
+    """Append a uint16-safe observation-count band to a tile result."""
+    out_dtype = np.promote_types(tile_data.dtype, np.dtype(np.uint16))
+    out = np.empty((tile_data.shape[0] + 1, *tile_data.shape[1:]), dtype=out_dtype)
+    out[: tile_data.shape[0]] = tile_data.astype(out_dtype, copy=False)
+    out[-1] = count.astype(out_dtype, copy=False)
+    return out
 
 
 def _finalise_tile(
@@ -164,6 +203,7 @@ def _copy_single_scene_tile(
     bands_count: int,
     out_dtype: "np.dtype[Any]",
     band_executor: Optional[Executor] = None,
+    include_observation_count: bool = False,
 ) -> npt.NDArray[Any]:
     """Copy one contributing scene into an output tile, zeroing masked pixels."""
     _, _, h, w = spec
@@ -172,8 +212,18 @@ def _copy_single_scene_tile(
     if not pick.any():
         return out
     band_data = _read_scene_bands(read_fn, scene_idx, bands_count, spec, band_executor)
+    source_valid = _source_valid_from_bands(band_data)
+    if source_valid is not None:
+        pick = pick & source_valid
+        if not pick.any():
+            count = np.zeros((h, w), dtype=np.uint16)
+            if include_observation_count:
+                return _append_observation_count(out, count)
+            return out
     for j, data in enumerate(band_data):
         np.copyto(out[j], data, where=pick, casting="unsafe")
+    if include_observation_count:
+        return _append_observation_count(out, pick.astype(np.uint16))
     return out
 
 
@@ -240,18 +290,30 @@ def tile_percentile(
     max_observations: Optional[int],
     out_dtype: "np.dtype[Any]",
     band_executor: Optional[Executor] = None,
+    include_observation_count: bool = False,
 ) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
     r, c, h, w = spec
     tile_coverage = coverage_mask[r : r + h, c : c + w]
     if not tile_coverage.any():
-        return spec, _empty_tile(spec, bands_count, out_dtype)
+        return spec, _empty_output_tile(
+            spec, bands_count, out_dtype, include_observation_count
+        )
 
-    contributing = _contributing_scene_indices(
-        spec, masks, tile_coverage, min_observations, max_observations
-    )
+    if bands_count > 1 and (
+        min_observations is not None or max_observations is not None
+    ):
+        contributing = _contributing_scene_indices(
+            spec, masks, tile_coverage, None, None
+        )
+    else:
+        contributing = _contributing_scene_indices(
+            spec, masks, tile_coverage, min_observations, max_observations
+        )
 
     if not contributing:
-        return spec, _empty_tile(spec, bands_count, out_dtype)
+        return spec, _empty_output_tile(
+            spec, bands_count, out_dtype, include_observation_count
+        )
 
     if len(contributing) == 1:
         scene_idx = contributing[0]
@@ -268,9 +330,11 @@ def tile_percentile(
             bands_count,
             out_dtype,
             band_executor,
+            include_observation_count,
         )
 
-    stack = np.empty((len(contributing), bands_count, h, w), dtype=np.float32)
+    stack = np.full((len(contributing), bands_count, h, w), np.nan, dtype=np.float32)
+    observation_count = np.zeros((h, w), dtype=np.uint16)
     pixel_count = (
         np.zeros((h, w), dtype=np.uint16) if max_observations is not None else None
     )
@@ -286,15 +350,39 @@ def tile_percentile(
         band_data = _read_scene_bands(
             read_fn, scene_idx, bands_count, spec, band_executor
         )
+        source_valid = _source_valid_from_bands(band_data)
+        if source_valid is not None:
+            pick = pick & source_valid
+            if not pick.any():
+                stack[k].fill(np.nan)
+                continue
         for j, data in enumerate(band_data):
             stack[k, j].fill(np.nan)
             np.copyto(stack[k, j], data, where=pick, casting="unsafe")
+        np.add(observation_count, pick, out=observation_count, casting="unsafe")
         if pixel_count is not None:
             np.add(pixel_count, pick, out=pixel_count, casting="unsafe")
+        if (
+            bands_count > 1
+            and min_observations is not None
+            and max_observations is None
+            and ((observation_count >= min_observations) | ~tile_coverage).all()
+        ):
+            break
+        if (
+            bands_count > 1
+            and max_observations is not None
+            and pixel_count is not None
+            and ((pixel_count >= max_observations) | ~tile_coverage).all()
+        ):
+            break
 
     res = _nanquantile_axis0(stack, percentile / 100.0)
     res = np.nan_to_num(res, nan=0.0)
-    return spec, _finalise_tile(res, out_dtype)
+    tile = _finalise_tile(res, out_dtype)
+    if include_observation_count:
+        tile = _append_observation_count(tile, observation_count)
+    return spec, tile
 
 
 def tile_mean(
@@ -307,18 +395,31 @@ def tile_mean(
     max_observations: Optional[int],
     out_dtype: "np.dtype[Any]",
     band_executor: Optional[Executor] = None,
+    include_observation_count: bool = False,
 ) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
     r, c, h, w = spec
     tile_coverage = coverage_mask[r : r + h, c : c + w]
     if not tile_coverage.any():
-        return spec, _empty_tile(spec, bands_count, out_dtype)
+        return spec, _empty_output_tile(
+            spec, bands_count, out_dtype, include_observation_count
+        )
 
-    contributing = _contributing_scene_indices(
-        spec, masks, tile_coverage, min_observations, max_observations
+    source_valid_can_change_observations = bands_count > 1 and (
+        min_observations is not None or max_observations is not None
     )
+    if source_valid_can_change_observations:
+        contributing = _contributing_scene_indices(
+            spec, masks, tile_coverage, None, None
+        )
+    else:
+        contributing = _contributing_scene_indices(
+            spec, masks, tile_coverage, min_observations, max_observations
+        )
 
     if not contributing:
-        return spec, _empty_tile(spec, bands_count, out_dtype)
+        return spec, _empty_output_tile(
+            spec, bands_count, out_dtype, include_observation_count
+        )
 
     if len(contributing) == 1:
         scene_idx = contributing[0]
@@ -335,6 +436,7 @@ def tile_mean(
             bands_count,
             out_dtype,
             band_executor,
+            include_observation_count,
         )
 
     sum_block = np.zeros((bands_count, h, w), dtype=np.float32)
@@ -353,11 +455,32 @@ def tile_mean(
         band_data = _read_scene_bands(
             read_fn, scene_idx, bands_count, spec, band_executor
         )
+        source_valid = _source_valid_from_bands(band_data)
+        if source_valid is not None:
+            pick = pick & source_valid
+            if not pick.any():
+                continue
         for j, data in enumerate(band_data):
             np.add(sum_block[j], data, out=sum_block[j], where=pick)
         np.add(count, pick, out=count, casting="unsafe")
+        if (
+            source_valid_can_change_observations
+            and min_observations is not None
+            and max_observations is None
+            and ((count >= min_observations) | ~tile_coverage).all()
+        ):
+            break
+        if (
+            source_valid_can_change_observations
+            and max_observations is not None
+            and ((count >= max_observations) | ~tile_coverage).all()
+        ):
+            break
     result = np.divide(sum_block, count, out=np.zeros_like(sum_block), where=count != 0)
-    return spec, _finalise_tile(result, out_dtype)
+    tile = _finalise_tile(result, out_dtype)
+    if include_observation_count:
+        tile = _append_observation_count(tile, count)
+    return spec, tile
 
 
 def tile_first(
@@ -368,11 +491,14 @@ def tile_first(
     coverage_mask: npt.NDArray[Any],
     out_dtype: "np.dtype[Any]",
     band_executor: Optional[Executor] = None,
+    include_observation_count: bool = False,
 ) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
     r, c, h, w = spec
     tile_coverage = coverage_mask[r : r + h, c : c + w]
     if not tile_coverage.any():
-        return spec, _empty_tile(spec, bands_count, out_dtype)
+        return spec, _empty_output_tile(
+            spec, bands_count, out_dtype, include_observation_count
+        )
     # FIRST copies source pixels straight through, so we can accumulate
     # directly in the output dtype — no float32 working buffer needed.
     result = np.zeros((bands_count, h, w), dtype=out_dtype)
@@ -387,11 +513,18 @@ def tile_first(
         band_data = _read_scene_bands(
             read_fn, scene_idx, bands_count, spec, band_executor
         )
+        source_valid = _source_valid_from_bands(band_data)
+        if source_valid is not None:
+            new_pixels = new_pixels & source_valid
+            if not new_pixels.any():
+                continue
         for j, data in enumerate(band_data):
             result[j][new_pixels] = data[new_pixels]
         filled |= new_pixels
         if (filled | ~tile_coverage).all():
             break
+    if include_observation_count:
+        result = _append_observation_count(result, filled.astype(np.uint16))
     return spec, result
 
 
@@ -508,6 +641,7 @@ def run_tile_aggregation(
     tile_specs: Optional[List[Tuple[int, int, int, int]]] = None,
     show_progress: bool = False,
     min_tile_size: int = DEFAULT_ADAPTIVE_TILE_MIN_SIZE,
+    include_observation_count: bool = False,
 ) -> npt.NDArray[Any]:
     """Generic streaming aggregation. Called by both grid_id and bounds modes.
 
@@ -515,8 +649,19 @@ def run_tile_aggregation(
     spectral, ``uint8`` for visual). Tile workers cast to it before
     returning, so the output buffer can be allocated as the final dtype —
     no intermediate float32 array the size of the whole mosaic.
+
+    When ``include_observation_count`` is true, the returned array has one
+    extra final band containing per-pixel valid-observation counts. The output
+    dtype is promoted to at least ``uint16`` so visual RGB mosaics can carry
+    counts above 255 without clipping.
     """
-    out = np.zeros((bands_count, height, width), dtype=out_dtype)
+    output_bands_count = bands_count + (1 if include_observation_count else 0)
+    output_dtype = (
+        np.promote_types(out_dtype, np.dtype(np.uint16))
+        if include_observation_count
+        else out_dtype
+    )
+    out = np.zeros((output_bands_count, height, width), dtype=output_dtype)
     for spec, tile_data in iter_tile_aggregation(
         masks=masks,
         read_fn=read_fn,
@@ -535,6 +680,7 @@ def run_tile_aggregation(
         tile_specs=tile_specs,
         show_progress=show_progress,
         min_tile_size=min_tile_size,
+        include_observation_count=include_observation_count,
     ):
         r, c, h, w = spec
         out[:, r : r + h, c : c + w] = tile_data
@@ -559,8 +705,13 @@ def iter_tile_aggregation(
     tile_specs: Optional[List[Tuple[int, int, int, int]]] = None,
     show_progress: bool = False,
     min_tile_size: int = DEFAULT_ADAPTIVE_TILE_MIN_SIZE,
+    include_observation_count: bool = False,
 ) -> Iterator[Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]]:
-    """Yield aggregated output tiles without allocating the full mosaic."""
+    """Yield aggregated output tiles without allocating the full mosaic.
+
+    If ``include_observation_count`` is true, each yielded tile includes one
+    extra final band containing per-pixel valid-observation counts.
+    """
     if tile_specs is not None:
         specs = tile_specs
     elif adaptive_tiling:
@@ -635,6 +786,7 @@ def iter_tile_aggregation(
                 max_observations,
                 out_dtype,
                 band_executor,
+                include_observation_count,
             )
 
     elif mosaic_method == MOSAIC_MEAN:
@@ -652,6 +804,7 @@ def iter_tile_aggregation(
                 max_observations,
                 out_dtype,
                 band_executor,
+                include_observation_count,
             )
 
     else:
@@ -667,6 +820,7 @@ def iter_tile_aggregation(
                 coverage_mask,
                 out_dtype,
                 band_executor,
+                include_observation_count,
             )
 
     band_executor_cm: Optional[ThreadPoolExecutor] = None
@@ -725,16 +879,30 @@ def write_tile_aggregation_geotiff(
     tile_specs: Optional[List[Tuple[int, int, int, int]]] = None,
     show_progress: bool = False,
     min_tile_size: int = DEFAULT_ADAPTIVE_TILE_MIN_SIZE,
+    include_observation_count: bool = False,
 ) -> Path:
-    """Aggregate tiles and write them directly into a GeoTIFF."""
+    """Aggregate tiles and write them directly into a GeoTIFF.
+
+    When ``include_observation_count`` is true, append an ``Observation count``
+    band after the requested image bands. The GeoTIFF dtype is promoted to at
+    least ``uint16`` so visual RGB exports can carry counts above 255.
+    """
     band_descriptions, nodata_value = output_band_metadata(bands)
+    if include_observation_count:
+        band_descriptions = [*band_descriptions, "Observation count"]
+    output_bands_count = bands_count + (1 if include_observation_count else 0)
+    output_dtype = (
+        np.promote_types(out_dtype, np.dtype(np.uint16))
+        if include_observation_count
+        else out_dtype
+    )
     write_profile = profile.copy()
     write_profile.update(
         driver="GTiff",
         width=width,
         height=height,
-        count=bands_count,
-        dtype=out_dtype,
+        count=output_bands_count,
+        dtype=output_dtype,
         nodata=nodata_value,
         compress="lzw",
         BIGTIFF="IF_SAFER",
@@ -769,6 +937,7 @@ def write_tile_aggregation_geotiff(
                 tile_specs=tile_specs,
                 show_progress=show_progress,
                 min_tile_size=min_tile_size,
+                include_observation_count=include_observation_count,
             ):
                 r, c, h, w = spec
                 if output_coverage_mask is not None:

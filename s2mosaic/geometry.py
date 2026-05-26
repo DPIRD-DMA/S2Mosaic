@@ -67,6 +67,27 @@ def _target_grid(
     return transform, width, height, target_crs_obj
 
 
+def _snap_bounds_to_grid(bounds_target: Bbox, resolution: int) -> Bbox:
+    """Expand ``bounds_target`` outward to whole-``resolution`` multiples.
+
+    Anchors the output grid to integer multiples of ``resolution`` in the
+    target CRS so repeat runs over the same area produce identical grids and,
+    at ``resolution=10``, align with the native Sentinel-2 source grid.
+    Always expands (never shrinks) the requested extent.
+    """
+    minx, miny, maxx, maxy = bounds_target
+    minx_snap = np.floor(minx / resolution) * resolution
+    miny_snap = np.floor(miny / resolution) * resolution
+    maxx_snap = np.ceil(maxx / resolution) * resolution
+    maxy_snap = np.ceil(maxy / resolution) * resolution
+    return (
+        float(minx_snap),
+        float(miny_snap),
+        float(maxx_snap),
+        float(maxy_snap),
+    )
+
+
 def _rasterize_aoi_mask(
     aoi_target: Aoi,
     bounds_target: Bbox,

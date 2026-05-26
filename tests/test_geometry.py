@@ -1,6 +1,8 @@
 import pytest
 
+from s2mosaic.config import MosaicRequest
 from s2mosaic.geometry import (
+    _snap_bounds_to_grid,
     _target_grid,
     pick_utm_epsg,
     reproject_bbox,
@@ -54,6 +56,77 @@ class TestTargetGrid:
 
         assert (width, height) == (1, 1)
         assert crs.to_epsg() == 32750
+
+
+class TestSnapBoundsToGrid:
+    @pytest.mark.parametrize(
+        "bounds, resolution, expected",
+        [
+            # Already aligned at 10m → unchanged.
+            (
+                (390_000.0, 6_460_000.0, 390_100.0, 6_460_100.0),
+                10,
+                (390_000.0, 6_460_000.0, 390_100.0, 6_460_100.0),
+            ),
+            # Fractional bounds at 10m → expand outward.
+            (
+                (390_003.7, 6_460_002.1, 390_096.4, 6_460_098.9),
+                10,
+                (390_000.0, 6_460_000.0, 390_100.0, 6_460_100.0),
+            ),
+            # Coarser resolution snaps to multiples of 30m.
+            (
+                (390_001.0, 6_460_001.0, 390_059.0, 6_460_059.0),
+                30,
+                (390_000.0, 6_459_990.0, 390_060.0, 6_460_080.0),
+            ),
+        ],
+    )
+    def test_snap_expands_outward_to_resolution_multiples(
+        self, bounds, resolution, expected
+    ):
+        assert _snap_bounds_to_grid(bounds, resolution) == expected
+
+    def test_snap_then_target_grid_yields_aligned_transform(self):
+        # A fractional UTM bbox of the kind that drops out of a lon/lat
+        # reproject. After snap, the transform origin must be a clean
+        # multiple of resolution and width/height an integer multiple too.
+        raw_utm_bbox = (390_003.7, 6_460_002.1, 390_096.4, 6_460_098.9)
+        resolution = 10
+
+        snapped = _snap_bounds_to_grid(raw_utm_bbox, resolution)
+        transform, width, height, _ = _target_grid(snapped, resolution, 32750)
+
+        assert transform.c % resolution == 0
+        assert transform.f % resolution == 0
+        assert (snapped[2] - snapped[0]) % resolution == 0
+        assert (snapped[3] - snapped[1]) % resolution == 0
+        assert width == int((snapped[2] - snapped[0]) / resolution)
+        assert height == int((snapped[3] - snapped[1]) / resolution)
+
+    def test_snap_never_shrinks_extent(self):
+        raw = (390_003.7, 6_460_002.1, 390_096.4, 6_460_098.9)
+
+        snapped = _snap_bounds_to_grid(raw, 10)
+
+        assert snapped[0] <= raw[0]
+        assert snapped[1] <= raw[1]
+        assert snapped[2] >= raw[2]
+        assert snapped[3] >= raw[3]
+
+
+class TestSnapToSourceGridRequest:
+    def test_default_is_false(self):
+        request = MosaicRequest(bounds=(0, 0, 100, 100), start_year=2023)
+
+        assert request.snap_to_source_grid is False
+
+    def test_can_be_enabled(self):
+        request = MosaicRequest(
+            bounds=(0, 0, 100, 100), start_year=2023, snap_to_source_grid=True
+        )
+
+        assert request.snap_to_source_grid is True
 
 
 class TestReprojectBbox:

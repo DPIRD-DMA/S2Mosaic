@@ -129,6 +129,7 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 - `percentile` (`None`): percentile to compute when `mosaic_method="percentile"` (0–100).
 - `min_observations` (`None`): minimum valid observations to read per pixel for `"mean"` and `"percentile"`. When set, tile aggregation stops reading later scenes once every coverable pixel has reached the target. This is not an output quality guarantee; pixels that cannot reach the target use whatever observations are available.
 - `max_observations` (`None`): per-pixel cap on valid observations for `"mean"` and `"percentile"`. Each pixel accepts at most this many scenes (in `scene_order`); later valid scenes are dropped for that pixel. Combined with `scene_order="oldest"` or `"newest"` this biases the mosaic toward early or late dates. Must be `>= min_observations` when both are set; ignored by `"first"` (effectively N=1).
+- `include_observation_count` (`False`): append a final `Observation count` band with the number of valid source scenes that contributed to each output pixel. Works for both returned arrays and exported GeoTIFFs. For `bands=["visual"]`, enabling this writes/returns `uint16` output so the count band is not limited to 255; the RGB values remain in their usual 0–255 range.
 - `tile_workers` (`8`): number of output tiles to aggregate concurrently. Tuned higher than CPU count because the work is I/O-bound on remote COG reads. Raise for faster networks; lower if memory or simultaneous-connection limits matter more than throughput.
 - `adaptive_tiling` (`True`): split sparse output tiles based on the actual cloud-valid contribution masks. This reduces wasted reads for irregular AOIs, sparse coverage, and heavily masked scenes. Set to `False` to use fixed-size output tiles.
 
@@ -143,6 +144,7 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 - `output_crs` (`None`): EPSG of the output. In bounds/AOI mode, auto-picked as the UTM zone containing the AOI centroid if omitted. Ignored in grid mode (the tile's native UTM zone is used).
 - `resolution` (`10`): output pixel size in metres. At lower resolutions rasterio reads from COG overviews — much less data over the wire.
 - `resampling_method` (`"nearest"`): how the source is resampled to the output grid. Also accepts `"bilinear"`, `"cubic"`, `"average"`, `"lanczos"`.
+- `snap_to_source_grid` (`False`): bounds/AOI mode only. When `True`, expand the output extent outward to whole multiples of `resolution` in the target CRS. This makes repeat runs over the same area produce identical grids, and at `resolution=10` aligns the output to the native Sentinel-2 pixel grid — source COG reads become zero-cost copies rather than sub-pixel resamples. The output may grow by up to one pixel on each side; pixels outside an `aoi` polygon are still written as nodata. For repeatable cross-run alignment, also set `output_crs` explicitly so the auto-picked UTM zone can't shift between runs.
 
 **Scene selection**
 
@@ -165,6 +167,24 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 **Diagnostics**
 
 - `show_progress` (`False`): show tqdm progress bars for the cloud-mask streaming and tile-aggregation phases. Useful in notebooks; leave off for headless/batch runs.
+- `include_observation_count` (`False`): include a per-pixel observation-count band for diagnosing scene coverage, cloud-mask gaps, and overlap-edge artefacts.
+
+Example:
+
+```python
+array, profile = mosaic(
+    bounds=(115.83, -31.97, 115.91, -31.94),
+    start_year=2023,
+    duration_months=2,
+    bands=["visual"],
+    mosaic_method="mean",
+    include_observation_count=True,
+)
+
+rgb = array[:3]
+observation_count = array[3]
+print(array.shape)  # (4, height, width): Red, Green, Blue, Observation count
+```
 
 **Bounds/AOI-mode-specific options**
 

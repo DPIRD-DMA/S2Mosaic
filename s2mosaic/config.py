@@ -77,6 +77,9 @@ class MosaicRequest:
     ``aoi`` stream intersecting scenes onto a common output grid. Call
     :meth:`normalized` before :meth:`validate` so optional public inputs such as
     ``bands`` and ``additional_query`` are expanded to concrete values.
+
+    Set ``include_observation_count`` to append a final output band containing
+    the number of valid source observations contributing to each pixel.
     """
 
     grid_id: Optional[str] = None
@@ -92,16 +95,11 @@ class MosaicRequest:
     bands: Optional[List[str]] = None
     mosaic_method: str = MOSAIC_MEAN
     percentile: Optional[float] = None
-    output_dir: Optional[Union[Path, str]] = None
-    output_path: Optional[Union[Path, str]] = None
-    overwrite: bool = True
-    output_crs: Optional[int] = None
-    resolution: int = 10
-    resampling_method: str = "nearest"
-    additional_query: Optional[Dict[str, Any]] = None
-    source: str = SOURCE_MPC
     min_observations: Optional[int] = None
     max_observations: Optional[int] = None
+    include_observation_count: bool = False
+    source: str = SOURCE_MPC
+    additional_query: Optional[Dict[str, Any]] = None
     min_coverage_fraction: Optional[float] = None
     ignore_duplicate_items: bool = True
     scene_order: str = SCENE_ORDER_VALID_DATA
@@ -109,6 +107,13 @@ class MosaicRequest:
     cloud_mask: str = CLOUD_MASK_OCM
     ocm_batch_size: int = 1
     ocm_inference_dtype: str = "fp16"
+    output_crs: Optional[int] = None
+    resolution: int = 10
+    resampling_method: str = "nearest"
+    snap_to_source_grid: bool = False
+    output_dir: Optional[Union[Path, str]] = None
+    output_path: Optional[Union[Path, str]] = None
+    overwrite: bool = True
     tile_workers: Optional[int] = None
     adaptive_tiling: bool = True
     show_progress: bool = False
@@ -160,6 +165,7 @@ class MosaicRequest:
             adaptive_tiling=self.adaptive_tiling,
             min_coverage_fraction=self.min_coverage_fraction,
             source=self.source,
+            include_observation_count=self.include_observation_count,
         )
 
 
@@ -211,6 +217,7 @@ def validate_inputs(
     aoi: Optional[Polygon] = None,
     min_coverage_fraction: Optional[float] = None,
     source: str = SOURCE_MPC,
+    include_observation_count: bool = False,
 ) -> None:
     from .sources import VALID_SOURCES
 
@@ -303,6 +310,10 @@ def validate_inputs(
             )
     if not isinstance(adaptive_tiling, bool):
         raise ValueError(f"adaptive_tiling must be a bool, got {adaptive_tiling}")
+    if not isinstance(include_observation_count, bool):
+        raise ValueError(
+            f"include_observation_count must be a bool, got {include_observation_count}"
+        )
     for band in bands:
         if band not in VALID_BANDS:
             raise ValueError(

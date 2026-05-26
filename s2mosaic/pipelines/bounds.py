@@ -81,6 +81,7 @@ from ..geometry import (
     _rasterize_aoi_mask,
     _scene_window_from_geometry,
     _scene_window_in_target,
+    _snap_bounds_to_grid,
     _target_grid,
     _window_bounds_in_target,
     pick_utm_epsg,
@@ -623,6 +624,13 @@ def run_bounds_pipeline(
         if aoi_target is not None
         else reproject_bbox(bounds, request.input_crs, target_crs)
     )
+    if request.snap_to_source_grid:
+        bounds_target = _snap_bounds_to_grid(bounds_target, request.resolution)
+        logger.info(
+            "Snapped target bounds to %dm grid: %s",
+            request.resolution,
+            bounds_target,
+        )
 
     start_date, end_date = define_dates(
         request.start_year,
@@ -861,10 +869,14 @@ def run_bounds_pipeline(
     )
     profile: Dict[str, Any] = {
         "driver": "GTiff",
-        "dtype": np.dtype(np.uint8) if is_visual else np.dtype(np.uint16),
+        "dtype": (
+            np.dtype(np.uint16)
+            if request.include_observation_count
+            else (np.dtype(np.uint8) if is_visual else np.dtype(np.uint16))
+        ),
         "width": w,
         "height": h,
-        "count": n_bands,
+        "count": n_bands + (1 if request.include_observation_count else 0),
         "crs": CRS.from_epsg(target_crs),
         "transform": user_transform,
     }
@@ -916,6 +928,7 @@ def run_bounds_pipeline(
                 adaptive_tiling=adaptive_tiling,
                 show_progress=request.show_progress,
                 min_tile_size=min_tile_size,
+                include_observation_count=request.include_observation_count,
             )
             write_output_sidecar(export_path, sidecar_metadata)
             return result
@@ -937,6 +950,7 @@ def run_bounds_pipeline(
             adaptive_tiling=adaptive_tiling,
             show_progress=request.show_progress,
             min_tile_size=min_tile_size,
+            include_observation_count=request.include_observation_count,
         )
 
         return finalize_output(
@@ -945,6 +959,7 @@ def run_bounds_pipeline(
             bands=bands,
             coverage_mask=output_coverage_mask,
             export_path=export_path,
+            include_observation_count=request.include_observation_count,
         )
     finally:
         close = getattr(read_fn, "close", None)
