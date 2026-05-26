@@ -113,6 +113,37 @@ class TestExportPaths:
             source_name="MPC",
         )
 
+    def test_request_hash_includes_observation_count_flag(self):
+        start = date(2023, 6, 1)
+        end = date(2023, 6, 8)
+        base = MosaicRequest(
+            grid_id="50HMH",
+            start_year=2023,
+            duration_days=7,
+            bands=["B04"],
+        ).normalized()
+        with_count = MosaicRequest(
+            grid_id="50HMH",
+            start_year=2023,
+            duration_days=7,
+            bands=["B04"],
+            include_observation_count=True,
+        ).normalized()
+
+        assert output_request_hash(
+            base,
+            mode="grid",
+            start_date=start,
+            end_date=end,
+            source_name="MPC",
+        ) != output_request_hash(
+            with_count,
+            mode="grid",
+            start_date=start,
+            end_date=end,
+            source_name="MPC",
+        )
+
     def test_request_hash_ignores_non_output_fields(self, tmp_path):
         start = date(2023, 6, 1)
         end = date(2023, 6, 8)
@@ -255,6 +286,7 @@ class TestExportPaths:
         assert sidecar["mode"] == "grid"
         assert sidecar["request"]["grid_id"] == "50HMH"
         assert sidecar["request"]["bands"] == ["B04"]
+        assert sidecar["request"]["include_observation_count"] is False
 
     def test_output_sidecar_write_is_atomic_on_failure(self, monkeypatch, tmp_path):
         export_path = tmp_path / "mosaic.tif"
