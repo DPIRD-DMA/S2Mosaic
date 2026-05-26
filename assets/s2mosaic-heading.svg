@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 250" role="img" aria-label="S2Mosaic">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 250" role="img" aria-label="S2Mosaic">
   <title>S2Mosaic</title>
 
   <defs>
@@ -20,7 +20,7 @@
     <clipPath id="clipS2">
       <text x="30" y="195"
             font-family="'Helvetica Neue', Helvetica, Arial, sans-serif"
-            font-size="220" font-weight="900" letter-spacing="-6">S2</text>
+            font-size="220" font-weight="900" letter-spacing="-3">S2</text>
     </clipPath>
   </defs>
 
@@ -30,13 +30,13 @@
   <!-- Black outline on S2 -->
   <text x="30" y="195"
         font-family="'Helvetica Neue', Helvetica, Arial, sans-serif"
-        font-size="220" font-weight="900" letter-spacing="-6"
-        fill="none" stroke="#000" stroke-width="3">S2</text>
+        font-size="220" font-weight="900" letter-spacing="-3"
+        fill="none" stroke="#000" stroke-width="9">S2</text>
 
   <!-- "Mosaic" white fill with black outline -->
   <text x="305" y="195"
         font-family="'Helvetica Neue', Helvetica, Arial, sans-serif"
-        font-size="220" font-weight="400" letter-spacing="-4"
-        fill="#ffffff" stroke="#000" stroke-width="3"
+        font-size="220" font-weight="400" letter-spacing="4"
+        fill="#ffffff" stroke="#000" stroke-width="18"
         paint-order="stroke">Mosaic</text>
 </svg>
