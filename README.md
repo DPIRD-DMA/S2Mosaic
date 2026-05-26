@@ -2,11 +2,11 @@
   <img src="assets/s2mosaic-heading.svg" alt="S2Mosaic" width="600">
 </p>
 
-[![PyPI version](https://img.shields.io/pypi/v/s2mosaic.svg)](https://pypi.org/project/s2mosaic/)
-[![Python versions](https://img.shields.io/pypi/pyversions/s2mosaic.svg)](https://pypi.org/project/s2mosaic/)
-[![CI](https://github.com/DPIRD-DMA/S2Mosaic/actions/workflows/ci.yml/badge.svg)](https://github.com/DPIRD-DMA/S2Mosaic/actions/workflows/ci.yml)
-[![Downloads](https://static.pepy.tech/badge/s2mosaic)](https://pepy.tech/project/s2mosaic)
-[![License](https://img.shields.io/pypi/l/s2mosaic.svg)](https://github.com/DPIRD-DMA/S2Mosaic/blob/main/LICENSE)
+<div align="center">
+
+[![PyPI version](https://img.shields.io/pypi/v/s2mosaic.svg)](https://pypi.org/project/s2mosaic/) [![Python versions](https://img.shields.io/pypi/pyversions/s2mosaic.svg)](https://pypi.org/project/s2mosaic/) [![CI](https://github.com/DPIRD-DMA/S2Mosaic/actions/workflows/ci.yml/badge.svg)](https://github.com/DPIRD-DMA/S2Mosaic/actions/workflows/ci.yml) [![Downloads](https://static.pepy.tech/badge/s2mosaic)](https://pepy.tech/project/s2mosaic) [![License](https://img.shields.io/pypi/l/s2mosaic.svg)](https://github.com/DPIRD-DMA/S2Mosaic/blob/main/LICENSE)
+
+</div>
 
 S2Mosaic is a Python package for creating cloud-free mosaics from Sentinel-2 satellite imagery. It can mosaic full MGRS tiles, rectangular bounds, or polygon AOIs over a chosen time window, with configurable scene ordering, masking, aggregation, and export options.
 
