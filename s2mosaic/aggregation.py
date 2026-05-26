@@ -16,7 +16,7 @@ from rasterio.windows import Window
 from tqdm.auto import tqdm
 
 from .config import MOSAIC_FIRST, MOSAIC_MEAN, MOSAIC_PERCENTILE
-from .output import output_band_metadata
+from .output import output_band_metadata, output_valid_mask
 
 logger = logging.getLogger(__name__)
 DEFAULT_OUTPUT_DTYPE = np.dtype(np.uint16)
@@ -237,8 +237,7 @@ def _contributing_scene_indices(
     """Scene indices that contribute to a tile before the early-stop fires.
 
     Observation counts are driven by the cloud/valid mask. Pixel value ``0`` is
-    allowed as source data; output nodata is also represented as ``0`` where
-    the mask says no scene contributed.
+    allowed as source data; unobserved output pixels are zero-filled.
     """
     r, c, h, w = spec
     contributing: List[int] = []
@@ -917,38 +916,44 @@ def write_tile_aggregation_geotiff(
     tmp_file.close()
     logger.info("Writing streamed GeoTIFF to %s via %s", export_path, tmp_path)
     try:
-        with rio.open(tmp_path, "w", **write_profile) as dst:
-            dst.descriptions = band_descriptions
-            for spec, tile_data in iter_tile_aggregation(
-                masks=masks,
-                read_fn=read_fn,
-                bands_count=bands_count,
-                height=height,
-                width=width,
-                coverage_mask=coverage_mask,
-                mosaic_method=mosaic_method,
-                percentile=percentile,
-                tile_size=tile_size,
-                tile_workers=tile_workers,
-                out_dtype=out_dtype,
-                min_observations=min_observations,
-                max_observations=max_observations,
-                adaptive_tiling=adaptive_tiling,
-                tile_specs=tile_specs,
-                show_progress=show_progress,
-                min_tile_size=min_tile_size,
-                include_observation_count=include_observation_count,
-            ):
-                r, c, h, w = spec
-                if output_coverage_mask is not None:
-                    coverage_tile = output_coverage_mask[r : r + h, c : c + w]
-                    np.multiply(
-                        tile_data,
-                        coverage_tile[None, :, :],
-                        out=tile_data,
+        with rio.Env(GDAL_TIFF_INTERNAL_MASK=True):
+            with rio.open(tmp_path, "w", **write_profile) as dst:
+                dst.descriptions = band_descriptions
+                for spec, tile_data in iter_tile_aggregation(
+                    masks=masks,
+                    read_fn=read_fn,
+                    bands_count=bands_count,
+                    height=height,
+                    width=width,
+                    coverage_mask=coverage_mask,
+                    mosaic_method=mosaic_method,
+                    percentile=percentile,
+                    tile_size=tile_size,
+                    tile_workers=tile_workers,
+                    out_dtype=out_dtype,
+                    min_observations=min_observations,
+                    max_observations=max_observations,
+                    adaptive_tiling=adaptive_tiling,
+                    tile_specs=tile_specs,
+                    show_progress=show_progress,
+                    min_tile_size=min_tile_size,
+                    include_observation_count=include_observation_count,
+                ):
+                    r, c, h, w = spec
+                    if output_coverage_mask is not None:
+                        coverage_tile = output_coverage_mask[r : r + h, c : c + w]
+                        np.multiply(
+                            tile_data,
+                            coverage_tile[None, :, :],
+                            out=tile_data,
+                        )
+                    window_cls: Any = Window
+                    window = window_cls(c, r, w, h)
+                    dst.write(tile_data, window=window)
+                    dst.write_mask(
+                        output_valid_mask(tile_data, include_observation_count),
+                        window=window,
                     )
-                window_cls: Any = Window
-                dst.write(tile_data, window=window_cls(c, r, w, h))
         tmp_path.replace(export_path)
     finally:
         if tmp_path.exists():

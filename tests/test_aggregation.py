@@ -815,10 +815,13 @@ class TestRunTileAggregation:
         assert not list(tmp_path.glob("streamed.tmp.*.tif"))
         with rio.open(export_path) as src:
             assert src.count == 1
-            assert src.nodata == 0
+            assert src.nodata is None
             assert src.descriptions == ("B04",)
             np.testing.assert_array_equal(
                 src.read(1), np.full((self.H, self.W), 20, dtype=np.uint16)
+            )
+            np.testing.assert_array_equal(
+                src.dataset_mask(), np.full((self.H, self.W), 255, dtype=np.uint8)
             )
 
     def test_write_tile_aggregation_geotiff_appends_observation_count(self, tmp_path):
@@ -1030,8 +1033,11 @@ class TestRunTileAggregation:
 
         with rio.open(export_path) as src:
             data = src.read(1)
+            mask = src.dataset_mask()
         assert data[0, 0] == 0
         assert data[0, 1] == 10
+        assert mask[0, 0] == 0
+        assert mask[0, 1] == 255
 
     def test_write_tile_aggregation_geotiff_does_not_allocate_full_output(
         self, tmp_path, monkeypatch

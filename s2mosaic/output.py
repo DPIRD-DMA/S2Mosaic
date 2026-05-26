@@ -331,7 +331,8 @@ def _export_tif(
     profile: Dict[str, Any],
     export_path: Path,
     bands: List[str],
-    nodata_value: Union[int, None] = 0,
+    nodata_value: Union[int, None] = None,
+    include_observation_count: bool = False,
 ) -> None:
     write_profile = profile.copy()
     write_profile.update(
@@ -346,22 +347,41 @@ def _export_tif(
     tmp_path = Path(tmp_file.name)
     tmp_file.close()
     try:
-        with rio.open(tmp_path, "w", **write_profile) as dst:
-            dst.write(array)
-            dst.descriptions = bands
+        with rio.Env(GDAL_TIFF_INTERNAL_MASK=True):
+            with rio.open(tmp_path, "w", **write_profile) as dst:
+                dst.write(array)
+                dst.write_mask(output_valid_mask(array, include_observation_count))
+                dst.descriptions = bands
         tmp_path.replace(export_path)
     finally:
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
 
 
+def output_valid_mask(
+    array: npt.NDArray[Any], include_observation_count: bool = False
+) -> npt.NDArray[np.uint8]:
+    """Return a GDAL mask for exported output arrays.
+
+    GDAL masks use 255 for valid pixels and 0 for nodata pixels. When the
+    observation-count band is present it is the exact validity source; otherwise
+    this mirrors the package's current zero-filled output nodata convention.
+    """
+    if include_observation_count:
+        valid = array[-1] > 0
+    else:
+        valid = np.any(array != 0, axis=0)
+    mask: npt.NDArray[np.uint8] = valid.astype(np.uint8, copy=False) * np.uint8(255)
+    return mask
+
+
 def output_band_metadata(
     bands: List[str],
 ) -> Tuple[List[str], Optional[int]]:
-    """Return output band descriptions and nodata value for requested bands."""
+    """Return output band descriptions and nodata metadata for requested bands."""
     if "visual" in bands:
         return ["Red", "Green", "Blue"], None
-    return list(bands), 0
+    return list(bands), None
 
 
 def finalize_output(
@@ -393,6 +413,7 @@ def finalize_output(
             export_path=export_path,
             bands=band_descriptions,
             nodata_value=nodata_value,
+            include_observation_count=include_observation_count,
         )
         return export_path
 

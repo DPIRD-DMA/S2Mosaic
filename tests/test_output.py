@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import rasterio as rio
 from shapely.geometry import Polygon
 
 from s2mosaic.config import MosaicRequest
@@ -370,6 +371,9 @@ class TestExportPaths:
             def write(self, _array):
                 return None
 
+            def write_mask(self, _mask):
+                return None
+
         def fake_open(_path, _mode, **kwargs):
             seen_profiles.append(kwargs)
             return FakeWriter()
@@ -403,6 +407,9 @@ class TestExportPaths:
             def write(self, _array):
                 raise OSError("write failed")
 
+            def write_mask(self, _mask):
+                return None
+
         def fake_open(path, _mode, **_kwargs):
             path = Path(path)
             temp_paths.append(path)
@@ -422,6 +429,53 @@ class TestExportPaths:
 
         assert export_path.read_bytes() == b"existing"
         assert temp_paths and not temp_paths[0].exists()
+
+    def test_finalize_output_export_writes_gdal_mask(self, tmp_path):
+        export_path = tmp_path / "masked.tif"
+        array = np.array([[[7, 0], [0, 5]]], dtype=np.uint16)
+
+        finalize_output(
+            array=array,
+            profile={"driver": "GTiff", "width": 2, "height": 2},
+            bands=["B04"],
+            coverage_mask=None,
+            export_path=export_path,
+        )
+
+        with rio.open(export_path) as src:
+            assert src.nodata is None
+            np.testing.assert_array_equal(
+                src.dataset_mask(),
+                np.array([[255, 0], [0, 255]], dtype=np.uint8),
+            )
+
+    def test_finalize_output_export_uses_observation_count_for_gdal_mask(
+        self, tmp_path
+    ):
+        export_path = tmp_path / "masked-count.tif"
+        array = np.array(
+            [
+                [[0, 0], [3, 0]],
+                [[1, 0], [2, 0]],
+            ],
+            dtype=np.uint16,
+        )
+
+        finalize_output(
+            array=array,
+            profile={"driver": "GTiff", "width": 2, "height": 2},
+            bands=["B04"],
+            coverage_mask=None,
+            export_path=export_path,
+            include_observation_count=True,
+        )
+
+        with rio.open(export_path) as src:
+            assert src.nodata is None
+            np.testing.assert_array_equal(
+                src.dataset_mask(),
+                np.array([[255, 0], [255, 0]], dtype=np.uint8),
+            )
 
     def test_output_path_is_used_directly(self, tmp_path):
         path = resolve_export_path(
