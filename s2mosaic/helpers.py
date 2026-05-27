@@ -1,12 +1,10 @@
 import functools
 import logging
 import random
+import re
 import sys
 import time
 from datetime import date, datetime
-from functools import lru_cache
-from importlib import resources
-from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -18,10 +16,8 @@ from typing import (
     TypeVar,
 )
 
-import geopandas as gpd
 from dateutil.relativedelta import relativedelta
 from rasterio.errors import RasterioIOError
-from shapely.geometry.polygon import Polygon
 from urllib3.exceptions import HTTPError
 
 if TYPE_CHECKING:
@@ -229,39 +225,44 @@ def pick_ocm_resolution(user_resolution: int) -> int:
     return max(OCM_MIN_RESOLUTION, min(user_resolution, OCM_MAX_RESOLUTION))
 
 
-@lru_cache(maxsize=1)
-def _load_s2_grid() -> gpd.GeoDataFrame:
-    with resources.as_file(
-        resources.files("s2mosaic") / "sentinel_2_index.gpkg"
-    ) as path:
-        s2_grid_file = Path(path)
-        if not s2_grid_file.exists():
-            raise RuntimeError(
-                f"S2 grid file not found at {s2_grid_file}. "
-                "This suggests the S2Mosaic package was not installed correctly. "
-                "Please reinstall the package."
-            )
-        return gpd.read_file(s2_grid_file)
+# MGRS Sentinel-2 grid id pattern.
+#
+# Three pieces:
+#   - UTM zone 1-60 (no leading zero — both MPC and Element 84 use bare ints)
+#   - latitude band letter: C-X excluding I and O (A, B, Y, Z are polar UPS;
+#     I and O are skipped to avoid confusion with 1 and 0)
+#   - 100 km grid square: column letter A-Z excluding I and O (24 letters),
+#     row letter A-V excluding I and O (20 letters)
+#
+# Accepts both 4-char (zones 1-9) and 5-char (zones 10-60) ids.
+GRID_ID_PATTERN = re.compile(
+    r"^(?:[1-9]|[1-5][0-9]|60)[C-HJ-NP-X][A-HJ-NP-Z][A-HJ-NP-V]$"
+)
 
 
-def get_extent_from_grid_id(grid_id: str) -> Polygon:
-    all_grids = _load_s2_grid()
-    grid_entry = all_grids[all_grids["Name"] == grid_id]
+def normalize_grid_id(grid_id: str) -> str:
+    """Normalize and validate a Sentinel-2 MGRS grid id.
 
-    return_count = grid_entry.shape[0]
-    if return_count == 0:
+    Strips whitespace, uppercases the input, and matches it against
+    :data:`GRID_ID_PATTERN`. Returns the normalized id on success.
+
+    Raises ``ValueError`` if the id is empty or doesn't match the MGRS
+    grid-square format used by Sentinel-2 (e.g. ``'50HMK'`` or ``'1FBE'``).
+    """
+    if not isinstance(grid_id, str):
+        raise ValueError(f"grid_id must be a string, got {type(grid_id).__name__}")
+    normalized = grid_id.strip().upper()
+    if not normalized:
+        raise ValueError("grid_id must not be empty")
+    if not GRID_ID_PATTERN.match(normalized):
         raise ValueError(
-            f"Grid {grid_id} not found. It should be in the format '50HMH'. "
-            "See https://sentiwiki.copernicus.eu/web/s2-products and "
+            f"grid_id {grid_id!r} is not a valid Sentinel-2 MGRS tile id. "
+            "Expected format like '50HMK' (UTM zone 1-60, latitude band "
+            "C-X excluding I/O, then two grid-square letters). See "
+            "https://sentiwiki.copernicus.eu/web/s2-products and "
             "https://dpird-dma.github.io/Sentinel-2-grid-explorer/"
         )
-    if return_count > 1:
-        raise RuntimeError(
-            f"Multiple entries found for grid {grid_id}. "
-            "This should not happen, please check the S2 grid file."
-        )
-
-    return grid_entry.iloc[0].geometry
+    return normalized
 
 
 def define_dates(

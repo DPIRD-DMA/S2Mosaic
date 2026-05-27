@@ -87,20 +87,11 @@ class TestMgrsQuery:
         q = MPC.mgrs_query("50HMH")
         assert q == {"s2:mgrs_tile": {"eq": "50HMH"}}
 
-    def test_aws_disables_server_side_mgrs_filter(self):
-        # Element 84 returns 0 items when ``query`` is combined with
-        # ``intersects``/``bbox`` (live-API verified). The AWS source
-        # therefore disables its server-side MGRS query; precision is
-        # restored by client-side post-filtering on ``grid:code``.
-        assert AWS.mgrs_query("50HMH") is None
-
-    def test_aws_split_field_builder_is_well_formed(self):
-        # The split-field builder is still importable in case Earth Search
-        # ever fixes the ``query``+``intersects`` interaction; keep
-        # coverage so the construction logic doesn't bit-rot.
-        from s2mosaic.sources import _aws_mgrs_query
-
-        assert _aws_mgrs_query("50HMH") == {
+    def test_aws_uses_split_field_mgrs_filter(self):
+        # Element 84 rejects ``query`` combined with ``intersects``/``bbox``
+        # but accepts query-only — search_for_items drops intersects when an
+        # MGRS filter is present (see s2mosaic/stac.py).
+        assert AWS.mgrs_query("50HMH") == {
             "mgrs:utm_zone": {"eq": 50},
             "mgrs:latitude_band": {"eq": "H"},
             "mgrs:grid_square": {"eq": "MH"},
@@ -254,6 +245,30 @@ class TestSourceThreadsThroughGridPipeline:
 
         assert captured["source"] is AWS
 
+    def test_lowercase_grid_id_is_normalized_before_reaching_search(self, monkeypatch):
+        # End-to-end regression guard: if MosaicRequest.normalized() ever
+        # stops calling normalize_grid_id, the search would see "50hmk" and
+        # the STAC query would silently produce zero items on both providers.
+        captured = {}
+
+        def fake_search(**kwargs):
+            captured.update(kwargs)
+            raise RuntimeError("stop-here")
+
+        import s2mosaic.pipelines.grid as grid_mod
+
+        monkeypatch.setattr(grid_mod, "search_for_items", fake_search)
+
+        with pytest.raises(RuntimeError, match="stop-here"):
+            mosaic(
+                grid_id="  50hmk ",
+                start_year=2023,
+                duration_days=1,
+                bands=["B04"],
+            )
+
+        assert captured["grid_id"] == "50HMK"
+
 
 class TestStacPropertyFallbacks:
     """Element 84 omits some MPC-shaped properties; the helpers fall back."""
@@ -369,10 +384,7 @@ class TestSearchPostFilter:
 
         from datetime import date as _date
 
-        from shapely.geometry import Polygon
-
         items = stac_mod.search_for_items(
-            bounds=Polygon([(0, 0), (1, 0), (1, 1), (0, 1)]),
             grid_id="50HMH",
             start_date=_date(2023, 6, 1),
             end_date=_date(2023, 6, 30),
@@ -427,15 +439,12 @@ class TestStacDatetimeFormat:
         """
         from datetime import datetime
 
-        from shapely.geometry import Polygon
-
         import s2mosaic.stac as stac_mod
         from s2mosaic.sources import MPC
 
         captured = self._capture_query(monkeypatch)
 
         stac_mod.search_for_items(
-            bounds=Polygon([(0, 0), (1, 0), (1, 1), (0, 1)]),
             grid_id="50HMH",
             start_date=datetime(2023, 6, 1),
             end_date=datetime(2023, 8, 1),
@@ -495,6 +504,106 @@ class TestStacDatetimeFormat:
         assert isinstance(end, datetime)
 
 
+class TestSearchQueryShape:
+    """Regression guards for the grid-mode search query shape.
+
+    After dropping the packaged MGRS extent file, ``search_for_items`` no
+    longer accepts a ``bounds`` polygon and must not include ``intersects``
+    in the catalog search. These tests pin both invariants.
+    """
+
+    @staticmethod
+    def _capture_query(monkeypatch):
+        captured: dict = {}
+
+        class _FakeSearch:
+            def item_collection(self):
+                from pystac.item_collection import ItemCollection
+
+                return ItemCollection([])
+
+        class _FakeCatalog:
+            def search(self, **kwargs):
+                captured.update(kwargs)
+                return _FakeSearch()
+
+        import pystac_client
+
+        monkeypatch.setattr(
+            pystac_client.Client,
+            "open",
+            classmethod(lambda cls, *_, **__: _FakeCatalog()),
+        )
+        return captured
+
+    def test_mpc_grid_search_uses_query_only_no_intersects(self, monkeypatch):
+        import s2mosaic.stac as stac_mod
+        from datetime import date
+
+        from s2mosaic.sources import MPC
+
+        captured = self._capture_query(monkeypatch)
+        stac_mod.search_for_items(
+            grid_id="50HMK",
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 1, 31),
+            additional_query={},
+            source=MPC,
+            ignore_duplicate_items=False,
+        )
+
+        assert "intersects" not in captured
+        assert captured["query"] == {"s2:mgrs_tile": {"eq": "50HMK"}}
+
+    def test_aws_grid_search_uses_query_only_no_intersects(self, monkeypatch):
+        import s2mosaic.stac as stac_mod
+        from datetime import date
+
+        from s2mosaic.sources import AWS
+
+        captured = self._capture_query(monkeypatch)
+        stac_mod.search_for_items(
+            grid_id="50HMK",
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 1, 31),
+            additional_query={},
+            source=AWS,
+            ignore_duplicate_items=False,
+        )
+
+        assert "intersects" not in captured
+        assert captured["query"] == {
+            "mgrs:utm_zone": {"eq": 50},
+            "mgrs:latitude_band": {"eq": "H"},
+            "mgrs:grid_square": {"eq": "MK"},
+        }
+
+    def test_raises_when_source_has_no_mgrs_filter(self, monkeypatch):
+        # Without server-side MGRS filtering, a query-only search would
+        # have to scan everything — better to fail loudly so a custom-source
+        # author sees the gap immediately.
+        import s2mosaic.stac as stac_mod
+        from datetime import date
+
+        custom = Source(
+            name="NO_MGRS",
+            stac_url="https://example.org/stac",
+            collection_id="my-l2a",
+            sign=lambda href: href,
+        )
+        self._capture_query(monkeypatch)  # in case it gets that far
+
+        with pytest.raises(ValueError, match="does not support MGRS tile search"):
+            stac_mod.search_for_items(
+                grid_id="50HMK",
+                start_date=date(2023, 1, 1),
+                end_date=date(2023, 1, 31),
+                additional_query={},
+                source=custom,
+                ignore_duplicate_items=False,
+            )
+
+
 class TestSourceCustomDataclass:
     """Hand-constructed Source instances behave like the built-in ones."""
 
@@ -510,5 +619,7 @@ class TestSourceCustomDataclass:
         assert custom.asset_name("B04") == "red_band"
         # Unmapped names pass through unchanged.
         assert custom.asset_name("B03") == "B03"
-        # No mgrs_query configured -> None (caller falls back to intersects).
+        # No mgrs_query configured -> None. Grid-mode searches against such a
+        # source now raise (see TestSearchQueryShape), so this is purely a
+        # source-configuration contract.
         assert custom.mgrs_query("50HMH") is None

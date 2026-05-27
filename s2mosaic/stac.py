@@ -4,12 +4,10 @@ from datetime import date
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-import shapely
 from pandas import DataFrame
 from pystac import Item
 from pystac.item_collection import ItemCollection
 from pystac_client.stac_api_io import StacApiIO
-from shapely.geometry.polygon import Polygon
 from urllib3 import Retry
 
 from .config import SCENE_ORDER_NEWEST, SCENE_ORDER_OLDEST, SCENE_ORDER_VALID_DATA
@@ -83,7 +81,6 @@ def add_item_info(items: ItemCollection) -> DataFrame:
 
 
 def search_for_items(
-    bounds: Polygon,
     grid_id: str,
     start_date: date,
     end_date: date,
@@ -93,21 +90,26 @@ def search_for_items(
 ) -> ItemCollection:
     base_query: Dict[str, Any] = {}
     mgrs_filter = source.mgrs_query(grid_id)
-    if mgrs_filter is not None:
-        base_query.update(mgrs_filter)
+    if mgrs_filter is None:
+        raise ValueError(
+            f"Source {source.name!r} does not support MGRS tile search; "
+            "grid_id mode requires a source with a server-side MGRS filter."
+        )
+    base_query.update(mgrs_filter)
     if additional_query:
         base_query.update(additional_query)
 
+    # Search by MGRS tile only — no ``intersects``. Both MPC and AWS reject
+    # the combination on the same query, and the per-field MGRS filter is
+    # precise enough on its own (one MGRS tile id ↔ one set of items).
     query: Dict[str, Any] = {
         "collections": [source.collection_id],
-        "intersects": shapely.to_geojson(bounds),
         "datetime": (
             f"{start_date.strftime('%Y-%m-%dT00:00:00Z')}/"
             f"{end_date.strftime('%Y-%m-%dT00:00:00Z')}"
         ),
+        "query": base_query,
     }
-    if base_query:
-        query["query"] = base_query
 
     logger.info(
         f"""Searching for items in grid {grid_id} from
@@ -128,22 +130,20 @@ def search_for_items(
     catalog = source.open_catalog(stac_io=stac_api_io)
     items = catalog.search(**query).item_collection()
     logger.info(f"Found {len(items)}")
-    # When the source can't filter by MGRS server-side (e.g. AWS — Earth
-    # Search rejects ``query`` combined with ``intersects``), the search
-    # also returns scenes from adjacent tiles that overlap the tile
-    # polygon. Filter those out client-side using the per-item tile ID
-    # so grid_id-mode output is restricted to the requested tile.
-    if mgrs_filter is None:
-        before = len(items)
-        kept = [it for it in items if _extract_mgrs_tile(it.properties) == grid_id]
-        items = ItemCollection(kept)
-        if len(items) != before:
-            logger.info(
-                "Post-filtered %d -> %d items by grid_id=%s",
-                before,
-                len(items),
-                grid_id,
-            )
+    # Defensive client-side filter — both providers should already return
+    # exactly the requested tile, but if a provider ever loosens its query
+    # semantics this catches the regression rather than silently mosaicking
+    # in scenes from an adjacent tile.
+    before = len(items)
+    kept = [it for it in items if _extract_mgrs_tile(it.properties) == grid_id]
+    items = ItemCollection(kept)
+    if len(items) != before:
+        logger.info(
+            "Post-filtered %d -> %d items by grid_id=%s",
+            before,
+            len(items),
+            grid_id,
+        )
     if ignore_duplicate_items:
         items = filter_latest_processing_baselines(items)
         logger.info(f"After filtering, {len(items)} items remain")

@@ -2,6 +2,7 @@ import pytest
 from shapely.geometry import Polygon
 
 from s2mosaic.frequent_coverage import (
+    _utm_origin_from_item,
     get_coverage,
     get_frequent_coverage_for_bbox,
     get_raster_coverage,
@@ -163,10 +164,49 @@ class TestGetRasterCoverage:
         ],
     )
     def test_output_shape_scales_with_resolution(self, resolution, expected_side):
+        # T50HMK origin in EPSG:32750 (Perth UTM South).
         raster = get_raster_coverage(
-            scene_bounds=self._scene_polygon_4326(),
+            x_min=399960.0,
+            y_max=6500020.0,
             coverage_gdf=self._coverage_gdf(),
             local_crs=32750,
             resolution=resolution,
         )
         assert raster.shape == (expected_side, expected_side)
+
+
+class TestUtmOriginFromItem:
+    """Pull the MGRS tile origin off a STAC item's asset proj:transform."""
+
+    @staticmethod
+    def _fake_item(assets):
+        class _FakeAsset:
+            def __init__(self, extra_fields):
+                self.extra_fields = extra_fields
+
+        class _FakeItem:
+            id = "fake-item"
+
+            def __init__(self):
+                self.assets = {
+                    name: _FakeAsset(fields) for name, fields in assets.items()
+                }
+
+        return _FakeItem()
+
+    def test_returns_top_left_from_first_asset_with_proj_transform(self):
+        # First asset (alphabetically iterated dict in py3.7+) has no
+        # proj:transform; second one does. The helper must keep looking
+        # until it finds a usable asset rather than giving up.
+        item = self._fake_item(
+            {
+                "thumbnail": {},
+                "B04": {"proj:transform": [10.0, 0.0, 399960.0, 0.0, -10.0, 6500020.0]},
+            }
+        )
+        assert _utm_origin_from_item(item) == (399960.0, 6500020.0)
+
+    def test_raises_when_no_asset_has_proj_transform(self):
+        item = self._fake_item({"thumbnail": {}, "preview": {}})
+        with pytest.raises(ValueError, match="no asset with a proj:transform"):
+            _utm_origin_from_item(item)

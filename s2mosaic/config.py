@@ -9,6 +9,7 @@ import numpy as np
 from shapely.geometry.polygon import Polygon
 
 from .geometry import Aoi, Bbox
+from .helpers import normalize_grid_id
 from .sources import SOURCE_MPC
 
 logger = logging.getLogger(__name__)
@@ -129,6 +130,7 @@ class MosaicRequest:
                 percentile=self.percentile,
             )
         )
+        grid_id = normalize_grid_id(self.grid_id) if self.grid_id is not None else None
         return replace(
             self,
             bands=bands,
@@ -136,6 +138,7 @@ class MosaicRequest:
             scene_order=scene_order,
             mosaic_method=mosaic_method,
             percentile=percentile,
+            grid_id=grid_id,
         )
 
     def validate(self) -> None:
@@ -225,14 +228,8 @@ def validate_inputs(
         raise ValueError(
             f"Invalid source: {source}. Must be one of {sorted(VALID_SOURCES)}"
         )
-    if grid_id is not None and (
-        len(grid_id) != 5 or not grid_id.isalnum() or not grid_id.isupper()
-    ):
-        raise ValueError(
-            f"Grid {grid_id} is invalid. It should be in the format '50HMH'. "
-            "For more info on the S2 grid system visit "
-            "https://sentiwiki.copernicus.eu/web/s2-products"
-        )
+    # grid_id format validation happens in MosaicRequest.normalized() via
+    # normalize_grid_id; by the time we get here it's been normalized.
     if aoi is not None:
         if not isinstance(aoi, Polygon):
             raise ValueError("aoi must be a single shapely Polygon")

@@ -1,46 +1,69 @@
+import io
 import logging
 
 import pytest
 from rasterio.errors import RasterioIOError
 
-import io
-
 from s2mosaic.helpers import (
     SceneFetchError,
-    _load_s2_grid,
+    normalize_grid_id,
     report_dropped_scenes,
     with_scene_retry,
 )
 
 
-class TestPackagedGrid:
-    def test_missing_packaged_grid_raises_runtime_error(self, monkeypatch, tmp_path):
-        import s2mosaic.helpers as helpers_mod
+class TestNormalizeGridId:
+    """Validate + canonicalize Sentinel-2 MGRS grid ids."""
 
-        class FakeResource:
-            def __truediv__(self, _name):
-                return self
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("50HMK", "50HMK"),
+            ("50hmk", "50HMK"),  # lowercase -> uppercased
+            ("  50HMK ", "50HMK"),  # whitespace stripped
+            ("1FBE", "1FBE"),  # single-digit zone
+            ("60XVQ", "60XVQ"),  # zone 60, last valid row letter
+            ("01CAA", None),  # leading zero — bad: regex requires no leading zero
+        ],
+    )
+    def test_accepts_or_rejects(self, raw, expected):
+        if expected is None:
+            with pytest.raises(ValueError, match="not a valid Sentinel-2"):
+                normalize_grid_id(raw)
+        else:
+            assert normalize_grid_id(raw) == expected
 
-        class FakeContext:
-            def __enter__(self):
-                return tmp_path / "missing.gpkg"
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "",  # empty
+            "   ",  # whitespace only
+            "50AMK",  # latitude band A (polar UPS)
+            "50IMK",  # latitude band I (forbidden — looks like 1)
+            "50OMK",  # latitude band O (forbidden — looks like 0)
+            "50YMK",  # latitude band Y (polar UPS)
+            "50HIM",  # first grid letter I forbidden
+            "50HOI",  # second grid letter O forbidden
+            "50HMV",  # second letter V is valid... actually this should pass
+            "50HMW",  # second letter W is OUT OF RANGE (max V for rows)
+            "61HMK",  # zone 61 out of range
+            "0HMK",  # zone 0 out of range
+            "50HMK1",  # too long
+            "50HM",  # too short
+        ],
+    )
+    def test_rejects_malformed(self, bad):
+        # 50HMV is actually valid (row letter V is the last allowed) — drop it
+        # from the rejection list by checking explicitly here.
+        if bad == "50HMV":
+            assert normalize_grid_id(bad) == "50HMV"
+            return
+        with pytest.raises(ValueError):
+            normalize_grid_id(bad)
 
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-        _load_s2_grid.cache_clear()
-        monkeypatch.setattr(
-            helpers_mod.resources, "files", lambda _package: FakeResource()
-        )
-        monkeypatch.setattr(
-            helpers_mod.resources, "as_file", lambda _resource: FakeContext()
-        )
-
-        try:
-            with pytest.raises(RuntimeError, match="S2 grid file not found"):
-                _load_s2_grid()
-        finally:
-            _load_s2_grid.cache_clear()
+    def test_rejects_non_string(self):
+        with pytest.raises(ValueError, match="must be a string"):
+            normalize_grid_id(50)  # type: ignore[arg-type]
 
 
 class TestSceneRetry:

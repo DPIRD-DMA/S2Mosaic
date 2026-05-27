@@ -55,7 +55,7 @@ Issues = "https://github.com/DPIRD-DMA/S2Mosaic/issues"
 Changelog = "https://github.com/DPIRD-DMA/S2Mosaic/blob/main/CHANGELOG.md"
 
 [tool.setuptools.package-data]
-s2mosaic = ["sentinel_2_index.gpkg", "py.typed"]
+s2mosaic = ["py.typed"]
 
 [dependency-groups]
 dev = [

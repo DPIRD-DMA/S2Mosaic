@@ -11,7 +11,7 @@ from pystac.item_collection import ItemCollection
 from rasterio.enums import MergeAlg
 from rasterio.features import rasterize
 from rasterio.transform import Affine
-from shapely.geometry import Polygon, shape
+from shapely.geometry import shape
 
 from .helpers import MGRS_TILE_SIZE_M
 
@@ -28,22 +28,35 @@ def get_coverage(scenes: List[Item]) -> gpd.GeoDataFrame:
     return extent_gdf
 
 
+def _utm_origin_from_item(item: Item) -> Tuple[float, float]:
+    """Pull the top-left UTM corner ``(x_min, y_max)`` from a STAC item.
+
+    Sentinel-2 L2A items expose ``proj:transform`` on their band assets (both
+    MPC and Element 84 do this). The MGRS tile that owns the item starts at
+    ``(transform[2], transform[5])`` — i.e. the asset's top-left — and is
+    deterministic given the tile id, so any one item from the tile suffices.
+    """
+    for asset in item.assets.values():
+        transform = asset.extra_fields.get("proj:transform")
+        if transform is None:
+            continue
+        # affine[2] = x of top-left, affine[5] = y of top-left.
+        return float(transform[2]), float(transform[5])
+    raise ValueError(
+        f"Item {item.id!r} has no asset with a proj:transform; cannot "
+        "infer MGRS tile origin without it."
+    )
+
+
 def get_raster_coverage(
-    scene_bounds: Polygon,
+    x_min: float,
+    y_max: float,
     coverage_gdf: GeoDataFrame,
     local_crs: int,
     resolution: int = 10,
 ) -> npt.NDArray[np.int16]:
-    scene_gdf = gpd.GeoDataFrame(
-        [scene_bounds], geometry=[scene_bounds], crs="EPSG:4326"
-    ).to_crs(f"EPSG:{local_crs}")
-
     coverage_gdf_local = coverage_gdf.to_crs(f"EPSG:{local_crs}")
-
     coverage_gdf_local["geometry"] = coverage_gdf_local.make_valid()
-
-    extent = scene_gdf.total_bounds
-    x_min, _, _, y_max = extent
 
     side_px = int(round(MGRS_TILE_SIZE_M / resolution))
 
@@ -104,11 +117,16 @@ def _frequent_coverage_from_extents(
 
 
 def get_frequent_coverage(
-    scene_bounds: Polygon,
     scenes: ItemCollection,
     min_coverage_fraction: float = 0.1,
     resolution: int = 10,
 ) -> npt.NDArray[np.bool_]:
+    """Build a per-pixel coverage mask for a single MGRS tile.
+
+    The tile's UTM origin and projection are read straight off the first
+    item's STAC metadata (``proj:transform`` and ``proj:epsg`` / ``proj:code``),
+    so this no longer needs a packaged tile-extent lookup.
+    """
     scenes_list = list(scenes)
     logger.info(f"Calculating total coverage for {len(scenes_list)} scenes")
 
@@ -120,9 +138,10 @@ def get_frequent_coverage(
 
     logger.info(f"Using local CRS: EPSG:{local_crs}")
 
+    x_min, y_max = _utm_origin_from_item(scenes_list[0])
     coverage_gdf = get_coverage(scenes_list)
     raster = get_raster_coverage(
-        scene_bounds, coverage_gdf, local_crs, resolution=resolution
+        x_min, y_max, coverage_gdf, local_crs, resolution=resolution
     )
     logger.info(f"Coverage raster shape: {raster.shape}")
     return _frequent_coverage_from_raster(raster, min_coverage_fraction)

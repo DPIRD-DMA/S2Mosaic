@@ -99,11 +99,9 @@ def _aws_mgrs_query(grid_id: str) -> Dict[str, Any]:
     # Element 84 Earth Search v1 splits the MGRS tile into separate fields.
     # grid_id format: ``50HMH`` -> utm_zone=50, latitude_band=H, grid_square=MH
     #
-    # Element 84 returns 0 items when ``query`` is combined with
-    # ``intersects``/``bbox`` (verified against live API), so we leave this
-    # builder in for parity/test coverage but the AWS source itself disables
-    # ``mgrs_query`` (set to ``None`` below) — grid-mode precision is then
-    # restored by ``search_for_items`` post-filtering on ``grid:code``.
+    # Element 84 rejects ``query`` *combined* with ``intersects``/``bbox``,
+    # but accepts query-only searches. ``search_for_items`` therefore drops
+    # ``intersects`` when an MGRS filter is present on this source.
     match = re.fullmatch(
         r"(?P<utm_zone>\d{1,2})(?P<latitude_band>[A-Z])"
         r"(?P<grid_square>[A-Z]{2})",
@@ -170,10 +168,7 @@ AWS = Source(
         "SCL": 512,
     },
     default_block_size=512,
-    # ``_mgrs_query=None``: see ``_aws_mgrs_query`` docstring — Earth Search
-    # rejects ``query`` combined with ``intersects``. Grid-mode tile precision
-    # is restored by ``search_for_items``'s post-filter on ``grid:code``.
-    _mgrs_query=None,
+    _mgrs_query=_aws_mgrs_query,
 )
 
 

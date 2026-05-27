@@ -18,19 +18,22 @@ from s2mosaic.config import validate_inputs
 class TestMosaicInputValidation:
     """Test input validation for the mosaic function"""
 
-    def test_invalid_grid_id_lowercase(self):
-        """Test that lowercase grid IDs are rejected"""
-        with pytest.raises(ValueError, match="Grid .* is invalid"):
-            mosaic(grid_id="50hmh", start_year=2023)
+    def test_lowercase_grid_id_is_auto_corrected(self, monkeypatch):
+        """Lowercase grid ids are normalized to uppercase, not rejected."""
+        from s2mosaic.helpers import normalize_grid_id
+
+        # normalize_grid_id is the canonical entry point; verify the auto-
+        # correct contract here so behaviour-change is documented.
+        assert normalize_grid_id("50hmh") == "50HMH"
 
     def test_invalid_grid_id_special_chars(self):
         """Test that grid IDs with special characters are rejected"""
-        with pytest.raises(ValueError, match="Grid .* is invalid"):
+        with pytest.raises(ValueError, match="not a valid Sentinel-2"):
             mosaic(grid_id="50H-MH", start_year=2023)
 
     def test_invalid_grid_id_numbers_only(self):
         """Test that numeric-only grid IDs are rejected"""
-        with pytest.raises(ValueError, match="Grid .* is invalid"):
+        with pytest.raises(ValueError, match="not a valid Sentinel-2"):
             mosaic(grid_id="12345", start_year=2023)
 
     def test_invalid_scene_order(self):

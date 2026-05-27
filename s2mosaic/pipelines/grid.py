@@ -18,7 +18,6 @@ from ..helpers import (
     SceneFetchError,
     define_dates,
     get_band_template,
-    get_extent_from_grid_id,
     pick_ocm_resolution,
     report_dropped_scenes,
 )
@@ -104,13 +103,11 @@ def run_grid_pipeline(
     if export_path is not None and export_path.exists() and not request.overwrite:
         return export_path
 
-    grid_polygon = get_extent_from_grid_id(request.grid_id)
     logger.info(
-        f"Searching for scenes in grid {request.grid_id} within bounds {grid_polygon} "
+        f"Searching for scenes in grid {request.grid_id} "
         f"from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}."
     )
     items = search_for_items(
-        bounds=grid_polygon.buffer(-0.05),
         grid_id=request.grid_id,
         start_date=start_date,
         end_date=end_date,
@@ -132,7 +129,6 @@ def run_grid_pipeline(
         )
     else:
         coverage_mask = get_frequent_coverage(
-            scene_bounds=grid_polygon,
             scenes=items,
             min_coverage_fraction=request.min_coverage_fraction,
             resolution=request.resolution,
