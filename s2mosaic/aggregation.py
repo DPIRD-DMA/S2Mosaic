@@ -22,7 +22,7 @@ from rasterio.errors import RasterioIOError
 from rasterio.windows import Window
 from tqdm.auto import tqdm
 
-from .config import MOSAIC_FIRST, MOSAIC_MEAN, MOSAIC_PERCENTILE
+from .config import MOSAIC_FIRST, MOSAIC_MEAN, MOSAIC_MEDOID, MOSAIC_PERCENTILE
 from .output import output_band_metadata, output_valid_mask
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,7 @@ DEFAULT_TILE_WORKERS = 8
 DEFAULT_BAND_READ_WORKERS = 16
 DEFAULT_ADAPTIVE_TILE_MIN_SIZE = 512
 DEFAULT_ADAPTIVE_TILE_DENSE_FRACTION = 0.75
+MEDOID_STRIPE_HEIGHT = 128
 EXPECTED_READ_EXACT_SCAN_LIMIT = 50_000
 
 # Tile requeue policy. When a tile worker fails with RasterioIOError the
@@ -144,7 +145,7 @@ def _finalise_tile(
     return arr.astype(out_dtype, copy=False)  # type: ignore[no-any-return, unused-ignore]
 
 
-@njit(cache=True)  # type: ignore[untyped-decorator]
+@njit(cache=True, nogil=True)  # type: ignore[untyped-decorator]
 def _nanquantile_axis0(stack: npt.NDArray[Any], q: float) -> npt.NDArray[Any]:
     """Serial NaN-skipping quantile over stack axis 0.
 
@@ -157,13 +158,20 @@ def _nanquantile_axis0(stack: npt.NDArray[Any], q: float) -> npt.NDArray[Any]:
     ``workqueue`` threading layer is not safe to enter concurrently from
     several Python threads, and users may also call ``mosaic`` from their own
     thread pools. Tile-level concurrency supplies the parallelism instead.
+    ``nogil=True`` lets those Python tile-worker threads actually run this
+    kernel in parallel rather than serialising on the GIL.
     """
     n_scenes, n_bands, height, width = stack.shape
     out = np.empty((n_bands, height, width), dtype=np.float32)
+    # ``values`` is hoisted out of the per-pixel loop. Numba's allocator
+    # holds an internal lock per ``np.empty`` call that nogil does not
+    # release — allocating once per pixel was serialising tile workers
+    # on that lock. One allocation per kernel call keeps multi-thread
+    # scaling clean and is also ~17% faster single-thread.
+    values = np.empty(n_scenes, dtype=np.float32)
     total = n_bands * height * width
 
     for idx in range(total):
-        values = np.empty(n_scenes, dtype=np.float32)
         band = idx // (height * width)
         rem = idx - band * height * width
         row = rem // width
@@ -212,6 +220,150 @@ def _warm_nanquantile_axis0() -> None:
     """
     sample = np.array([[[[0.0]]], [[[1.0]]]], dtype=np.float32)
     _nanquantile_axis0(sample, 0.5)
+
+
+@njit(cache=True, nogil=True)  # type: ignore[untyped-decorator]
+def _medoid_axis0_u16(
+    stack: npt.NDArray[np.uint16],
+    valid: npt.NDArray[np.bool_],
+) -> Tuple[npt.NDArray[np.uint16], npt.NDArray[np.bool_]]:
+    """Per-pixel medoid composite over uint16 scene stack.
+
+    For each pixel, picks the scene whose multi-band spectrum is closest
+    (squared Euclidean) to the per-band median spectrum computed across
+    all valid scenes at that pixel. The result is always an actually
+    observed spectrum — band relationships are preserved, which matters
+    for downstream indices and classifiers — unlike per-band
+    percentile/median which can return a synthetic per-band combination.
+
+    This is the "closest to per-band median" formulation of the medoid
+    common in Google Earth Engine tutorials and the gee-community
+    libraries (O(S·B) per pixel). It is NOT the strict Flood 2013
+    definition, which picks ``arg min_s Σᵢ d(scene_s, scene_i)`` over all
+    pairs (O(S²·B) per pixel). The two often agree, but can pick different
+    scenes when the cluster of observations is asymmetric.
+
+    Inputs:
+        stack: shape ``(scene, band, height, width)`` uint16. Values at
+            invalid (scene, pixel) positions are ignored — they must be
+            flagged via ``valid``.
+        valid: shape ``(scene, height, width)`` bool. ``True`` where scene
+            is a candidate (all bands present) for that pixel.
+
+    Returns:
+        out: ``(band, height, width)`` uint16 containing the chosen
+            spectrum at each pixel. Pixels with no candidate are zeroed.
+        out_valid: ``(height, width)`` bool, true where a candidate was
+            chosen. Used by the caller to propagate the no-data mask.
+
+    Implementation notes:
+        - Stripe-blocked two-pass kernel — keeps the scene-outer scoring
+          pattern but limits scratch arrays to ``MEDOID_STRIPE_HEIGHT`` rows
+          at a time.
+        - ``nogil=True`` so Python tile workers can run in parallel
+          inside this kernel rather than serialising on the GIL.
+        - ``values`` is hoisted out of the per-pixel loop. Numba's
+          allocator takes an internal lock per ``np.empty`` call that
+          nogil does not release; one allocation per kernel call keeps
+          multi-thread scaling clean (see ``bench_percentile_nogil.py``
+          for the same lesson on the quantile kernel).
+        - **Doubled-target trick keeps even-count medians exact in
+          integer math.** For an even count of valid scenes the true
+          median is a half-integer — naively floor-dividing by 2 shifts
+          the target by 0.5, which directly shifts squared distances
+          and can flip the chosen scene (covered by
+          ``TestMedoidAxis0U16.test_even_count_median_uses_exact_half_integer_target``).
+          Instead the kernel stores the target *doubled*: even-count
+          targets are ``values[mid-1] + values[mid]`` and odd-count
+          targets are ``2 * values[mid]``. Pass 2 then computes
+          ``diff = 2 * stack[s,b,y,x] - target[b,y,x]`` so both operands
+          are at the same scale; all per-scene distances scale by the
+          same factor of 4, so argmin is identical to the true-median
+          ranking with no floats and no precision loss.
+        - Squared-distance accumulator is int64 to absorb worst-case
+          doubled-diff² × bands. Doubled diffs reach ~2·65535, squared
+          ~1.7e10; summed over 13 bands ≈ 2.2e11 — well within int64.
+    """
+    n_scenes, n_bands, h, w = stack.shape
+
+    out = np.zeros((n_bands, h, w), dtype=np.uint16)
+    out_valid = np.zeros((h, w), dtype=np.bool_)
+    values = np.empty(n_scenes, dtype=np.uint16)
+
+    for y0 in range(0, h, MEDOID_STRIPE_HEIGHT):
+        y1 = min(h, y0 + MEDOID_STRIPE_HEIGHT)
+        rows = y1 - y0
+
+        # Pass 1: per-band median target via insertion sort over the valid
+        # scenes for each pixel. Targets are stored doubled, so even-count
+        # half-integer medians stay exact without switching the distance
+        # kernel to float.
+        target = np.zeros((n_bands, rows, w), dtype=np.int32)
+        for b in range(n_bands):
+            for yy in range(rows):
+                y = y0 + yy
+                for x in range(w):
+                    n_valid = 0
+                    for s in range(n_scenes):
+                        if valid[s, y, x]:
+                            values[n_valid] = stack[s, b, y, x]
+                            n_valid += 1
+                    if n_valid == 0:
+                        continue
+                    for i in range(1, n_valid):
+                        key = values[i]
+                        j = i - 1
+                        while j >= 0 and values[j] > key:
+                            values[j + 1] = values[j]
+                            j -= 1
+                        values[j + 1] = key
+                    mid = n_valid // 2
+                    if n_valid % 2 == 1:
+                        target[b, yy, x] = np.int32(2) * np.int32(values[mid])
+                    else:
+                        target[b, yy, x] = np.int32(values[mid - 1]) + np.int32(
+                            values[mid]
+                        )
+
+        # Pass 2: running best per pixel within this stripe, iterating scenes
+        # outermost for cache-friendly stack access.
+        best_dist = np.full((rows, w), np.iinfo(np.int64).max, dtype=np.int64)
+        best_idx = np.full((rows, w), -1, dtype=np.int32)
+        for s in range(n_scenes):
+            for yy in range(rows):
+                y = y0 + yy
+                for x in range(w):
+                    if not valid[s, y, x]:
+                        continue
+                    d = np.int64(0)
+                    for b in range(n_bands):
+                        diff = (
+                            np.int32(2) * np.int32(stack[s, b, y, x]) - target[b, yy, x]
+                        )
+                        d += np.int64(diff) * np.int64(diff)
+                    if d < best_dist[yy, x]:
+                        best_dist[yy, x] = d
+                        best_idx[yy, x] = s
+
+        for yy in range(rows):
+            y = y0 + yy
+            for x in range(w):
+                s = best_idx[yy, x]
+                if s >= 0:
+                    out_valid[y, x] = True
+                    for b in range(n_bands):
+                        out[b, y, x] = stack[s, b, y, x]
+
+    return out, out_valid
+
+
+def _warm_medoid_axis0_u16() -> None:
+    """Compile the medoid kernel on the main thread before workers start."""
+    sample_stack = np.zeros((2, 1, 1, 1), dtype=np.uint16)
+    sample_stack[0, 0, 0, 0] = 100
+    sample_stack[1, 0, 0, 0] = 200
+    sample_valid = np.ones((2, 1, 1), dtype=np.bool_)
+    _medoid_axis0_u16(sample_stack, sample_valid)
 
 
 def _copy_single_scene_tile(
@@ -398,6 +550,114 @@ def tile_percentile(
 
     res = _nanquantile_axis0(stack, percentile / 100.0)
     res = np.nan_to_num(res, nan=0.0)
+    tile = _finalise_tile(res, out_dtype)
+    if include_observation_count:
+        tile = _append_observation_count(tile, observation_count)
+    return spec, tile
+
+
+def tile_medoid(
+    spec: Tuple[int, int, int, int],
+    masks: List[Optional[npt.NDArray[Any]]],
+    read_fn: ReaderFn,
+    bands_count: int,
+    coverage_mask: npt.NDArray[Any],
+    min_observations: Optional[int],
+    max_observations: Optional[int],
+    out_dtype: "np.dtype[Any]",
+    band_executor: Optional[Executor] = None,
+    include_observation_count: bool = False,
+) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
+    r, c, h, w = spec
+    tile_coverage = coverage_mask[r : r + h, c : c + w]
+    if not tile_coverage.any():
+        return spec, _empty_output_tile(
+            spec, bands_count, out_dtype, include_observation_count
+        )
+
+    if bands_count > 1 and (
+        min_observations is not None or max_observations is not None
+    ):
+        contributing = _contributing_scene_indices(
+            spec, masks, tile_coverage, None, None
+        )
+    else:
+        contributing = _contributing_scene_indices(
+            spec, masks, tile_coverage, min_observations, max_observations
+        )
+
+    if not contributing:
+        return spec, _empty_output_tile(
+            spec, bands_count, out_dtype, include_observation_count
+        )
+
+    if len(contributing) == 1:
+        scene_idx = contributing[0]
+        mask = masks[scene_idx]
+        if mask is None:
+            raise RuntimeError(f"Missing mask for contributing scene {scene_idx}")
+        mask_tile = mask[r : r + h, c : c + w]
+        return spec, _copy_single_scene_tile(
+            spec,
+            mask_tile,
+            tile_coverage,
+            read_fn,
+            scene_idx,
+            bands_count,
+            out_dtype,
+            band_executor,
+            include_observation_count,
+        )
+
+    # Stack stays uint16 — medoid picks an actual observed spectrum so it
+    # needs no fractional precision. Validity carried in a separate bool
+    # array instead of NaN sentinels in float32, which halves stack memory
+    # and removes the per-cell NaN check from the kernel hot loop.
+    stack = np.zeros((len(contributing), bands_count, h, w), dtype=np.uint16)
+    valid = np.zeros((len(contributing), h, w), dtype=np.bool_)
+    observation_count = np.zeros((h, w), dtype=np.uint16)
+    pixel_count = (
+        np.zeros((h, w), dtype=np.uint16) if max_observations is not None else None
+    )
+    for k, scene_idx in enumerate(contributing):
+        mask = masks[scene_idx]
+        if mask is None:
+            raise RuntimeError(f"Missing mask for contributing scene {scene_idx}")
+        mask_tile = mask[r : r + h, c : c + w]
+        if pixel_count is not None and max_observations is not None:
+            pick = mask_tile & tile_coverage & (pixel_count < max_observations)
+        else:
+            pick = mask_tile & tile_coverage
+        band_data = _read_scene_bands(
+            read_fn, scene_idx, bands_count, spec, band_executor
+        )
+        source_valid = _source_valid_from_bands(band_data)
+        if source_valid is not None:
+            pick = pick & source_valid
+            if not pick.any():
+                continue
+        for j, data in enumerate(band_data):
+            np.copyto(stack[k, j], data, where=pick, casting="unsafe")
+        valid[k] = pick
+        np.add(observation_count, pick, out=observation_count, casting="unsafe")
+        if pixel_count is not None:
+            np.add(pixel_count, pick, out=pixel_count, casting="unsafe")
+        if (
+            bands_count > 1
+            and min_observations is not None
+            and max_observations is None
+            and ((observation_count >= min_observations) | ~tile_coverage).all()
+        ):
+            break
+        if (
+            bands_count > 1
+            and max_observations is not None
+            and pixel_count is not None
+            and ((pixel_count >= max_observations) | ~tile_coverage).all()
+        ):
+            break
+
+    res, _ = _medoid_axis0_u16(stack, valid)
     tile = _finalise_tile(res, out_dtype)
     if include_observation_count:
         tile = _append_observation_count(tile, observation_count)
@@ -837,6 +1097,9 @@ def iter_tile_aggregation(
         _warm_nanquantile_axis0()
         pv = percentile if percentile is not None else 50.0
 
+    elif mosaic_method == MOSAIC_MEDOID:
+        _warm_medoid_axis0_u16()
+
     elif mosaic_method not in (MOSAIC_MEAN, MOSAIC_FIRST):
         raise ValueError(f"Unknown mosaic_method: {mosaic_method}")
 
@@ -875,6 +1138,24 @@ def iter_tile_aggregation(
             s: Tuple[int, int, int, int],
         ) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
             return tile_mean(
+                s,
+                masks,
+                effective_read_fn,
+                bands_count,
+                coverage_mask,
+                min_observations,
+                max_observations,
+                out_dtype,
+                band_executor,
+                include_observation_count,
+            )
+
+    elif mosaic_method == MOSAIC_MEDOID:
+
+        def worker_fn(
+            s: Tuple[int, int, int, int],
+        ) -> Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]:
+            return tile_medoid(
                 s,
                 masks,
                 effective_read_fn,

@@ -206,20 +206,33 @@ def mosaic(
         duration_days (int, optional): Duration in days to add to the start date. Defaults to 0.
         bands (List[str], optional): List of spectral bands.
             Defaults to ["B04", "B03", "B02", "B08"] (Red, Green, Blue, NIR).
-        mosaic_method (str, optional): Method to create the mosaic. Options are "mean", "first", "median" or "percentile". Defaults to "mean".
+        mosaic_method (str, optional): Method to create the mosaic. Options
+            are ``"mean"``, ``"first"``, ``"median"``, ``"percentile"`` (with
+            ``percentile``), or ``"medoid"``. Defaults to ``"mean"``. The
+            ``"medoid"`` mode picks, for each pixel, the scene whose
+            multi-band spectrum is closest (squared Euclidean) to the
+            per-band median across all valid scenes for that pixel. The
+            output is therefore always an actually-observed spectrum
+            (band relationships preserved for indices/classifiers) rather
+            than the synthetic per-band combination produced by
+            ``"median"``/``"percentile"``. This is the approximate-medoid
+            formulation common in Google Earth Engine tutorials, not the
+            strict Flood 2013 pairwise-distance medoid; the two often agree,
+            but can differ.
         percentile (Optional[float], optional): Percentile to calculate
             when using ``mosaic_method="percentile"``. Must be between 0 and 100.
         min_observations (int, optional): Per-tile early-stop target
-            for ``mean`` and ``percentile``. When set, aggregation stops
-            reading later scenes for a tile once every coverable pixel has at
-            least this many valid observations. This is not an output quality
-            filter. Defaults to None.
-        max_observations (int, optional): Per-pixel cap for ``mean`` and
-            ``percentile``. Each pixel accepts at most this many valid scenes,
-            in ``scene_order``; later valid scenes are dropped for that pixel.
-            Combined with ``scene_order="oldest"``/``"newest"`` this biases
-            the mosaic to early or late dates. Must be >= ``min_observations``
-            when both are set. Ignored by ``first`` (effectively N=1).
+            for ``mean``, ``percentile``, and ``medoid``. When set,
+            aggregation stops reading later scenes for a tile once every
+            coverable pixel has at least this many valid observations. This is
+            not an output quality filter. Defaults to None.
+        max_observations (int, optional): Per-pixel cap for ``mean``,
+            ``percentile``, and ``medoid``. Each pixel accepts at most this
+            many valid scenes, in ``scene_order``; later valid scenes are
+            dropped for that pixel. Combined with ``scene_order="oldest"`` /
+            ``"newest"`` this biases the mosaic to early or late dates. Must
+            be >= ``min_observations`` when both are set. Ignored by ``first``
+            (effectively N=1).
             Defaults to None.
         include_observation_count (bool, optional): Append an ``Observation count``
             band containing the number of valid source scenes contributing to

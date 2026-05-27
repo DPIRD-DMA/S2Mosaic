@@ -11,8 +11,10 @@ import s2mosaic.aggregation as aggregation_mod
 from s2mosaic.aggregation import (
     DEFAULT_TILE_WORKERS,
     _drain_with_requeue,
+    _medoid_axis0_u16,
     _nanquantile_axis0,
     _split_tile_size_aligned,
+    _warm_medoid_axis0_u16,
     _warm_nanquantile_axis0,
     adaptive_tile_specs_for_masks,
     iter_tile_aggregation,
@@ -308,6 +310,217 @@ class TestRunTileAggregation:
         expected = np.full((3, self.H, self.W), 10, dtype=np.uint16)
         expected[:, :, 0] = 15
         np.testing.assert_array_equal(out, expected)
+
+    def test_medoid_picks_scene_closest_to_band_median(self):
+        # Three scenes, 3 bands. The per-band median is the middle scene's
+        # values; the medoid must return that scene's full spectrum (not a
+        # synthetic mix of per-band medians).
+        scenes = np.stack(
+            [
+                np.array([[[10]], [[10]], [[10]]], dtype=np.uint16),
+                np.array([[[20]], [[20]], [[20]]], dtype=np.uint16),
+                np.array([[[30]], [[30]], [[30]]], dtype=np.uint16),
+            ],
+            axis=0,
+        )
+        scenes = np.broadcast_to(scenes, (3, 3, self.H, self.W)).copy()
+        masks = [np.ones((self.H, self.W), dtype=bool) for _ in range(3)]
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=self._read_fn_for(scenes),
+            bands_count=3,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            mosaic_method="medoid",
+            percentile=None,
+            tile_size=3,
+            tile_workers=1,
+        )
+
+        np.testing.assert_array_equal(out, 20)
+
+    def test_medoid_returns_observed_spectrum_not_synthetic(self):
+        # Two scenes whose per-band median spectrum is closer to scene 0
+        # than scene 1. The medoid must return scene 0's actual values —
+        # this is the property that distinguishes medoid from per-band
+        # median (which would interpolate).
+        s0 = np.array([5, 8, 12], dtype=np.uint16)
+        s1 = np.array([100, 80, 60], dtype=np.uint16)
+        scenes = np.zeros((2, 3, self.H, self.W), dtype=np.uint16)
+        for b in range(3):
+            scenes[0, b].fill(s0[b])
+            scenes[1, b].fill(s1[b])
+        masks = [np.ones((self.H, self.W), dtype=bool) for _ in range(2)]
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=self._read_fn_for(scenes),
+            bands_count=3,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            mosaic_method="medoid",
+            percentile=None,
+            tile_size=3,
+            tile_workers=1,
+        )
+
+        # With two scenes the per-band median lies exactly between them,
+        # so squared distances tie. The kernel breaks ties on first-seen,
+        # so scene 0 wins. Either scene is a valid medoid; both are
+        # actually-observed spectra.
+        for b in range(3):
+            assert np.all((out[b] == s0[b]) | (out[b] == s1[b]))
+        # And the output is uniform per band (only one scene chosen
+        # tile-wide).
+        for b in range(3):
+            assert np.unique(out[b]).size == 1
+
+    def test_medoid_skips_masked_scenes(self):
+        # Outlier scene is masked off; medoid should ignore it entirely
+        # and pick from the remaining two.
+        scenes = np.stack(
+            [
+                np.full((1, self.H, self.W), 100, dtype=np.uint16),  # outlier
+                np.full((1, self.H, self.W), 20, dtype=np.uint16),
+                np.full((1, self.H, self.W), 22, dtype=np.uint16),
+            ],
+            axis=0,
+        )
+        masks = [
+            np.zeros((self.H, self.W), dtype=bool),  # fully masked
+            np.ones((self.H, self.W), dtype=bool),
+            np.ones((self.H, self.W), dtype=bool),
+        ]
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=self._read_fn_for(scenes),
+            bands_count=1,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            mosaic_method="medoid",
+            percentile=None,
+            tile_size=3,
+            tile_workers=1,
+        )
+
+        # Must come from one of the unmasked scenes, never the outlier.
+        assert np.all((out == 20) | (out == 22))
+
+    def test_medoid_zero_where_no_scene_is_valid(self):
+        scenes = np.full((2, 1, self.H, self.W), 10, dtype=np.uint16)
+        masks = [
+            np.zeros((self.H, self.W), dtype=bool),
+            np.zeros((self.H, self.W), dtype=bool),
+        ]
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=self._read_fn_for(scenes),
+            bands_count=1,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            mosaic_method="medoid",
+            percentile=None,
+            tile_size=3,
+            tile_workers=1,
+        )
+
+        np.testing.assert_array_equal(out, 0)
+
+    def test_medoid_ignores_all_zero_multi_band_source_pixels(self):
+        # First scene's column-0 pixels are all-zero across bands — the
+        # source-valid check should treat those as no-data and exclude
+        # them from medoid candidates. Remaining scene wins.
+        scenes = np.stack(
+            [
+                np.full((3, self.H, self.W), 0, dtype=np.uint16),
+                np.full((3, self.H, self.W), 15, dtype=np.uint16),
+            ],
+            axis=0,
+        )
+        scenes[0, :, :, 1:] = 5
+        masks = [
+            np.ones((self.H, self.W), dtype=bool),
+            np.ones((self.H, self.W), dtype=bool),
+        ]
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=self._read_fn_for(scenes),
+            bands_count=3,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            mosaic_method="medoid",
+            percentile=None,
+            tile_size=3,
+            tile_workers=1,
+        )
+
+        # Column 0 has only one valid candidate (scene 1) → 15.
+        # Other columns have two candidates with values 5 and 15; medoid
+        # picks whichever wins the tie-break, but the answer must be an
+        # actual observation.
+        assert np.all(out[:, :, 0] == 15)
+        for col in range(1, self.W):
+            for b in range(3):
+                assert np.all((out[b, :, col] == 5) | (out[b, :, col] == 15))
+
+    def test_medoid_works_with_uint8_visual_source(self):
+        # Visual mode hands uint8 RGB tiles to the aggregator and expects
+        # uint8 output. tile_medoid widens uint8 → uint16 inside the kernel
+        # then _finalise_tile clips back to uint8.
+        scenes = np.stack(
+            [
+                np.full((3, self.H, self.W), 50, dtype=np.uint8),
+                np.full((3, self.H, self.W), 120, dtype=np.uint8),
+                np.full((3, self.H, self.W), 200, dtype=np.uint8),
+            ],
+            axis=0,
+        )
+        masks = [np.ones((self.H, self.W), dtype=bool) for _ in range(3)]
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=self._read_fn_for(scenes),
+            bands_count=3,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            mosaic_method="medoid",
+            percentile=None,
+            tile_size=3,
+            tile_workers=1,
+            out_dtype=np.dtype(np.uint8),
+        )
+
+        assert out.dtype == np.uint8
+        np.testing.assert_array_equal(out, 120)
+
+    def test_medoid_single_scene_falls_back_to_copy(self):
+        scenes = np.full((1, 2, self.H, self.W), 42, dtype=np.uint16)
+        masks = [np.ones((self.H, self.W), dtype=bool)]
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=self._read_fn_for(scenes),
+            bands_count=2,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            mosaic_method="medoid",
+            percentile=None,
+            tile_size=3,
+            tile_workers=1,
+        )
+
+        np.testing.assert_array_equal(out, 42)
 
     def test_adaptive_tile_specs_skip_empty_and_split_sparse_tiles(self):
         mask = np.zeros((2048, 2048), dtype=bool)
@@ -1173,6 +1386,75 @@ class TestNanquantileAxis0:
         # Pin the bound (>1) rather than the value so the test survives tuning.
         assert DEFAULT_TILE_WORKERS > 1
         assert _nanquantile_axis0.signatures
+
+
+class TestMedoidAxis0U16:
+    """Integer medoid reducer must match closest-to-median-vector semantics."""
+
+    @staticmethod
+    def _reference_medoid(
+        stack: np.ndarray, valid: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        n_scenes, n_bands, h, w = stack.shape
+        out = np.zeros((n_bands, h, w), dtype=np.uint16)
+        out_valid = np.zeros((h, w), dtype=bool)
+
+        for y in range(h):
+            for x in range(w):
+                scene_valid = valid[:, y, x]
+                if not scene_valid.any():
+                    continue
+                spectra = stack[scene_valid, :, y, x].astype(np.float64)
+                target = np.median(spectra, axis=0)
+                distances = ((spectra - target) ** 2).sum(axis=1)
+                best_rel = int(np.argmin(distances))
+                best_scene = np.flatnonzero(scene_valid)[best_rel]
+                out[:, y, x] = stack[best_scene, :, y, x]
+                out_valid[y, x] = True
+
+        return out, out_valid
+
+    def test_even_count_median_uses_exact_half_integer_target(self):
+        stack = np.zeros((4, 2, 1, 1), dtype=np.uint16)
+        stack[:, :, 0, 0] = np.array(
+            [
+                [0, 0],
+                [0, 2],
+                [0, 2],
+                [1, 1],
+            ],
+            dtype=np.uint16,
+        )
+        valid = np.ones((4, 1, 1), dtype=bool)
+
+        got, got_valid = _medoid_axis0_u16(stack, valid)
+
+        np.testing.assert_array_equal(got_valid, [[True]])
+        np.testing.assert_array_equal(got[:, 0, 0], [0, 2])
+
+    def test_random_stacks_match_float_reference(self):
+        rng = np.random.default_rng(123)
+        for scenes, bands, h, w in [
+            (2, 1, 4, 5),
+            (4, 2, 3, 4),
+            (6, 4, 3, 3),
+            (9, 3, 4, 2),
+        ]:
+            for _ in range(10):
+                stack = rng.integers(
+                    0, 12000, size=(scenes, bands, h, w), dtype=np.uint16
+                )
+                valid = rng.random((scenes, h, w)) < 0.75
+
+                got, got_valid = _medoid_axis0_u16(stack, valid)
+                expected, expected_valid = self._reference_medoid(stack, valid)
+
+                np.testing.assert_array_equal(got_valid, expected_valid)
+                np.testing.assert_array_equal(got, expected)
+
+    def test_warm_compile_runs_before_threaded_aggregation(self):
+        _warm_medoid_axis0_u16()
+        assert _medoid_axis0_u16.signatures
 
 
 class TestDrainWithRequeue:

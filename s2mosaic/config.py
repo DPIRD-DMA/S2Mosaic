@@ -21,6 +21,7 @@ SCENE_ORDER_CUSTOM = "custom"
 MOSAIC_MEAN = "mean"
 MOSAIC_FIRST = "first"
 MOSAIC_PERCENTILE = "percentile"
+MOSAIC_MEDOID = "medoid"
 
 CLOUD_MASK_OCM = "OCM"
 CLOUD_MASK_SCL = "SCL"
@@ -31,7 +32,7 @@ VALID_SCENE_ORDERS = {
     SCENE_ORDER_NEWEST,
     SCENE_ORDER_CUSTOM,
 }
-VALID_MOSAIC_METHODS = {MOSAIC_MEAN, MOSAIC_FIRST, MOSAIC_PERCENTILE}
+VALID_MOSAIC_METHODS = {MOSAIC_MEAN, MOSAIC_FIRST, MOSAIC_PERCENTILE, MOSAIC_MEDOID}
 VALID_CLOUD_MASKS = {CLOUD_MASK_OCM, CLOUD_MASK_SCL}
 VALID_RESAMPLING_METHODS = {
     "nearest",
@@ -78,6 +79,21 @@ class MosaicRequest:
     ``aoi`` stream intersecting scenes onto a common output grid. Call
     :meth:`normalized` before :meth:`validate` so optional public inputs such as
     ``bands`` and ``additional_query`` are expanded to concrete values.
+
+    ``mosaic_method`` selects how each output pixel is combined across the
+    valid contributing scenes:
+
+    - ``"mean"`` — per-band arithmetic mean.
+    - ``"first"`` — first valid scene in ``scene_order`` (read-cheap).
+    - ``"percentile"`` — per-band percentile (requires ``percentile``).
+    - ``"median"`` — shortcut for ``"percentile"`` with ``percentile=50``.
+    - ``"medoid"`` — picks the scene whose multi-band spectrum is closest
+      (squared Euclidean) to the per-band median across all valid scenes
+      for that pixel. Returns an actually-observed spectrum rather than a
+      synthetic per-band mix, so band relationships stay coherent for
+      indices and classifiers. This is the approximate-medoid formulation
+      popularised by Google Earth Engine tutorials, not the strict
+      Flood 2013 pairwise-distance medoid; the two often agree, but can differ.
 
     Set ``include_observation_count`` to append a final output band containing
     the number of valid source observations contributing to each pixel.
