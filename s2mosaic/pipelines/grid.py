@@ -20,6 +20,7 @@ from ..helpers import (
     get_band_template,
     get_extent_from_grid_id,
     pick_ocm_resolution,
+    report_dropped_scenes,
 )
 from ..output import (
     finalize_output,
@@ -153,7 +154,7 @@ def run_grid_pipeline(
     output_coverage_mask = (
         coverage_mask if request.min_coverage_fraction is not None else None
     )
-    mosaic, profile = stream_mosaic_pipeline(
+    mosaic, profile, dropped_scenes = stream_mosaic_pipeline(
         sorted_scenes=sorted_items,
         bands=bands,
         source=source,
@@ -175,6 +176,7 @@ def run_grid_pipeline(
         show_progress=request.show_progress,
         include_observation_count=request.include_observation_count,
     )
+    sidecar_metadata["dropped_scenes"] = dropped_scenes
     if export_path is not None:
         write_output_sidecar(export_path, sidecar_metadata)
         return export_path
@@ -200,7 +202,7 @@ def stream_mosaic_pipeline(
     output_coverage_mask: Optional[npt.NDArray[Any]] = None,
     mosaic_method: str = "mean",
     ocm_batch_size: int = 6,
-    ocm_inference_dtype: str = "fp16",
+    ocm_inference_dtype: str = "fp32",
     max_dl_workers: int = 4,
     percentile: Optional[float] = 50.0,
     s2_scene_size: int = 10980,
@@ -212,7 +214,7 @@ def stream_mosaic_pipeline(
     adaptive_tiling: bool = True,
     show_progress: bool = False,
     include_observation_count: bool = False,
-) -> Tuple[Optional[npt.NDArray[Any]], Dict[str, Any]]:
+) -> Tuple[Optional[npt.NDArray[Any]], Dict[str, Any], List[Dict[str, str]]]:
     """Tile-streamed mosaic for grid_id mode.
 
     Replaces the old in-memory ``download_bands_pool`` path. Peak working
@@ -251,9 +253,9 @@ def stream_mosaic_pipeline(
     )
     masks: List[Optional[npt.NDArray[Any]]] = [None] * n_scenes
     good_pixel_tracker = np.zeros_like(coverage_mask, dtype=bool)
-    n_mask_fetch_failed = 0
+    dropped_scenes: List[Dict[str, str]] = []
 
-    def _fetch_mask(idx: int, item: Any) -> Optional[npt.NDArray[Any]]:
+    def _fetch_mask(idx: int, item: Any) -> npt.NDArray[Any]:
         return _compute_one_scene_mask(
             item=item,
             source=source,
@@ -279,9 +281,7 @@ def stream_mosaic_pipeline(
         if _pb is not None:
             _pb.update(1)
 
-    mask_iter: Generator[
-        Tuple[int, Union[Optional[npt.NDArray[Any]], Exception]], None, None
-    ]
+    mask_iter: Generator[Tuple[int, Union[npt.NDArray[Any], Exception]], None, None]
     mask_iter = iter_ordered_fetches(
         items=items,
         fetch_fn=_fetch_mask,
@@ -308,7 +308,9 @@ def stream_mosaic_pipeline(
                 break
             if isinstance(combo_result, Exception):
                 if isinstance(combo_result, SceneFetchError):
-                    n_mask_fetch_failed += 1
+                    dropped_scenes.append(
+                        {"id": items[scene_idx].id, "reason": str(combo_result)}
+                    )
                     logger.warning(
                         "Scene %d/%d (%s): mask fetch failed, skipping (%s)",
                         scene_idx + 1,
@@ -320,15 +322,11 @@ def stream_mosaic_pipeline(
                 raise combo_result
             combo = combo_result
             logger.info(
-                "Phase 1: scene %d/%d (%s): %s",
+                "Phase 1: scene %d/%d (%s): ok",
                 scene_idx + 1,
                 n_scenes,
                 items[scene_idx].id,
-                "ok" if combo is not None else "skipped",
             )
-            if combo is None:
-                n_mask_fetch_failed += 1
-                continue
             if mosaic_method == MOSAIC_FIRST:
                 new_pixels = combo & ~good_pixel_tracker
                 if not new_pixels.any():
@@ -354,12 +352,13 @@ def stream_mosaic_pipeline(
             mask_progress.close()
 
     n_succeeded = sum(1 for m in masks if m is not None)
-    if n_mask_fetch_failed:
+    if dropped_scenes:
         logger.warning(
             "Phase 1: %d/%d scenes failed mask compute",
-            n_mask_fetch_failed,
+            len(dropped_scenes),
             n_scenes,
         )
+        report_dropped_scenes(dropped_scenes, total=n_scenes)
     if n_succeeded == 0:
         raise RuntimeError(
             f"All {n_scenes} scenes failed to fetch masks — no data to mosaic"
@@ -440,7 +439,7 @@ def stream_mosaic_pipeline(
                 min_tile_size=min_tile_size,
                 include_observation_count=include_observation_count,
             )
-            return None, last_profile
+            return None, last_profile, dropped_scenes
 
         out = run_tile_aggregation(
             masks=masks,
@@ -461,7 +460,7 @@ def stream_mosaic_pipeline(
             min_tile_size=min_tile_size,
             include_observation_count=include_observation_count,
         )
-        return out, last_profile
+        return out, last_profile, dropped_scenes
     finally:
         close = getattr(read_fn, "close", None)
         if close is not None:

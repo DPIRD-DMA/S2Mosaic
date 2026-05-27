@@ -4,7 +4,13 @@ import logging
 import os
 import tempfile
 import threading
-from concurrent.futures import Executor, ThreadPoolExecutor
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    Executor,
+    Future,
+    ThreadPoolExecutor,
+    wait,
+)
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
@@ -12,6 +18,7 @@ import numpy as np
 import numpy.typing as npt
 import rasterio as rio
 from numba import njit
+from rasterio.errors import RasterioIOError
 from rasterio.windows import Window
 from tqdm.auto import tqdm
 
@@ -31,6 +38,19 @@ DEFAULT_BAND_READ_WORKERS = 16
 DEFAULT_ADAPTIVE_TILE_MIN_SIZE = 512
 DEFAULT_ADAPTIVE_TILE_DENSE_FRACTION = 0.75
 EXPECTED_READ_EXACT_SCAN_LIMIT = 50_000
+
+# Tile requeue policy. When a tile worker fails with RasterioIOError the
+# parallel path puts the spec back at the end of the executor's queue, giving
+# the failure time to clear while other tiles finish. Caps below keep a real
+# systemic problem (e.g. a 404, an auth failure) from looping forever.
+#
+# MAX_REQUEUES_PER_TILE: how many additional attempts each individual tile may
+# receive on top of the in-worker retries already done by the reader.
+# MAX_TOTAL_REQUEUE_FRACTION: ceiling on requeues across the whole run as a
+# fraction of total tile count. If a quarter of all tiles have already been
+# requeued, the next failure surfaces immediately — the run is in trouble.
+MAX_REQUEUES_PER_TILE = 2
+MAX_TOTAL_REQUEUE_FRACTION = 0.25
 
 # Reader function shared by grid_id and bounds streamers.
 # Signature: read_fn(scene_idx, band_idx, spec) -> ndarray of shape (h, w).
@@ -686,6 +706,67 @@ def run_tile_aggregation(
     return out
 
 
+def _drain_with_requeue(
+    *,
+    specs: List[Tuple[int, int, int, int]],
+    worker_fn: Callable[
+        [Tuple[int, int, int, int]],
+        Tuple[Tuple[int, int, int, int], npt.NDArray[Any]],
+    ],
+    n_workers: int,
+    log_every: int,
+) -> Iterator[Tuple[Tuple[int, int, int, int], npt.NDArray[Any]]]:
+    """Run ``worker_fn`` for every spec in parallel, requeueing transient failures.
+
+    Yields ``(spec, tile_data)`` in completion order. When a worker raises
+    ``RasterioIOError`` the spec is re-submitted to the same executor (so it
+    naturally lands at the back of the queue while other tiles fill the gap),
+    bounded by :data:`MAX_REQUEUES_PER_TILE` per spec and
+    :data:`MAX_TOTAL_REQUEUE_FRACTION` across the run. Any other exception
+    propagates immediately.
+    """
+    total_specs = len(specs)
+    max_total_requeues = max(1, int(total_specs * MAX_TOTAL_REQUEUE_FRACTION))
+    requeue_counts: Dict[Tuple[int, int, int, int], int] = {}
+    total_requeues = 0
+    completed = 0
+
+    with ThreadPoolExecutor(max_workers=n_workers) as tile_executor:
+        pending: Dict[Future[Any], Tuple[int, int, int, int]] = {
+            tile_executor.submit(worker_fn, s): s for s in specs
+        }
+        while pending:
+            done, _ = wait(pending.keys(), return_when=FIRST_COMPLETED)
+            for fut in done:
+                spec = pending.pop(fut)
+                try:
+                    result = fut.result()
+                except RasterioIOError as exc:
+                    count = requeue_counts.get(spec, 0)
+                    if (
+                        count < MAX_REQUEUES_PER_TILE
+                        and total_requeues < max_total_requeues
+                    ):
+                        requeue_counts[spec] = count + 1
+                        total_requeues += 1
+                        logger.warning(
+                            "Tile %s failed (requeue %d/%d, %d/%d total): %s",
+                            spec,
+                            count + 1,
+                            MAX_REQUEUES_PER_TILE,
+                            total_requeues,
+                            max_total_requeues,
+                            exc,
+                        )
+                        pending[tile_executor.submit(worker_fn, spec)] = spec
+                        continue
+                    raise
+                completed += 1
+                if completed % log_every == 0 or completed == total_specs:
+                    logger.info("Phase 2: %d/%d tiles done", completed, total_specs)
+                yield result
+
+
 def iter_tile_aggregation(
     masks: List[Optional[npt.NDArray[Any]]],
     read_fn: ReaderFn,
@@ -837,13 +918,12 @@ def iter_tile_aggregation(
                     logger.info("Phase 2: %d/%d tiles done", completed, len(specs))
                 yield spec, tile_data
         else:
-            with ThreadPoolExecutor(max_workers=n_workers) as tile_executor:
-                tile_results = tile_executor.map(worker_fn, specs)
-                for spec, tile_data in tile_results:
-                    completed += 1
-                    if completed % log_every == 0 or completed == len(specs):
-                        logger.info("Phase 2: %d/%d tiles done", completed, len(specs))
-                    yield spec, tile_data
+            yield from _drain_with_requeue(
+                specs=specs,
+                worker_fn=worker_fn,
+                n_workers=n_workers,
+                log_every=log_every,
+            )
     finally:
         if band_executor_cm is not None:
             band_executor_cm.shutdown(wait=True)

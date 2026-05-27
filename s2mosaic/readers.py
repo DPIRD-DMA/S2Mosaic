@@ -18,7 +18,7 @@ from rasterio.windows import Window
 
 from .config import CLOUD_MASK_SCL, MOSAIC_FIRST
 from .geometry import Bbox
-from .helpers import SceneFetchError, get_rasterio_resampling
+from .helpers import backoff_delay, get_rasterio_resampling
 from .masking import get_masks, get_scl_masks
 from .sources import Source
 from ._types import BoundsItemLike
@@ -26,7 +26,7 @@ from ._types import BoundsItemLike
 logger = logging.getLogger(__name__)
 DEFAULT_TILE_WORKERS = 8
 SIGNED_URL_TTL_SECONDS = 45 * 60
-REMOTE_RASTER_ATTEMPTS = 3
+REMOTE_RASTER_ATTEMPTS = 4
 MAX_PREWARM_WORKERS = 16
 GridSourceResolver = Callable[[bool], str]
 BoundsSourceResolver = Callable[[bool], str]
@@ -71,7 +71,7 @@ def _retry_open_raster(
         except RasterioIOError as exc:
             last_error = exc
             if attempt < REMOTE_RASTER_ATTEMPTS - 1:
-                time.sleep(0.5 * (attempt + 1))
+                time.sleep(backoff_delay(attempt))
     if last_error is None:
         raise RasterioIOError("Remote raster open failed")
     raise last_error
@@ -87,26 +87,27 @@ def _compute_one_scene_mask(
     max_dl_workers: int,
     s2_scene_size: int,
     resolution: int,
-) -> Optional[npt.NDArray[Any]]:
-    """Phase-1 worker: return the per-scene combo mask or None on fetch error."""
-    try:
-        if cloud_mask == CLOUD_MASK_SCL:
-            clear, valid = get_scl_masks(
-                item=item, source=source, user_resolution=resolution
-            )
-        else:
-            clear, valid = get_masks(
-                item=item,
-                source=source,
-                batch_size=ocm_batch_size,
-                inference_dtype=ocm_inference_dtype,
-                max_dl_workers=max_dl_workers,
-                target_size=s2_scene_size,
-                ocm_resolution=ocm_resolution,
-            )
-    except SceneFetchError as e:
-        logger.warning("Mask fetch failed for %s, skipping (%s)", item.id, e)
-        return None
+) -> npt.NDArray[Any]:
+    """Phase-1 worker: return the per-scene combo mask.
+
+    Propagates :class:`SceneFetchError` rather than swallowing it so the
+    pipeline can track which scenes dropped (id + reason) and surface the
+    summary to the user.
+    """
+    if cloud_mask == CLOUD_MASK_SCL:
+        clear, valid = get_scl_masks(
+            item=item, source=source, user_resolution=resolution
+        )
+    else:
+        clear, valid = get_masks(
+            item=item,
+            source=source,
+            batch_size=ocm_batch_size,
+            inference_dtype=ocm_inference_dtype,
+            max_dl_workers=max_dl_workers,
+            target_size=s2_scene_size,
+            ocm_resolution=ocm_resolution,
+        )
     combo: npt.NDArray[Any] = (clear & valid).astype(np.bool_)
     return combo
 
@@ -234,7 +235,7 @@ class GridTileReader:
             except RasterioIOError as exc:
                 last_error = exc
                 if attempt < REMOTE_RASTER_ATTEMPTS - 1:
-                    time.sleep(0.5 * (attempt + 1))
+                    time.sleep(backoff_delay(attempt))
         if last_error is None:
             raise RasterioIOError("Remote raster read failed")
         raise last_error
@@ -512,7 +513,7 @@ class BoundsTileReader:
             except RasterioIOError as exc:
                 last_error = exc
                 if attempt < REMOTE_RASTER_ATTEMPTS - 1:
-                    time.sleep(0.5 * (attempt + 1))
+                    time.sleep(backoff_delay(attempt))
         if last_error is None:
             raise RasterioIOError("Remote raster read failed")
         raise last_error

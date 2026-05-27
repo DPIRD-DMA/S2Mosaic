@@ -4,11 +4,13 @@ import warnings
 import numpy as np
 import pytest
 import rasterio as rio
+from rasterio.errors import RasterioIOError
 from rasterio.transform import from_origin
 
 import s2mosaic.aggregation as aggregation_mod
 from s2mosaic.aggregation import (
     DEFAULT_TILE_WORKERS,
+    _drain_with_requeue,
     _nanquantile_axis0,
     _split_tile_size_aligned,
     _warm_nanquantile_axis0,
@@ -486,6 +488,8 @@ class TestRunTileAggregation:
     ):
         captured_workers = []
 
+        from concurrent.futures import Future
+
         class FakeExecutor:
             def __init__(self, max_workers):
                 captured_workers.append(max_workers)
@@ -498,6 +502,17 @@ class TestRunTileAggregation:
 
             def map(self, fn, specs):
                 return map(fn, specs)
+
+            def submit(self, fn, *args, **kwargs):
+                fut: Future = Future()
+                try:
+                    fut.set_result(fn(*args, **kwargs))
+                except BaseException as exc:
+                    fut.set_exception(exc)
+                return fut
+
+            def shutdown(self, wait=True):
+                return None
 
         monkeypatch.setattr(aggregation_mod, "ThreadPoolExecutor", FakeExecutor)
 
@@ -1158,3 +1173,106 @@ class TestNanquantileAxis0:
         # Pin the bound (>1) rather than the value so the test survives tuning.
         assert DEFAULT_TILE_WORKERS > 1
         assert _nanquantile_axis0.signatures
+
+
+class TestDrainWithRequeue:
+    """Parallel tile drain with bounded requeue on transient IO failures."""
+
+    @staticmethod
+    def _spec(i):
+        # Specs are (row, col, h, w) tuples; encode the id in row so worker
+        # callbacks can distinguish them.
+        return (i, 0, 1, 1)
+
+    def test_yields_all_specs_when_no_failures(self):
+        specs = [self._spec(i) for i in range(4)]
+        seen = []
+
+        def worker_fn(spec):
+            seen.append(spec)
+            return spec, np.array([spec[0]])
+
+        results = list(
+            _drain_with_requeue(
+                specs=specs, worker_fn=worker_fn, n_workers=2, log_every=1
+            )
+        )
+
+        assert sorted(seen) == specs
+        assert {spec for spec, _ in results} == set(specs)
+
+    def test_requeues_after_transient_failure_and_yields_result(self):
+        specs = [self._spec(0), self._spec(1)]
+        failures = {self._spec(0): 1}  # spec 0 fails once, then succeeds
+        lock = threading.Lock()
+
+        def worker_fn(spec):
+            with lock:
+                remaining = failures.get(spec, 0)
+                if remaining > 0:
+                    failures[spec] = remaining - 1
+                    raise RasterioIOError("transient")
+            return spec, np.array([spec[0]])
+
+        results = list(
+            _drain_with_requeue(
+                specs=specs, worker_fn=worker_fn, n_workers=2, log_every=10
+            )
+        )
+
+        assert {spec for spec, _ in results} == set(specs)
+        assert failures[self._spec(0)] == 0
+
+    def test_raises_when_per_tile_cap_exceeded(self, monkeypatch):
+        # MAX_REQUEUES_PER_TILE=2 means the spec gets 3 worker calls total
+        # (initial + 2 requeues) before the failure propagates. Use a large
+        # total-fraction so the per-tile cap is what trips.
+        monkeypatch.setattr(aggregation_mod, "MAX_REQUEUES_PER_TILE", 2)
+        monkeypatch.setattr(aggregation_mod, "MAX_TOTAL_REQUEUE_FRACTION", 10.0)
+        specs = [self._spec(0)]
+        calls = {"count": 0}
+
+        def worker_fn(spec):
+            calls["count"] += 1
+            raise RasterioIOError("permanent")
+
+        with pytest.raises(RasterioIOError, match="permanent"):
+            list(
+                _drain_with_requeue(
+                    specs=specs, worker_fn=worker_fn, n_workers=1, log_every=10
+                )
+            )
+        assert calls["count"] == 3
+
+    def test_raises_when_total_requeue_cap_exceeded(self, monkeypatch):
+        # 4 tiles all failing, total cap of 1 requeue. The first requeue uses
+        # the budget; the second failure must surface immediately.
+        monkeypatch.setattr(aggregation_mod, "MAX_REQUEUES_PER_TILE", 5)
+        monkeypatch.setattr(aggregation_mod, "MAX_TOTAL_REQUEUE_FRACTION", 0.25)
+        specs = [self._spec(i) for i in range(4)]
+
+        def worker_fn(spec):
+            raise RasterioIOError("transient")
+
+        with pytest.raises(RasterioIOError, match="transient"):
+            list(
+                _drain_with_requeue(
+                    specs=specs, worker_fn=worker_fn, n_workers=1, log_every=10
+                )
+            )
+
+    def test_non_io_error_propagates_without_requeue(self):
+        specs = [self._spec(0)]
+        calls = {"count": 0}
+
+        def worker_fn(spec):
+            calls["count"] += 1
+            raise ValueError("not transient")
+
+        with pytest.raises(ValueError, match="not transient"):
+            list(
+                _drain_with_requeue(
+                    specs=specs, worker_fn=worker_fn, n_workers=1, log_every=10
+                )
+            )
+        assert calls["count"] == 1

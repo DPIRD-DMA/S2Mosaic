@@ -45,6 +45,12 @@ GDAL_NETWORK_DEFAULTS: dict[str, str] = {
     # instead of a notebook appearing stuck forever on one COG request.
     "GDAL_HTTP_CONNECTTIMEOUT": "30",
     "GDAL_HTTP_TIMEOUT": "120",
+    # Curl-layer retry for transient HTTP failures (429/502/503/504, connection
+    # resets, TLS hiccups). Operates below the app-level _retry_open_raster
+    # so a brief blob-storage blip doesn't burn through the 3-strike app retry
+    # in a 3-second window.
+    "GDAL_HTTP_MAX_RETRY": "3",
+    "GDAL_HTTP_RETRY_DELAY": "1",
     # GDAL block cache for decoded GeoTIFF tile blocks.
     "GDAL_CACHEMAX": "256",
     # Read enough up-front to cover the COG header + IFD; saves a round trip

@@ -44,6 +44,7 @@ from ..helpers import (
     get_band_template,
     get_rasterio_resampling,
     pick_ocm_resolution,
+    report_dropped_scenes,
     with_scene_retry,
 )
 from ..masking import compute_masks_from_array, compute_masks_from_scl
@@ -84,6 +85,7 @@ from ..geometry import (
     _snap_bounds_to_grid,
     _target_grid,
     _window_bounds_in_target,
+    densify_bbox_to_polygon,
     pick_utm_epsg,
     reproject_aoi,
     reproject_bbox,
@@ -361,7 +363,7 @@ def _stream_bounds_combo_masks(
     ocm_inference_dtype: str,
     scl_tile_specs: Optional[List[Tuple[int, int, int, int]]],
     show_progress: bool,
-) -> Dict[int, "_WindowedBoolMask"]:
+) -> Tuple[Dict[int, "_WindowedBoolMask"], List[Dict[str, str]]]:
     """Stream per-scene cloud masks and keep only masks that contribute pixels.
 
     Each scene's read window is clipped to its own footprint within
@@ -395,7 +397,7 @@ def _stream_bounds_combo_masks(
 
     kept_combo_masks: Dict[int, _WindowedBoolMask] = {}
     good_pixel_tracker = np.zeros((mask_h, mask_w), dtype=bool)
-    n_mask_fetch_failed = 0
+    dropped_scenes: List[Dict[str, str]] = []
     mask_progress: Optional["tqdm[Any]"] = None
     if show_progress:
         mask_progress = tqdm(
@@ -472,7 +474,12 @@ def _stream_bounds_combo_masks(
                 break
             if isinstance(mask_result, Exception):
                 if isinstance(mask_result, SceneFetchError):
-                    n_mask_fetch_failed += 1
+                    dropped_scenes.append(
+                        {
+                            "id": items_list[scene_idx].id,
+                            "reason": str(mask_result),
+                        }
+                    )
                     logger.warning(
                         f"Scene {scene_idx + 1}/{n_time} "
                         f"({items_list[scene_idx].id}): mask fetch failed, "
@@ -532,18 +539,19 @@ def _stream_bounds_combo_masks(
                 mask_progress.refresh()
             mask_progress.close()
 
-    if n_mask_fetch_failed:
+    if dropped_scenes:
         logger.warning(
-            f"Mask phase: {n_mask_fetch_failed}/{n_time} scenes failed to fetch "
+            f"Mask phase: {len(dropped_scenes)}/{n_time} scenes failed to fetch "
             "after retries; continuing with the rest"
         )
+        report_dropped_scenes(dropped_scenes, total=n_time)
 
     if not kept_combo_masks:
         raise RuntimeError(
             "No usable scenes — every scene was fully cloud-masked, invalid, "
             "or failed to fetch"
         )
-    return kept_combo_masks
+    return kept_combo_masks, dropped_scenes
 
 
 def run_bounds_pipeline(
@@ -616,6 +624,16 @@ def run_bounds_pipeline(
         target_crs = pick_utm_epsg(cx, cy)
         logger.info(f"Auto-picked target CRS: EPSG:{target_crs}")
 
+    # Bounds mode crossing a CRS: synthesise a densified polygon from the input
+    # rectangle so per-scene masks clip valid pixels to the requested area.
+    # transform_bounds returns the *axis-aligned envelope* of the reprojected
+    # rectangle, which at high meridian convergence can overshoot the supplied
+    # bounds by tens of km. The polygon flows through the existing AOI mask
+    # path; sidecar "mode" still reflects the user's request (see below).
+    if aoi is None and request.input_crs != target_crs:
+        aoi = densify_bbox_to_polygon(bounds)
+        aoi_4326 = reproject_aoi(aoi, request.input_crs, 4326)
+
     aoi_target = (
         reproject_aoi(aoi, request.input_crs, target_crs) if aoi is not None else None
     )
@@ -641,7 +659,7 @@ def run_bounds_pipeline(
         request.duration_days,
     )
 
-    mode = "aoi" if aoi is not None else "bounds"
+    mode = "aoi" if request.aoi is not None else "bounds"
     filename_hash = output_request_hash(
         request,
         mode=mode,
@@ -754,7 +772,7 @@ def run_bounds_pipeline(
         ):
             scl_tile_specs = None
 
-    kept_combo_masks_ocm = _stream_bounds_combo_masks(
+    kept_combo_masks_ocm, dropped_scenes = _stream_bounds_combo_masks(
         items_list=items_list,
         source=source,
         bounds_target=bounds_target,
@@ -771,6 +789,7 @@ def run_bounds_pipeline(
         scl_tile_specs=scl_tile_specs,
         show_progress=request.show_progress,
     )
+    sidecar_metadata["dropped_scenes"] = dropped_scenes
 
     # Prepare the user-resolution masks and target grid for tile aggregation.
     kept_indices = sorted(kept_combo_masks_ocm.keys())

@@ -1,10 +1,13 @@
 import pytest
+from shapely.geometry import Polygon
 
 from s2mosaic.config import MosaicRequest
 from s2mosaic.geometry import (
     _snap_bounds_to_grid,
     _target_grid,
+    densify_bbox_to_polygon,
     pick_utm_epsg,
+    reproject_aoi,
     reproject_bbox,
 )
 
@@ -144,3 +147,45 @@ class TestReprojectBbox:
         back = reproject_bbox(utm, 32750, 4326)
         for got, want in zip(back, bbox_4326, strict=False):
             assert abs(got - want) < 0.001
+
+
+class TestDensifyBboxToPolygon:
+    def test_returns_polygon_with_densified_edges(self):
+        poly = densify_bbox_to_polygon((0.0, 0.0, 10.0, 5.0), points_per_edge=11)
+
+        assert isinstance(poly, Polygon)
+        # 11 points/edge × 4 edges − 4 shared corners = 40 unique exterior vertices.
+        assert len(poly.exterior.coords) - 1 == 40
+        # Envelope must match the input bbox exactly.
+        assert poly.bounds == (0.0, 0.0, 10.0, 5.0)
+
+    def test_rejects_degenerate_bbox(self):
+        with pytest.raises(ValueError, match="positive-area"):
+            densify_bbox_to_polygon((0.0, 0.0, 0.0, 5.0))
+
+    def test_reprojected_envelope_matches_transform_bounds(self):
+        # The wide WA strip from the failing notebook: a lon/lat rectangle far
+        # west of the target UTM central meridian. The polygon envelope must
+        # agree with transform_bounds within metres so swapping the legacy
+        # reproject_bbox path for the polygon path does not noticeably resize
+        # the output GeoTIFF. (Polygon envelope can be slightly larger because
+        # 21 points/edge captures bulge marginally finer than pyproj's default
+        # transform_bounds densification.)
+        bbox_4326 = (114.80, -32.35, 125.20, -31.75)
+        densified = densify_bbox_to_polygon(bbox_4326)
+        utm_poly = reproject_aoi(densified, 4326, 32751)
+
+        legacy = reproject_bbox(bbox_4326, 4326, 32751)
+        for got, want in zip(utm_poly.bounds, legacy, strict=True):
+            assert abs(got - want) < 20.0  # << 160m pixel at the example resolution
+
+    def test_same_crs_polygon_round_trip(self):
+        # If input_crs == target_crs, reprojection is a no-op.
+        # The densified polygon is preserved, so .bounds matches the input bbox.
+        poly = densify_bbox_to_polygon((100_000.0, 200_000.0, 110_000.0, 210_000.0))
+        assert reproject_aoi(poly, 32750, 32750).bounds == (
+            100_000.0,
+            200_000.0,
+            110_000.0,
+            210_000.0,
+        )

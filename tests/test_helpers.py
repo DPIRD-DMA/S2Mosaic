@@ -3,9 +3,12 @@ import logging
 import pytest
 from rasterio.errors import RasterioIOError
 
+import io
+
 from s2mosaic.helpers import (
     SceneFetchError,
     _load_s2_grid,
+    report_dropped_scenes,
     with_scene_retry,
 )
 
@@ -93,6 +96,29 @@ class TestSceneRetry:
 
         assert calls["n"] == 1
 
+    def test_retry_delegates_to_backoff_delay_with_base(self, monkeypatch):
+        # Guard: the dedupe relies on with_scene_retry going through
+        # backoff_delay. If a future refactor inlines the math, jitter would
+        # silently disappear from Phase 1 — this catches that drift.
+        monkeypatch.setattr("s2mosaic.helpers.time.sleep", lambda _: None)
+        calls = []
+
+        def fake_backoff(attempt, *, base):
+            calls.append((attempt, base))
+            return 0.0
+
+        monkeypatch.setattr("s2mosaic.helpers.backoff_delay", fake_backoff)
+
+        @with_scene_retry(attempts=3, base_delay=2.5)
+        def always_fails():
+            raise RasterioIOError("transient")
+
+        with pytest.raises(SceneFetchError):
+            always_fails()
+
+        # Two sleeps between three attempts; both pass the caller's base_delay.
+        assert calls == [(0, 2.5), (1, 2.5)]
+
 
 class TestPickOcmResolution:
     """Clamping logic for OCM resolution given user resolution."""
@@ -138,3 +164,24 @@ class TestResamplingMap:
 
         with pytest.raises(KeyError):
             get_rasterio_resampling("bogus")
+
+
+class TestReportDroppedScenes:
+    def test_nothing_printed_when_no_drops(self):
+        buf = io.StringIO()
+        report_dropped_scenes([], total=12, stream=buf)
+        assert buf.getvalue() == ""
+
+    def test_summary_includes_count_total_and_ids(self):
+        buf = io.StringIO()
+        report_dropped_scenes(
+            [
+                {"id": "S2A_X", "reason": "timeout"},
+                {"id": "S2B_Y", "reason": "403"},
+            ],
+            total=10,
+            stream=buf,
+        )
+        text = buf.getvalue()
+        assert "2/10 scenes dropped" in text
+        assert "S2A_X" in text and "S2B_Y" in text

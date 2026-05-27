@@ -164,7 +164,7 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 
 - `cloud_mask` (`"OCM"`): provider — `"OCM"` runs the OmniCloudMask deep-learning model on R+G+NIR bands (most accurate); `"SCL"` reads the L2A Scene Classification Layer (much cheaper, lower accuracy).
 - `ocm_batch_size` (`1`): OCM inference batch size. Only used with `cloud_mask="OCM"`.
-- `ocm_inference_dtype` (`"fp16"`): OCM inference dtype. Defaults to `"fp16"` for broad GPU/MPS compatibility; use `"fp32"` for CPU inference, or `"bf16"` on devices that support it. Only used with `cloud_mask="OCM"`.
+- `ocm_inference_dtype` (`"fp32"`): OCM inference dtype. Defaults to `"fp32"` — runs everywhere and is the fastest option on CPU. On GPU, use `"fp16"` for ~2× speedup and lower VRAM, or `"bf16"` on hardware that supports it. Only used with `cloud_mask="OCM"`.
 
 **Diagnostics**
 
@@ -209,7 +209,7 @@ If your application already configures the `logging` module, the package logger 
 ## Performance Tips
 - `cloud_mask`: Default `"OCM"` runs the OmniCloudMask deep-learning model — most accurate but needs reasonable compute (GPU/MPS recommended). Switch to `"SCL"` on CPU-only machines or for bulk processing — it skips inference entirely and just reads the L2A Scene Classification Layer.
 - `ocm_batch_size`: If using a GPU, setting this above the default value (1) will speed up cloud masking. In most cases, a value of 4 works well. If you encounter CUDA errors, try using a lower number.
-- `ocm_inference_dtype`: defaults to `'fp16'` for the widest GPU/MPS support. Use `'fp32'` for CPU inference — most CPUs don't have efficient fp16/bf16 paths, so fp32 is both more compatible and faster there.
+- `ocm_inference_dtype`: defaults to `'fp32'` — runs on every backend and is the fastest option on CPU (most CPUs don't have efficient fp16/bf16 paths). On GPU, switch to `'fp16'` for ~2× faster inference and lower VRAM use, or `'bf16'` on hardware that supports it (Ampere+ NVIDIA, Apple Silicon).
 - `scene_order`: Using `"valid_data"` tends to work well with early stopping because clear scenes are considered first.
 - `min_observations`: For large `"mean"` or `"percentile"` jobs, set this to the number of observations per pixel you actually need to avoid reading later scenes for already-satisfied tiles.
 - `max_observations`: Caps each pixel at N valid scenes. Combine with `scene_order="oldest"` (or `"newest"`) to bias the mosaic toward early/late dates over a long search window without paying for the extra reads.
@@ -222,6 +222,29 @@ If your application already configures the `logging` module, the package logger 
 ## Contributing
 
 Contributions to S2Mosaic are welcome! Please feel free to submit pull requests, create issues, or suggest improvements.
+
+### Running the tests
+
+Tests use `pytest`. The fast suite (unit tests + mocked pipelines) runs in under 15s and is what CI runs by default:
+
+```bash
+uv run pytest                       # full fast suite
+uv run pytest tests/test_readers.py # one file
+uv run pytest -k requeue            # match by name
+```
+
+End-to-end tests that hit the network and run a real mosaic are marked `slow` and excluded by default (see `addopts` in `pyproject.toml`). To run them explicitly:
+
+```bash
+uv run pytest -m slow               # only slow tests
+uv run pytest -m ""                 # everything, including slow
+```
+
+Lint with ruff:
+
+```bash
+uv run ruff check s2mosaic/ tests/
+```
 
 For maintainers: the release flow (cut a tag, GitHub Actions builds + publishes to PyPI) is documented in [RELEASING.md](https://github.com/DPIRD-DMA/S2Mosaic/blob/main/RELEASING.md).
 

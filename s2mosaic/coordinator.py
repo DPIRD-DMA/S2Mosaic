@@ -163,7 +163,7 @@ def mosaic(
     scene_sort_fn: Optional[Callable[..., Any]] = None,
     cloud_mask: str = "OCM",
     ocm_batch_size: int = 1,
-    ocm_inference_dtype: str = "fp16",
+    ocm_inference_dtype: str = "fp32",
     output_crs: Optional[int] = None,
     resolution: int = 10,
     resampling_method: str = "nearest",
@@ -244,9 +244,11 @@ def mosaic(
             (one COG read, no inference) but lower accuracy.
         ocm_batch_size (int, optional): Batch size for OCM inference. Defaults to 1.
         ocm_inference_dtype (str, optional): Data type for OCM inference.
-            Defaults to "fp16" for broad GPU/MPS compatibility. Use "fp32" for
-            CPU inference (most CPUs lack efficient fp16/bf16 paths), or "bf16"
-            on devices that support it.
+            Defaults to "fp32" for the broadest device compatibility — runs on
+            every CPU/GPU/MPS backend and is also the fastest option on CPU
+            (most CPUs lack efficient fp16/bf16 paths). On GPU, switch to
+            "fp16" for ~2× speedup with lower VRAM use, or "bf16" on hardware
+            that supports it (Ampere+ NVIDIA, Apple Silicon).
         output_crs (int, optional): EPSG code for the output grid. In bounds
             mode, defaults to the UTM zone containing the AOI centroid. Ignored
             in grid mode.

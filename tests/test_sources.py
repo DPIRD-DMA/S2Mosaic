@@ -169,18 +169,31 @@ class TestSourceThreadsThroughBoundsPipeline:
     """End-to-end smoke: source flows from mosaic() into the STAC search call."""
 
     def test_aws_source_reaches_bounds_search(self, monkeypatch):
+        # Lat/lon bounds without an output_crs auto-pick UTM, which routes
+        # the search through the polygon (AOI) path. Patch both search
+        # functions so the test only checks source-threading, not routing.
         captured = {}
 
-        def fake_search(*, bbox_4326, start_date, end_date, source, **_):
+        def fake_search_by_aoi(*, aoi_4326, start_date, end_date, source, **_):
+            captured["source"] = source
+            captured["geometry"] = aoi_4326
+            captured["start_date"] = start_date
+            captured["end_date"] = end_date
+            raise RuntimeError("stop-here")
+
+        def fake_search_by_bbox(*, bbox_4326, start_date, end_date, source, **_):
             captured["source"] = source
             captured["geometry"] = bbox_4326
             captured["start_date"] = start_date
             captured["end_date"] = end_date
-            raise RuntimeError("stop-here")  # short-circuit further work
+            raise RuntimeError("stop-here")
 
         import s2mosaic.pipelines.bounds as bounds_mod
 
-        monkeypatch.setattr(bounds_mod, "_search_for_items_by_bbox", fake_search)
+        monkeypatch.setattr(bounds_mod, "_search_for_items_by_aoi", fake_search_by_aoi)
+        monkeypatch.setattr(
+            bounds_mod, "_search_for_items_by_bbox", fake_search_by_bbox
+        )
 
         with pytest.raises(RuntimeError, match="stop-here"):
             mosaic(
@@ -196,12 +209,13 @@ class TestSourceThreadsThroughBoundsPipeline:
     def test_mpc_source_reaches_bounds_search_by_default(self, monkeypatch):
         captured = {}
 
-        def fake_search(*, bbox_4326, start_date, end_date, source, **_):
+        def fake_search(*, source, **_):
             captured["source"] = source
             raise RuntimeError("stop-here")
 
         import s2mosaic.pipelines.bounds as bounds_mod
 
+        monkeypatch.setattr(bounds_mod, "_search_for_items_by_aoi", fake_search)
         monkeypatch.setattr(bounds_mod, "_search_for_items_by_bbox", fake_search)
 
         with pytest.raises(RuntimeError, match="stop-here"):

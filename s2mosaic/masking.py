@@ -64,7 +64,7 @@ def compute_masks_from_scl(
 def compute_masks_from_array(
     rgb_nir: npt.NDArray[Any],
     batch_size: int = 6,
-    inference_dtype: str = "fp16",
+    inference_dtype: str = "fp32",
 ) -> Tuple[npt.NDArray[Any], npt.NDArray[Any]]:
     """Run cloud + valid masking on an in-memory (3, H, W) R+G+NIR uint16 array.
 
@@ -121,7 +121,7 @@ def get_masks(
     item: pystac.Item,
     source: Source,
     batch_size: int = 6,
-    inference_dtype: str = "fp16",
+    inference_dtype: str = "fp32",
     max_dl_workers: int = 4,
     target_size: Union[int, Tuple[int, int]] = 10980,
     ocm_resolution: int = 20,

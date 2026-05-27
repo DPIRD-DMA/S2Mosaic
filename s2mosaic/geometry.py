@@ -51,6 +51,33 @@ def reproject_aoi(aoi: Aoi, src_epsg: int, dst_epsg: int) -> Aoi:
     return cast(Aoi, reprojected)
 
 
+def densify_bbox_to_polygon(bbox: Bbox, points_per_edge: int = 21) -> Aoi:
+    """Build a rectangle polygon with each edge sampled at ``points_per_edge``.
+
+    Used so :func:`reproject_aoi` on the polygon captures CRS edge curvature.
+    A 4-vertex polygon reprojected vertex-by-vertex draws its edges as chords
+    in the destination CRS, missing the bulge of lines of constant latitude in
+    UTM (and similar). Densifying first means the reprojected polygon
+    approximates the curved edges and its envelope matches the legacy
+    ``transform_bounds(densify_pts=points_per_edge)`` extent.
+    """
+    minx, miny, maxx, maxy = bbox
+    if not (maxx > minx and maxy > miny):
+        raise ValueError(
+            f"densify_bbox_to_polygon requires a positive-area bbox, got {bbox}"
+        )
+    n = max(2, int(points_per_edge))
+    xs = np.linspace(minx, maxx, n)
+    ys = np.linspace(miny, maxy, n)
+    coords = (
+        [(float(x), float(miny)) for x in xs]
+        + [(float(maxx), float(y)) for y in ys[1:]]
+        + [(float(x), float(maxy)) for x in xs[::-1][1:]]
+        + [(float(minx), float(y)) for y in ys[::-1][1:-1]]
+    )
+    return cast(Aoi, Polygon(coords))
+
+
 _OCM_BANDS: Tuple[str, str, str] = ("B04", "B03", "B8A")
 _OCM_MIN_CONTEXT_PIXELS = 100
 _SCL_ADAPTIVE_BLOCK_SAVING_FRACTION = 0.75

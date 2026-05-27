@@ -5,6 +5,7 @@ from rasterio.enums import Resampling
 from rasterio.errors import RasterioIOError
 from rasterio.transform import from_origin
 
+from s2mosaic.helpers import backoff_delay
 from s2mosaic.readers import (
     BoundsTileReader,
     GridTileReader,
@@ -13,6 +14,36 @@ from s2mosaic.readers import (
     make_grid_tile_reader,
     should_prewarm_sources,
 )
+
+
+class TestBackoffDelay:
+    """Exponential-backoff-with-jitter helper used by retry loops."""
+
+    def test_doubles_per_attempt_with_no_jitter(self):
+        delays = [
+            backoff_delay(a, base=0.5, factor=2.0, cap=100.0, jitter=0.0)
+            for a in range(5)
+        ]
+        assert delays == [0.5, 1.0, 2.0, 4.0, 8.0]
+
+    def test_caps_at_max_delay_with_no_jitter(self):
+        assert backoff_delay(10, base=0.5, factor=2.0, cap=4.0, jitter=0.0) == 4.0
+
+    def test_jitter_stays_within_band(self, monkeypatch):
+        # Force jitter to its extremes and verify the realised delay is bounded
+        # by (1 ± jitter) * cap. random.uniform is the only stochastic source.
+        monkeypatch.setattr("s2mosaic.helpers.random.uniform", lambda lo, hi: hi)
+        high = backoff_delay(3, base=0.5, factor=2.0, cap=4.0, jitter=0.25)
+        monkeypatch.setattr("s2mosaic.helpers.random.uniform", lambda lo, hi: lo)
+        low = backoff_delay(3, base=0.5, factor=2.0, cap=4.0, jitter=0.25)
+        assert high == pytest.approx(4.0 * 1.25)
+        assert low == pytest.approx(4.0 * 0.75)
+
+    def test_never_returns_negative(self, monkeypatch):
+        # Even with hostile jitter the helper must not sleep for a negative
+        # duration (time.sleep would raise).
+        monkeypatch.setattr("s2mosaic.helpers.random.uniform", lambda lo, hi: -10.0)
+        assert backoff_delay(2, base=0.5, factor=2.0, cap=4.0, jitter=0.25) == 0.0
 
 
 class TestTileReaderHelpers:

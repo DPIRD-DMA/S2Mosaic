@@ -1,5 +1,7 @@
 import functools
 import logging
+import random
+import sys
 import time
 from datetime import date, datetime
 from functools import lru_cache
@@ -9,6 +11,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
+    Dict,
     List,
     Optional,
     Tuple,
@@ -50,6 +53,54 @@ def _exception_chain_summary(exc: BaseException) -> str:
     return " <- ".join(parts)
 
 
+def report_dropped_scenes(
+    dropped: List[Dict[str, str]],
+    *,
+    total: int,
+    stream: Any = None,
+) -> None:
+    """Emit a single end-of-phase line listing scenes that fell out of Phase 1.
+
+    Goes through ``print`` (defaulting to ``stderr``) so it's visible even when
+    the user hasn't configured Python logging — the warning logs inside the
+    retry loop only surface if a handler is attached. ``stream`` is an
+    injection point for tests; in production we always write to ``stderr``.
+    """
+    if not dropped:
+        return
+    handle = stream if stream is not None else sys.stderr
+    ids = ", ".join(d["id"] for d in dropped)
+    print(
+        f"s2mosaic: {len(dropped)}/{total} scenes dropped due to fetch "
+        f"errors after retries: {ids}",
+        file=handle,
+    )
+
+
+def backoff_delay(
+    attempt: int,
+    *,
+    base: float = 0.5,
+    factor: float = 2.0,
+    cap: float = 8.0,
+    jitter: float = 0.25,
+) -> float:
+    """Exponential backoff with symmetric jitter, capped at ``cap`` seconds.
+
+    Shared by the per-scene fetch decorator (Phase 1) and the per-tile reader
+    retry loops (Phase 2). ``attempt`` is 0-indexed (delay *after* attempt 0
+    is ``base``). Jitter is a fraction (e.g. ``0.25`` means ±25%) applied
+    multiplicatively after the cap, so the realised delay can briefly exceed
+    ``cap`` by up to ``cap*jitter``. Cap and jitter together prevent runaway
+    delays and thundering-herd when many threads back off at the same exponent.
+    """
+    raw = base * (factor**attempt)
+    bounded = min(raw, cap)
+    if jitter > 0:
+        bounded *= 1.0 + random.uniform(-jitter, jitter)
+    return max(0.0, bounded)
+
+
 def _is_retryable_exception(
     exc: BaseException, retry_exceptions: Tuple[type[BaseException], ...]
 ) -> bool:
@@ -73,12 +124,13 @@ def with_scene_retry(
         HTTPError,
     ),
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
-    """Decorator: retry a per-scene fetcher with exponential backoff.
+    """Decorator: retry a per-scene fetcher with exponential backoff + jitter.
 
     On exhaustion, the last exception is wrapped in :class:`SceneFetchError`
     so the pipeline loop can catch fetch failures specifically without also
     swallowing inference or programming errors that arise outside the fetch.
-    Backoff doubles each attempt (``base_delay``, ``2 * base_delay``, ...).
+    Backoff is delegated to :func:`backoff_delay` (shared with the per-tile
+    reader retries) and seeded with ``base_delay``.
     """
     if attempts < 1:
         raise ValueError(f"attempts must be >= 1, got {attempts}")
@@ -95,7 +147,7 @@ def with_scene_retry(
                         raise
                     last_exc = e
                     if attempt < attempts - 1:
-                        delay = base_delay * (2**attempt)
+                        delay = backoff_delay(attempt, base=base_delay)
                         logger.warning(
                             f"{fn.__name__} attempt {attempt + 1}/{attempts} "
                             f"failed: {_exception_chain_summary(e)}; "
