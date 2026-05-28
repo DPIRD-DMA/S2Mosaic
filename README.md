@@ -126,7 +126,7 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 **Area (pass exactly one)**
 
 - `grid_id` (`None`): Sentinel-2 MGRS tile ID, e.g. `"50HMH"`. Mosaics the entire tile.
-- `bounds` (`None`): `(minx, miny, maxx, maxy)` rectangle. Mosaics an arbitrary AOI, including ones that cross MGRS tile boundaries. See the bounds-mode-specific options below.
+- `bounds` (`None`): `(minx, miny, maxx, maxy)` rectangle. Mosaics an arbitrary AOI, including ones that cross MGRS tile boundaries. See the bounds/AOI-mode-specific options below.
 - `aoi` (`None`): single shapely `Polygon`. Mosaics the polygon bounds while skipping and masking pixels outside the polygon. Mutually exclusive with `grid_id` and `bounds`.
 
 **Time window**
@@ -137,9 +137,13 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 **Output content**
 
 - `bands` (`["B04", "B03", "B02", "B08"]`): bands to include. Leave as `None` to use the default RGB+NIR set. Use `["visual"]` for the 3-band uint8 TCI RGB composite (mutually exclusive with other bands).
-- `mosaic_method` (`"mean"`): `"mean"`, `"first"`, `"percentile"` (with `percentile`), `"median"` (shortcut for percentile 50), or `"medoid"`.
+- `mosaic_method` (`"mean"`): how per-pixel scene stacks are reduced to one output value.
+  - `"mean"`: per-band arithmetic mean of all valid scenes. Streams scenes incrementally so peak memory stays small.
+  - `"first"`: first valid pixel in `scene_order`. Cheapest method — reads only what's needed to fill each tile and stops as soon as it can.
+  - `"percentile"`: per-band percentile across all valid scenes. Requires the `percentile` parameter (0–100).
+  - `"median"`: shortcut for `"percentile"` with `percentile=50`.
+  - `"medoid"`: picks the scene whose multi-band spectrum is closest (squared Euclidean) to the per-band median across all valid scenes for the pixel. Preserves real observed spectra, so band relationships stay coherent for indices and classifiers. This is the approximate-medoid formulation popularised by the gee-community / Open-MRV tutorials, not the strict Flood 2013 pairwise-distance medoid; the two often agree, but can differ.
 - `percentile` (`None`): percentile to compute when `mosaic_method="percentile"` (0–100).
-- `medoid`: picks the scene whose multi-band spectrum is closest (squared Euclidean) to the per-band median across all valid scenes for the pixel. It preserves real observed spectra, so band relationships stay coherent for indices and classifiers. This is the approximate-medoid formulation popularised by the gee-community / Open-MRV tutorials, not the strict Flood 2013 pairwise-distance medoid; the two often agree, but can differ.
 - `min_observations` (`None`): minimum valid observations to read per pixel for `"mean"`, `"percentile"`, and `"medoid"`. When set, tile aggregation stops reading later scenes once every coverable pixel has reached the target. This is not an output quality guarantee; pixels that cannot reach the target use whatever observations are available.
 - `max_observations` (`None`): per-pixel cap on valid observations for `"mean"`, `"percentile"`, and `"medoid"`. Each pixel accepts at most this many scenes (in `scene_order`); later valid scenes are dropped for that pixel. Combined with `scene_order="oldest"` or `"newest"` this biases the mosaic toward early or late dates. Must be `>= min_observations` when both are set; ignored by `"first"` (effectively N=1).
 - `include_observation_count` (`False`): append a final `Observation count` band with the number of valid source scenes that contributed to each output pixel. Works for both returned arrays and exported GeoTIFFs. For `bands=["visual"]`, enabling this writes/returns `uint16` output so the count band is not limited to 255; the RGB values remain in their usual 0–255 range.
@@ -157,7 +161,7 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 - `output_crs` (`None`): EPSG of the output. Must be a projected CRS — geographic CRSes (e.g. 4326) are rejected at validation, because `resolution` is metres in the target CRS and a geographic output would produce a degenerate grid. If you need a lat/lon raster, reproject the mosaic afterwards with `gdalwarp` / `rio warp`. In bounds/AOI mode, auto-picked as the UTM zone containing the AOI centroid if omitted. For AOIs wider than ~6° of longitude (one UTM zone), pass an explicit equal-area projection instead (e.g. `output_crs=3577` for Australia, `5070` for the contiguous US) — the auto-picked centroid UTM has growing scale distortion and a larger envelope overshoot far from its central meridian. Ignored in grid mode (the tile's native UTM zone is used).
 - `resolution` (`10`): output pixel size in metres. At lower resolutions rasterio reads from COG overviews — much less data over the wire.
 - `resampling_method` (`"nearest"`): how the source is resampled to the output grid. Also accepts `"bilinear"`, `"cubic"`, `"average"`, `"lanczos"`.
-- `snap_to_source_grid` (`False`): bounds/AOI mode only. When `True`, expand the output extent outward to whole multiples of `resolution` in the target CRS. This makes repeat runs over the same area produce identical grids, and at `resolution=10` aligns the output to the native Sentinel-2 pixel grid — source COG reads become zero-cost copies rather than sub-pixel resamples. The output may grow by up to one pixel on each side; pixels outside an `aoi` polygon are still written as nodata. For repeatable cross-run alignment, also set `output_crs` explicitly so the auto-picked UTM zone can't shift between runs.
+- `snap_to_source_grid` (`False`): bounds/AOI mode only. When `True`, expand the output extent outward to whole multiples of `resolution` in the target CRS. This makes repeat runs over the same area produce identical grids, and at `resolution=10` aligns the output to the native Sentinel-2 pixel grid — source COG reads become zero-cost copies rather than sub-pixel resamples. The output may grow by up to one pixel on each side; pixels outside an `aoi` polygon are still written as nodata.
 
 **Scene selection**
 
@@ -180,7 +184,6 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 **Diagnostics**
 
 - `show_progress` (`False`): show tqdm progress bars for the cloud-mask streaming and tile-aggregation phases. Useful in notebooks; leave off for headless/batch runs.
-- `include_observation_count` (`False`): include a per-pixel observation-count band for diagnosing scene coverage, cloud-mask gaps, and overlap-edge artefacts.
 
 Example:
 
