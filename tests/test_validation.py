@@ -101,6 +101,33 @@ class TestMosaicBoundsValidation:
             resolution=10,
         )
 
+    def test_geographic_output_crs_rejected(self):
+        # `resolution` is metres in the target CRS, so geographic output_crs
+        # would produce a degenerate grid. Reject at validation time.
+        with pytest.raises(ValueError, match="geographic CRS"):
+            self._call(self.VALID_BOUNDS, output_crs=4326)
+
+    def test_geographic_output_crs_rejected_grid_mode(self):
+        # Same rule in grid mode — even though output_crs is otherwise ignored
+        # there, surfacing the error keeps the message consistent across modes.
+        with pytest.raises(ValueError, match="geographic CRS"):
+            mosaic(grid_id="50HMH", start_year=2023, output_crs=4326)
+
+    def test_projected_output_crs_accepted(self):
+        # Smoke test: projected output_crs passes validation. Use Australian
+        # Albers (EPSG:3577) — the canonical multi-zone alternative for AU.
+        validate_inputs(
+            scene_order="valid_data",
+            mosaic_method="mean",
+            bands=["B04"],
+            grid_id=None,
+            percentile=None,
+            bounds=self.VALID_BOUNDS,
+            input_crs=4326,
+            output_crs=3577,
+            resolution=30,
+        )
+
     def test_bounds_too_small_4326_rejected(self):
         # 5m x 5m AOI at lat=-32: below both the side-length and area floors.
         delta_lon = 5 / (111_111 * np.cos(np.radians(32)))

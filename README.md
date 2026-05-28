@@ -90,11 +90,13 @@ Pass `bounds=(minx, miny, maxx, maxy)` instead of `grid_id` to mosaic any rectan
 ```python
 from s2mosaic import mosaic
 
-# ~5km AOI near Perth, WA, in EPSG:4326 (default)
-bounds = (115.83, -31.97, 115.91, -31.94)
+# ~7.6km x 3.4km AOI near Perth, WA, in UTM zone 50S (EPSG:32750)
+bounds = (389410, 6462290, 397010, 6465700)
 
 array, profile = mosaic(
     bounds=bounds,
+    input_crs=32750,
+    snap_to_source_grid=True,
     start_year=2023,
     start_month=6,
     duration_months=2,
@@ -107,7 +109,7 @@ print(f"CRS:   {profile['crs']}")
 print(f"Pixel: {profile['transform'].a}m")
 ```
 
-`input_crs` (default `4326`) controls the bounds/AOI CRS; `output_crs` controls the output CRS (auto-picked from the AOI centroid if omitted). Use `resolution` (in metres) and `resampling_method` (`nearest`, `bilinear`, ...) to control the output grid. See [Example use - bounds.ipynb](https://github.com/DPIRD-DMA/S2Mosaic/blob/main/examples/Example%20use%20-%20bounds.ipynb) for cross-tile and lower-resolution examples, [Example use - aoi.ipynb](https://github.com/DPIRD-DMA/S2Mosaic/blob/main/examples/Example%20use%20-%20aoi.ipynb) for polygon AOIs, and [Advanced - wide area visual export.ipynb](https://github.com/DPIRD-DMA/S2Mosaic/blob/main/examples/Advanced%20-%20wide%20area%20visual%20export.ipynb) for a large, wide visual-only GeoTIFF export that streams tiles directly to disk.
+`bounds=` always fills the requested rectangle: same-CRS uses it directly, cross-CRS (e.g. lon/lat input → UTM output) uses its reprojected axis-aligned envelope. There is no implicit polygon mask, so cross-CRS bounds don't produce nodata wedges at the corners — the envelope is just slightly larger than the original lon/lat region. The recommended pattern for single-zone AOIs is to pass bounds in the local UTM zone so `input_crs == output_crs` (no envelope inflation) with `snap_to_source_grid=True` (zero resampling against the source grid). Use lon/lat input for AOIs that genuinely span multiple UTM zones, or pass `aoi=shapely.geometry.box(*bounds)` instead if you want the lat/lon rectangle clipped after reprojection. `output_crs` defaults to the UTM zone containing the AOI centroid if omitted. Use `resolution` (in metres) and `resampling_method` (`nearest`, `bilinear`, ...) to control the output grid. See [Example use - bounds.ipynb](https://github.com/DPIRD-DMA/S2Mosaic/blob/main/examples/Example%20use%20-%20bounds.ipynb) for cross-tile and lower-resolution examples, [Example use - aoi.ipynb](https://github.com/DPIRD-DMA/S2Mosaic/blob/main/examples/Example%20use%20-%20aoi.ipynb) for polygon AOIs, and [Advanced - wide area visual export.ipynb](https://github.com/DPIRD-DMA/S2Mosaic/blob/main/examples/Advanced%20-%20wide%20area%20visual%20export.ipynb) for a large, wide visual-only GeoTIFF export that streams tiles directly to disk.
 
 ## Mosaic method comparison
 
@@ -152,7 +154,7 @@ S2Mosaic provides several options for customizing the mosaic creation process. D
 
 **Output grid**
 
-- `output_crs` (`None`): EPSG of the output. In bounds/AOI mode, auto-picked as the UTM zone containing the AOI centroid if omitted. Ignored in grid mode (the tile's native UTM zone is used).
+- `output_crs` (`None`): EPSG of the output. Must be a projected CRS — geographic CRSes (e.g. 4326) are rejected at validation, because `resolution` is metres in the target CRS and a geographic output would produce a degenerate grid. If you need a lat/lon raster, reproject the mosaic afterwards with `gdalwarp` / `rio warp`. In bounds/AOI mode, auto-picked as the UTM zone containing the AOI centroid if omitted. For AOIs wider than ~6° of longitude (one UTM zone), pass an explicit equal-area projection instead (e.g. `output_crs=3577` for Australia, `5070` for the contiguous US) — the auto-picked centroid UTM has growing scale distortion and a larger envelope overshoot far from its central meridian. Ignored in grid mode (the tile's native UTM zone is used).
 - `resolution` (`10`): output pixel size in metres. At lower resolutions rasterio reads from COG overviews — much less data over the wire.
 - `resampling_method` (`"nearest"`): how the source is resampled to the output grid. Also accepts `"bilinear"`, `"cubic"`, `"average"`, `"lanczos"`.
 - `snap_to_source_grid` (`False`): bounds/AOI mode only. When `True`, expand the output extent outward to whole multiples of `resolution` in the target CRS. This makes repeat runs over the same area produce identical grids, and at `resolution=10` aligns the output to the native Sentinel-2 pixel grid — source COG reads become zero-cost copies rather than sub-pixel resamples. The output may grow by up to one pixel on each side; pixels outside an `aoi` polygon are still written as nodata. For repeatable cross-run alignment, also set `output_crs` explicitly so the auto-picked UTM zone can't shift between runs.
@@ -184,7 +186,9 @@ Example:
 
 ```python
 array, profile = mosaic(
-    bounds=(115.83, -31.97, 115.91, -31.94),
+    bounds=(389410, 6462290, 397010, 6465700),
+    input_crs=32750,
+    snap_to_source_grid=True,
     start_year=2023,
     duration_months=2,
     bands=["visual"],

@@ -31,7 +31,7 @@ license-files = ["LICENSE"]
 readme = {file = "README.md", content-type = "text/markdown"}
 keywords = ["sentinel-2", "satellite", "mosaic", "remote-sensing"]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
@@ -91,3 +91,6 @@ markers = [
     "slow: end-to-end tests that hit the network and run a full mosaic pipeline",
 ]
 addopts = "-m 'not slow'"
+filterwarnings = [
+    "ignore::rasterio.errors.NotGeoreferencedWarning",
+]

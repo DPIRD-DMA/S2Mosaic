@@ -176,6 +176,7 @@ class MosaicRequest:
             bounds=self.bounds,
             aoi=self.aoi,
             input_crs=self.input_crs,
+            output_crs=self.output_crs,
             resolution=self.resolution,
             cloud_mask=self.cloud_mask,
             min_observations=self.min_observations,
@@ -227,6 +228,7 @@ def validate_inputs(
     resampling_method: str = "nearest",
     bounds: Optional[Bbox] = None,
     input_crs: Optional[int] = None,
+    output_crs: Optional[int] = None,
     resolution: Optional[int] = None,
     cloud_mask: str = CLOUD_MASK_OCM,
     min_observations: Optional[int] = None,
@@ -238,11 +240,23 @@ def validate_inputs(
     source: str = SOURCE_MPC,
     include_observation_count: bool = False,
 ) -> None:
+    from pyproj import CRS as PyprojCRS
+
     from .sources import VALID_SOURCES
 
     if source not in VALID_SOURCES:
         raise ValueError(
             f"Invalid source: {source}. Must be one of {sorted(VALID_SOURCES)}"
+        )
+
+    if output_crs is not None and PyprojCRS.from_epsg(output_crs).is_geographic:
+        raise ValueError(
+            f"output_crs={output_crs} is a geographic CRS. resolution is "
+            "interpreted as metres in the target CRS, so geographic output "
+            "would produce a degenerate grid. Use a projected CRS (UTM or an "
+            "equal-area projection like EPSG:3577 for Australia) and "
+            "reproject the result afterwards (e.g. with gdalwarp) if you "
+            "need a lat/lon raster."
         )
     # grid_id format validation happens in MosaicRequest.normalized() via
     # normalize_grid_id; by the time we get here it's been normalized.

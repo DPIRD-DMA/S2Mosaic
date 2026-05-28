@@ -873,39 +873,29 @@ class TestBoundsOcmContext:
         assert len(writer_calls) == 1
         assert writer_calls[0]["export_path"] == export_path
 
-    def test_bounds_with_crs_mismatch_uses_polygon_search_and_clip_mask(
-        self, monkeypatch
-    ):
-        """When input_crs != output_crs, bounds mode synthesises a clip polygon
-        from the input rectangle. Verify it flows through the AOI search path
-        and gets rasterised into the coverage mask (so per-scene reads can
-        clip to the reprojected lat/lon rectangle instead of inheriting the
-        wider transform_bounds envelope).
+    def test_bounds_with_crs_mismatch_uses_bbox_search_and_no_mask(self, monkeypatch):
+        """``bounds=`` always fills the rectangle (or its reprojected envelope
+        for cross-CRS); there is no implicit polygon mask. Verify cross-CRS
+        bounds searches by bbox (not by polygon) and never invokes
+        ``_rasterize_aoi_mask`` — that path is reserved for explicit ``aoi=``.
         """
         import s2mosaic.pipelines.bounds as bounds_mod
 
-        search_calls = []
         rasterize_calls = []
 
-        def fake_search_by_aoi(**kwargs):
-            search_calls.append(kwargs["aoi_4326"])
-            return [self.FakeItem()]
-
-        def fake_search_by_bbox(**_):
+        def fake_search_by_aoi(**_):
             raise AssertionError(
-                "bounds mode crossing a CRS boundary must search by polygon, not bbox"
+                "bounds= must search by bbox even when input_crs != output_crs"
             )
 
-        original_rasterize = bounds_mod._rasterize_aoi_mask
-
         def tracking_rasterize(**kwargs):
-            rasterize_calls.append(kwargs["aoi_target"])
-            return original_rasterize(**kwargs)
+            rasterize_calls.append(kwargs)
+            return np.ones((kwargs["height"], kwargs["width"]), dtype=bool)
 
-        monkeypatch.setattr(bounds_mod, "_search_for_items_by_aoi", fake_search_by_aoi)
         monkeypatch.setattr(
-            bounds_mod, "_search_for_items_by_bbox", fake_search_by_bbox
+            bounds_mod, "_search_for_items_by_bbox", lambda **_: [self.FakeItem()]
         )
+        monkeypatch.setattr(bounds_mod, "_search_for_items_by_aoi", fake_search_by_aoi)
         monkeypatch.setattr(bounds_mod, "_rasterize_aoi_mask", tracking_rasterize)
         monkeypatch.setattr(bounds_mod, "_fetch_one_scl", _fake_scl_fetch_full_window)
         monkeypatch.setattr(
@@ -948,16 +938,7 @@ class TestBoundsOcmContext:
             adaptive_tiling=False,
         )
 
-        assert len(search_calls) == 1
-        assert search_calls[0].geom_type == "Polygon"
-        # Polygon has more than 4 vertices because the input rectangle was
-        # densified before reprojection (constant-latitude bulge in UTM).
-        assert len(search_calls[0].exterior.coords) > 5
-        # _rasterize_aoi_mask is invoked at both mask resolution and user
-        # resolution when the AOI mask path is active.
-        assert len(rasterize_calls) >= 1
-        for aoi_target in rasterize_calls:
-            assert aoi_target.geom_type == "Polygon"
+        assert rasterize_calls == []
 
     def test_bounds_with_matching_crs_keeps_bbox_search(self, monkeypatch):
         """When input_crs == output_crs there is no reprojection envelope to
@@ -1026,11 +1007,13 @@ class TestBoundsOcmContext:
 
         assert rasterize_called == []
 
-    def test_bounds_mode_preserved_in_sidecar_when_clip_polygon_synthesised(
+    def test_bounds_mode_preserved_in_sidecar_for_cross_crs_input(
         self, monkeypatch, tmp_path
     ):
-        """Synthesising a clip polygon must not promote the sidecar mode to
-        "aoi" — the user asked for bounds mode."""
+        """Cross-CRS bounds= must still be reported as ``mode: bounds`` in the
+        sidecar — the user asked for bounds mode, regardless of any internal
+        polygon handling.
+        """
         import s2mosaic.pipelines.bounds as bounds_mod
 
         captured_mode = []
@@ -1043,7 +1026,7 @@ class TestBoundsOcmContext:
 
         monkeypatch.setattr(bounds_mod, "output_sidecar_metadata", tracking_metadata)
         monkeypatch.setattr(
-            bounds_mod, "_search_for_items_by_aoi", lambda **_: [self.FakeItem()]
+            bounds_mod, "_search_for_items_by_bbox", lambda **_: [self.FakeItem()]
         )
         monkeypatch.setattr(bounds_mod, "_fetch_one_scl", _fake_scl_fetch_full_window)
         monkeypatch.setattr(
@@ -1089,24 +1072,22 @@ class TestBoundsOcmContext:
 
         assert captured_mode == ["bounds"]
 
-    def test_bounds_with_crs_mismatch_masks_pixels_outside_requested_rectangle(
+    def test_bounds_with_crs_mismatch_fills_envelope_no_implicit_clip(
         self, monkeypatch
     ):
-        """Regression for the wide-WA-strip issue: a lon/lat bounds box
-        reprojected to a single UTM zone has an axis-aligned UTM envelope ~30
-        km taller than the requested rectangle (constant-latitude bulge in
-        UTM). Without the clip polygon those extra rows are written with
-        scene imagery; with it they must be nodata. Verify by inspecting the
-        coverage mask passed to aggregation — corners of the UTM envelope
-        (well outside the requested lat/lon box) must be False, and the
-        centre must remain True.
+        """``bounds=`` fills the rectangle (or its reprojected envelope for
+        cross-CRS) with no implicit polygon clip. The coverage mask passed to
+        aggregation must therefore be all-True across the whole envelope —
+        envelope corners that sit outside the original lat/lon rectangle are
+        still written with imagery (callers who want them clipped use
+        ``aoi=shapely.box(*bounds)`` explicitly).
         """
         import s2mosaic.pipelines.bounds as bounds_mod
 
         aggregation_calls = []
 
         monkeypatch.setattr(
-            bounds_mod, "_search_for_items_by_aoi", lambda **_: [self.FakeItem()]
+            bounds_mod, "_search_for_items_by_bbox", lambda **_: [self.FakeItem()]
         )
         monkeypatch.setattr(bounds_mod, "_fetch_one_scl", _fake_scl_fetch_full_window)
         monkeypatch.setattr(
@@ -1156,18 +1137,5 @@ class TestBoundsOcmContext:
         coverage_mask = np.asarray(aggregation_calls[0]["coverage_mask"])
         h, w = aggregation_calls[0]["height"], aggregation_calls[0]["width"]
         assert coverage_mask.shape == (h, w)
-
-        assert coverage_mask.any()
-        assert not coverage_mask.all()
-
-        # Four corners of the UTM envelope sit outside the reprojected
-        # lat/lon polygon (that's exactly the overshoot the original notebook
-        # surfaced). They must all be masked False.
-        for r, c in [(0, 0), (0, w - 1), (h - 1, 0), (h - 1, w - 1)]:
-            assert not coverage_mask[r, c], (
-                f"corner pixel ({r}, {c}) reprojects outside the requested "
-                "lat/lon bounds and must be clipped"
-            )
-        # Centre of the strip — well inside the requested rectangle — must
-        # remain unmasked.
-        assert coverage_mask[h // 2, w // 2]
+        # No implicit clip — every envelope pixel is in coverage.
+        assert coverage_mask.all()

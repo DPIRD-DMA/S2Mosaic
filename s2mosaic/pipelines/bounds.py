@@ -85,7 +85,6 @@ from ..geometry import (
     _snap_bounds_to_grid,
     _target_grid,
     _window_bounds_in_target,
-    densify_bbox_to_polygon,
     pick_utm_epsg,
     reproject_aoi,
     reproject_bbox,
@@ -402,7 +401,11 @@ def _stream_bounds_combo_masks(
     if show_progress:
         mask_progress = tqdm(
             total=n_time,
-            desc=f"Phase 1: streaming cloud masks ({cloud_mask})",
+            desc=(
+                f"Phase 1: streaming bands for {cloud_mask} cloud mask"
+                if cloud_mask == "OCM"
+                else f"Phase 1: streaming {cloud_mask} cloud masks"
+            ),
             unit="scene",
         )
 
@@ -624,16 +627,10 @@ def run_bounds_pipeline(
         target_crs = pick_utm_epsg(cx, cy)
         logger.info(f"Auto-picked target CRS: EPSG:{target_crs}")
 
-    # Bounds mode crossing a CRS: synthesise a densified polygon from the input
-    # rectangle so per-scene masks clip valid pixels to the requested area.
-    # transform_bounds returns the *axis-aligned envelope* of the reprojected
-    # rectangle, which at high meridian convergence can overshoot the supplied
-    # bounds by tens of km. The polygon flows through the existing AOI mask
-    # path; sidecar "mode" still reflects the user's request (see below).
-    if aoi is None and request.input_crs != target_crs:
-        aoi = densify_bbox_to_polygon(bounds)
-        aoi_4326 = reproject_aoi(aoi, request.input_crs, 4326)
-
+    # bounds= always fills the rectangle (or its reprojected envelope for
+    # cross-CRS): no synthesised polygon, no implicit mask. Callers who want
+    # the lat/lng rectangle clipped after reprojection use aoi=shapely.box(...)
+    # explicitly, which sets aoi_target below and engages the AOI mask path.
     aoi_target = (
         reproject_aoi(aoi, request.input_crs, target_crs) if aoi is not None else None
     )

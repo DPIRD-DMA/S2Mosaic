@@ -262,9 +262,13 @@ def mosaic(
             (most CPUs lack efficient fp16/bf16 paths). On GPU, switch to
             "fp16" for ~2× speedup with lower VRAM use, or "bf16" on hardware
             that supports it (Ampere+ NVIDIA, Apple Silicon).
-        output_crs (int, optional): EPSG code for the output grid. In bounds
-            mode, defaults to the UTM zone containing the AOI centroid. Ignored
-            in grid mode.
+        output_crs (int, optional): EPSG code for the output grid. Must be a
+            projected CRS — geographic CRSes (e.g. 4326) are rejected at
+            validation, because ``resolution`` is interpreted as metres in the
+            target CRS and a geographic output would produce a degenerate
+            grid. If you need a lat/lon raster, reproject the mosaic
+            afterwards (e.g. with ``gdalwarp``). In bounds/AOI mode, defaults
+            to the UTM zone containing the AOI centroid. Ignored in grid mode.
         resolution (int, optional): Output pixel size in metres. Defaults to 10.
         resampling_method (str, optional): Rasterio resampling method used when
             reading source COGs onto the output grid. Options include "nearest",

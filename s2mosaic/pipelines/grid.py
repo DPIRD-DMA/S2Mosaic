@@ -268,7 +268,11 @@ def stream_mosaic_pipeline(
     if show_progress:
         mask_progress = tqdm(
             total=n_scenes,
-            desc=f"Phase 1: streaming cloud masks ({cloud_mask})",
+            desc=(
+                f"Phase 1: streaming bands for {cloud_mask} cloud mask"
+                if cloud_mask == "OCM"
+                else f"Phase 1: streaming {cloud_mask} cloud masks"
+            ),
             unit="scene",
         )
     _pb = mask_progress
