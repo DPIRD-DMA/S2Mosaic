@@ -3,13 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 
-## [Unreleased]
-
-### Fixed
-- Cross-CRS `bounds=` no longer leaves nodata wedges at the corners of the output. The STAC scene search now uses the *target-CRS output envelope reprojected back to 4326* instead of the original lat/lng rectangle. Parallels and meridians curve in UTM, so the axis-aligned UTM envelope of a lat/lng box extends a few km beyond the box at the corners; a search keyed off the original lat/lng box missed scenes whose footprint only touched those corner pixels, leaving the output with empty wedges that looked like source-data gaps. The filename hash and sidecar metadata still use the original user-supplied bounds, so the same input keeps producing the same identifying hash.
-
-
-## [2.0.0b1] - 2026-05-28
+## [2.0.0b1] - 2026-05-29
 
 ### Added
 - `mosaic_method="medoid"` selects a per-pixel medoid composite. For each pixel the kernel picks the scene whose multi-band spectrum is closest (squared Euclidean) to the per-band median across all valid scenes for that pixel. Unlike per-band `"median"` / `"percentile"` the result is always an actually-observed spectrum — band relationships are preserved, which matters for spectral indices and downstream classifiers. This is the *approximate* medoid that the gee-community / Open-MRV tutorials popularised (O(S·B) per pixel), not the strict Flood 2013 medoid (`arg min_s Σᵢ d(s,i)`, O(S²·B)); the two often agree, but can differ. The kernel keeps its per-tile stack as `uint16` plus a separate `(scene, h, w) bool` validity mask rather than `float32+NaN`, uses exact doubled integer median targets so even-count half-integer medians are not rounded, and stripe-blocks scratch arrays to lower peak per-tile memory. `nogil=True` lets the existing tile-worker pool actually run the kernel in parallel rather than serialising on the GIL. Works for both reflectance bands (uint16) and the `"visual"` uint8 RGB mode through the same code path.
@@ -67,6 +61,7 @@ All notable changes to this project will be documented in this file.
 
 
 ### Fixed
+- Cross-CRS `bounds=` no longer leaves nodata wedges at the corners of the output. The STAC scene search now uses the *target-CRS output envelope reprojected back to 4326* instead of the original lat/lng rectangle. Parallels and meridians curve in UTM, so the axis-aligned UTM envelope of a lat/lng box extends a few km beyond the box at the corners; a search keyed off the original lat/lng box missed scenes whose footprint only touched those corner pixels, leaving the output with empty wedges that looked like source-data gaps. The filename hash and sidecar metadata still use the original user-supplied bounds, so the same input keeps producing the same identifying hash.
 - Streaming-pipeline robustness fixes around partial scene failures, mask/scene alignment, and propagation of non-fetch errors out of the grid pipeline (so programming bugs surface as real tracebacks instead of being swallowed as "All scenes failed to fetch masks").
 - Bounds/AOI visual mosaics now treat all-zero multi-band source reads as source nodata during tile aggregation. This prevents one-pixel black strips at some Sentinel-2 overlap edges where the SCL/footprint mask can mark a pixel valid but the warped TCI read falls just outside the real source data. The fix also applies when `max_observations` is set, so zero edge pixels are not counted toward the per-pixel observation cap.
 - Bounds/AOI per-scene mask reads now use `WarpedVRT` for both same-CRS and cross-CRS sources so out-of-source pixels return nodata consistently with the band reader. The previous same-CRS fast path (`src.read(window, out_shape, boundless=True)`) returned in-data values for output pixels whose centres fell west of the source extent when the target grid origin was fractionally misaligned to the source pixel grid — making SCL/OCM masks claim "valid" for pixels the visual band correctly reported as nodata. With `max_observations` set, this mismatch could exhaust the per-pixel observation budget on zero-data scenes and starve later valid scenes, leaving 1-pixel dark vertical stripes at MGRS column boundaries in wide-area mosaics.
