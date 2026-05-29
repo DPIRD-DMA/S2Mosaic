@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 250" role="img" aria-label="S2Mosaic">
+  <title>S2Mosaic</title>
+
+  <defs>
+    <!-- Natural-colour Sentinel-2 mosaic fill -->
+    <pattern id="s2tiles" width="60" height="60" patternUnits="userSpaceOnUse">
+      <rect width="60" height="60" fill="#1b3b5f"/>
+      <rect x="0"  y="0"  width="20" height="20" fill="#2f6a3a"/>
+      <rect x="20" y="0"  width="20" height="20" fill="#5ba35a"/>
+      <rect x="40" y="0"  width="20" height="20" fill="#1f4d33"/>
+      <rect x="0"  y="20" width="20" height="20" fill="#d4b27a"/>
+      <rect x="20" y="20" width="20" height="20" fill="#8a6b45"/>
+      <rect x="40" y="20" width="20" height="20" fill="#c89968"/>
+      <rect x="0"  y="40" width="20" height="20" fill="#2a5d8f"/>
+      <rect x="20" y="40" width="20" height="20" fill="#6a9a4e"/>
+      <rect x="40" y="40" width="20" height="20" fill="#a8c068"/>
+      <path d="M20 0v60M40 0v60M0 20h60M0 40h60" stroke="#0a1628" stroke-width="0.6" opacity="0.6"/>
+    </pattern>
+
+    <clipPath id="clipS2">
+      <text x="30" y="195"
+            font-family="'Helvetica Neue', Helvetica, Arial, sans-serif"
+            font-size="220" font-weight="900" letter-spacing="-3">S2</text>
+    </clipPath>
+  </defs>
+
+  <!-- "S2" filled with the satellite mosaic -->
+  <rect x="10" y="10" width="320" height="220" fill="url(#s2tiles)" clip-path="url(#clipS2)"/>
+
+  <!-- Black outline on S2 -->
+  <text x="30" y="195"
+        font-family="'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-size="220" font-weight="900" letter-spacing="-3"
+        fill="none" stroke="#000" stroke-width="9">S2</text>
+
+  <!-- "Mosaic" white fill with black outline -->
+  <text x="305" y="195"
+        font-family="'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-size="220" font-weight="400" letter-spacing="4"
+        fill="#ffffff" stroke="#000" stroke-width="18"
+        paint-order="stroke">Mosaic</text>
+</svg>

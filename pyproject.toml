@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools >= 61.0"]
+requires = ["setuptools>=77", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,35 +9,88 @@ dynamic = ["version"]
 description = "Python library for making cloud-free Sentinel-2 mosaics"
 requires-python = ">=3.10"
 dependencies = [
-    "geopandas>=1.0.3",
-    "numbagg>=0.9.0",
-    "omnicloudmask>=1.7.0",
+    "geopandas>=1.0.3,<2",
+    "multiclean>=0.3.0",
+    "numba>=0.61",
+    "numpy>=1.26,<3",
+    "omnicloudmask>=1.7.1",
+    "opencv-python>=4.8.0,<5",
+    "pandas>=2.0,<3",
     "planetary-computer>=1.0.0",
+    "pyproj>=3.6,<4",
+    "pystac>=1.10,<2",
     "pystac-client>=0.8.6",
-    "scipy>=1.10",
+    "python-dateutil>=2.8",
+    "rasterio>=1.3,<2",
+    "shapely>=2.0,<3",
+    "tqdm>=4.65",
+    "urllib3>=2.0",
 ]
 license = "MIT"
+license-files = ["LICENSE"]
 readme = {file = "README.md", content-type = "text/markdown"}
 keywords = ["sentinel-2", "satellite", "mosaic", "remote-sensing"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
 
-[tool.setuptools.dynamic]
-version = {attr = "s2mosaic.__version__.__version__"}
+[tool.setuptools_scm]
+version_file = "s2mosaic/_version.py"
 
 [project.urls]
 Homepage = "https://github.com/DPIRD-DMA/S2Mosaic"
+Repository = "https://github.com/DPIRD-DMA/S2Mosaic"
+Issues = "https://github.com/DPIRD-DMA/S2Mosaic/issues"
+Changelog = "https://github.com/DPIRD-DMA/S2Mosaic/blob/main/CHANGELOG.md"
 
 [tool.setuptools.package-data]
-s2mosaic = ["sentinel_2_index.gpkg"]
+s2mosaic = ["py.typed"]
 
 [dependency-groups]
 dev = [
     "jupyter>=1.1.1",
+    "matplotlib>=3.10.9",
+    "mypy>=1.19",
+    "nbmake>=1.5.5",
+    "pre-commit>=4.0",
     "pytest>=8.4.0",
     "ruff>=0.12.2",
 ]
 
 [tool.setuptools]
-packages = ["s2mosaic"]
+packages = ["s2mosaic", "s2mosaic.pipelines"]
+
+[tool.mypy]
+files = ["s2mosaic"]
+ignore_missing_imports = true
+strict = true
+
+[tool.ruff.lint]
+select = ["E", "F", "B"]
 
 [tool.ruff]
-select = ["E", "F", "B"]
+extend-exclude = ["s2mosaic/_version.py"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]
+"*.ipynb" = ["E402"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: end-to-end tests that hit the network and run a full mosaic pipeline",
+]
+addopts = "-m 'not slow'"
+filterwarnings = [
+    "ignore::rasterio.errors.NotGeoreferencedWarning",
+]

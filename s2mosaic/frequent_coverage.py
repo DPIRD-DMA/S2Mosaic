@@ -1,16 +1,19 @@
 import logging
-from typing import List
+from typing import List, Tuple
 
+import cv2
 import geopandas as gpd
 import numpy as np
-import scipy
+import numpy.typing as npt
 from geopandas import GeoDataFrame
 from pystac.item import Item
 from pystac.item_collection import ItemCollection
 from rasterio.enums import MergeAlg
 from rasterio.features import rasterize
 from rasterio.transform import Affine
-from shapely.geometry import Polygon
+from shapely.geometry import shape
+
+from .helpers import MGRS_TILE_SIZE_M
 
 logger = logging.getLogger(__name__)
 
@@ -18,42 +21,112 @@ logger = logging.getLogger(__name__)
 def get_coverage(scenes: List[Item]) -> gpd.GeoDataFrame:
     extents = []
     for scene in scenes:
-        if scene.geometry is not None and "coordinates" in scene.geometry:
-            extents.append(Polygon(scene.geometry["coordinates"][0]))
+        if scene.geometry is not None:
+            extents.append(shape(scene.geometry))
 
     extent_gdf = gpd.GeoDataFrame(geometry=extents, crs="EPSG:4326")
     return extent_gdf
 
 
+def _utm_origin_from_item(item: Item) -> Tuple[float, float]:
+    """Pull the top-left UTM corner ``(x_min, y_max)`` from a STAC item.
+
+    Sentinel-2 L2A items expose ``proj:transform`` on their band assets (both
+    MPC and Element 84 do this). The MGRS tile that owns the item starts at
+    ``(transform[2], transform[5])`` — i.e. the asset's top-left — and is
+    deterministic given the tile id, so any one item from the tile suffices.
+    """
+    for asset in item.assets.values():
+        transform = asset.extra_fields.get("proj:transform")
+        if transform is None:
+            continue
+        # affine[2] = x of top-left, affine[5] = y of top-left.
+        return float(transform[2]), float(transform[5])
+    raise ValueError(
+        f"Item {item.id!r} has no asset with a proj:transform; cannot "
+        "infer MGRS tile origin without it."
+    )
+
+
 def get_raster_coverage(
-    scene_bounds: Polygon, coverage_gdf: GeoDataFrame, local_crs: int, resolution=10
-):
-    scene_gdf = gpd.GeoDataFrame(
-        [scene_bounds], geometry=[scene_bounds], crs="EPSG:4326"
-    ).to_crs(f"EPSG:{local_crs}")
-
+    x_min: float,
+    y_max: float,
+    coverage_gdf: GeoDataFrame,
+    local_crs: int,
+    resolution: int = 10,
+) -> npt.NDArray[np.int16]:
     coverage_gdf_local = coverage_gdf.to_crs(f"EPSG:{local_crs}")
-
     coverage_gdf_local["geometry"] = coverage_gdf_local.make_valid()
 
-    extent = scene_gdf.total_bounds
-    x_min, _, _, y_max = extent
+    side_px = int(round(MGRS_TILE_SIZE_M / resolution))
 
     geoms_with_values = [(geom, 1) for geom in coverage_gdf_local.geometry]
     raster = rasterize(
         geoms_with_values,
-        out_shape=(10980, 10980),
+        out_shape=(side_px, side_px),
         fill=0,
         dtype=np.int16,
         transform=Affine(resolution, 0, x_min, 0, -resolution, y_max),
         merge_alg=MergeAlg.add,
     )
-    return raster
+    return raster  # type: ignore[no-any-return, unused-ignore]
+
+
+def _frequent_coverage_from_raster(
+    raster: npt.NDArray[np.int16],
+    min_coverage_fraction: float,
+) -> npt.NDArray[np.bool_]:
+    """Threshold a coverage-count raster and erode edge no-data areas."""
+    height, width = raster.shape
+    max_count = raster.max()
+    logger.info(f"Max coverage count: {max_count}")
+    if max_count == 0:
+        return np.zeros((height, width), dtype=bool)
+
+    # Any area that is covered by more than min_coverage_fraction of the
+    # maximum overlap is considered covered.
+    dynamic_threshold = max_count * min_coverage_fraction
+    logger.info(f"Dynamic threshold: {dynamic_threshold}")
+
+    frequent_data_mask = raster >= dynamic_threshold
+
+    # Expand the mask to include nearby pixels; this grows no-data areas by 4px.
+    kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+    dilated = cv2.dilate((~frequent_data_mask).astype(np.uint8), kernel, iterations=4)
+    return dilated == 0  # type: ignore[no-any-return, unused-ignore]
+
+
+def _frequent_coverage_from_extents(
+    coverage_gdf: GeoDataFrame,
+    *,
+    transform: Affine,
+    out_shape: Tuple[int, int],
+    min_coverage_fraction: float,
+) -> npt.NDArray[np.bool_]:
+    """Rasterize scene extents, threshold frequent coverage, and erode edges."""
+    geoms_with_values = [(geom, 1) for geom in coverage_gdf.geometry]
+    raster = rasterize(
+        geoms_with_values,
+        out_shape=out_shape,
+        fill=0,
+        dtype=np.int16,
+        transform=transform,
+        merge_alg=MergeAlg.add,
+    )
+    return _frequent_coverage_from_raster(raster, min_coverage_fraction)
 
 
 def get_frequent_coverage(
-    scene_bounds: Polygon, scenes: ItemCollection, coverage_threshold_pct=0.1
-) -> np.ndarray:
+    scenes: ItemCollection,
+    min_coverage_fraction: float = 0.1,
+    resolution: int = 10,
+) -> npt.NDArray[np.bool_]:
+    """Build a per-pixel coverage mask for a single MGRS tile.
+
+    The tile's UTM origin and projection are read straight off the first
+    item's STAC metadata (``proj:transform`` and ``proj:epsg`` / ``proj:code``),
+    so this no longer needs a packaged tile-extent lookup.
+    """
     scenes_list = list(scenes)
     logger.info(f"Calculating total coverage for {len(scenes_list)} scenes")
 
@@ -65,22 +138,39 @@ def get_frequent_coverage(
 
     logger.info(f"Using local CRS: EPSG:{local_crs}")
 
+    x_min, y_max = _utm_origin_from_item(scenes_list[0])
     coverage_gdf = get_coverage(scenes_list)
-    raster = get_raster_coverage(scene_bounds, coverage_gdf, local_crs)
-    logger.info(f"Coverage raster shape: {raster.shape}")
-
-    max_count = raster.max()
-    logger.info(f"Max coverage count: {max_count}")
-
-    # Any area that is covered by more than 10% of the scenes is considered covered
-    dynamic_threshold = max_count * coverage_threshold_pct
-    logger.info(f"Dynamic threshold: {dynamic_threshold}")
-
-    # Threshold the raster to get a mask of the frequent data
-    frequent_data_mask = raster >= dynamic_threshold
-
-    # Expand the mask to include nearby pixels, this grows the no data areas by 4 pixels
-    frequent_data_mask = ~scipy.ndimage.binary_dilation(
-        ~frequent_data_mask, iterations=4
+    raster = get_raster_coverage(
+        x_min, y_max, coverage_gdf, local_crs, resolution=resolution
     )
-    return frequent_data_mask
+    logger.info(f"Coverage raster shape: {raster.shape}")
+    return _frequent_coverage_from_raster(raster, min_coverage_fraction)
+
+
+def get_frequent_coverage_for_bbox(
+    scenes: ItemCollection,
+    bounds_target: Tuple[float, float, float, float],
+    target_crs: int,
+    width: int,
+    height: int,
+    resolution: int,
+    min_coverage_fraction: float = 0.1,
+) -> npt.NDArray[np.bool_]:
+    """Frequent-coverage mask for an arbitrary bbox in `target_crs`.
+
+    Variant of get_frequent_coverage() that doesn't assume a single MGRS
+    tile: caller passes explicit output shape, target CRS, and bounds in
+    that CRS. Useful for the bounds-based mosaic path where scenes may
+    come from multiple MGRS tiles in different UTM zones.
+    """
+    scenes_list = list(scenes)
+    coverage_gdf = get_coverage(scenes_list).to_crs(f"EPSG:{target_crs}")
+    coverage_gdf["geometry"] = coverage_gdf.make_valid()
+
+    minx, _, _, maxy = bounds_target
+    return _frequent_coverage_from_extents(
+        coverage_gdf,
+        transform=Affine(resolution, 0, minx, 0, -resolution, maxy),
+        out_shape=(height, width),
+        min_coverage_fraction=min_coverage_fraction,
+    )
