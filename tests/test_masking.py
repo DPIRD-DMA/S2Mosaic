@@ -154,13 +154,15 @@ class TestMaskingHelpers:
             def asset_name(self, canonical):
                 return canonical
 
-        seen_assets = []
+        seen_assets = set()
+        band_values = {"B04": 4, "B03": 3, "B8A": 8}
 
         def fake_get_full_band(href, *, source, res, asset_name):
-            seen_assets.append(asset_name)
-            return np.ones((1, 2, 2), dtype=np.uint16), {}
+            seen_assets.add(asset_name)
+            return np.full((1, 2, 2), band_values[asset_name], dtype=np.uint16), {}
 
-        def fake_compute_masks_from_array(_array, batch_size, inference_dtype):
+        def fake_compute_masks_from_array(array, batch_size, inference_dtype):
+            np.testing.assert_array_equal(array[:, 0, 0], np.array([4, 3, 8]))
             return (
                 np.array([[True, False], [False, True]]),
                 np.ones((2, 2), dtype=bool),
@@ -176,4 +178,4 @@ class TestMaskingHelpers:
 
         assert clear.shape == (3, 5)
         assert valid.shape == (3, 5)
-        assert seen_assets == ["B04", "B03", "B8A"]
+        assert seen_assets == {"B04", "B03", "B8A"}

@@ -12,10 +12,7 @@ from s2mosaic.geometry import (
     _rasterize_aoi_mask,
 )
 from s2mosaic.pipelines.bounds import _mask_resolution_for_request
-from s2mosaic.pipelines.bounds_scl import (
-    _pick_overview_level,
-    _read_band_at_target_window,
-)
+from s2mosaic.pipelines.bounds_scl import _read_band_at_target_window
 from s2mosaic.sources import MPC
 
 
@@ -34,11 +31,6 @@ def _fake_scl_fetch_full_window(item, source, bt, tc, mr, scene_window):
         target_window=scene_window,
         crop=(slice(0, scene_window[3]), slice(0, scene_window[2])),
     )
-
-
-class TestBoundsSclHelpers:
-    def test_pick_overview_level_sorts_overview_factors(self):
-        assert _pick_overview_level(10, 80, [16, 2, 4, 8]) == 3
 
 
 class TestReadBandAtTargetWindow:

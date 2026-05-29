@@ -1,7 +1,7 @@
 """SCL mask fetch helpers for bounds/AOI mosaics."""
 
 from collections.abc import Sequence as SequenceABC
-from typing import Any, List, Sequence, Tuple, Union
+from typing import Any, Sequence, Tuple, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -23,26 +23,6 @@ from ..helpers import get_rasterio_resampling, with_scene_retry
 from ..sources import Source
 
 
-def _pick_overview_level(
-    src_native_res: float, target_res: float, overview_factors: List[int]
-) -> int:
-    """GDAL OVERVIEW_LEVEL for reading at-or-finer than ``target_res``.
-
-    Returns -1 to use native resolution; 0 = first overview, 1 = second, etc.
-    Picks the highest-decimation overview whose resolution is still <= target,
-    so the warp reads from the smallest source array that won't lose detail.
-    """
-    if target_res <= src_native_res or not overview_factors:
-        return -1
-    best_level = -1
-    for idx, factor in sorted(enumerate(overview_factors), key=lambda item: item[1]):
-        if src_native_res * factor <= target_res:
-            best_level = idx
-        else:
-            break
-    return best_level
-
-
 def _read_band_at_target_window(
     href: str,
     band_idx: int,
@@ -62,11 +42,7 @@ def _read_band_at_target_window(
     badly with ``out_shape`` downsampling at source-extent boundaries, returning
     in-data values for out-of-source pixels and producing 1-pixel dark stripes
     at MGRS overlap-zone edges in the final mosaic.
-
-    ``OVERVIEW_LEVEL`` is picked from the source overviews so the warp reads
-    the smallest source array that's still finer than the target resolution.
     """
-    target_res = (read_bounds[2] - read_bounds[0]) / target_width
     transform = Affine(
         (read_bounds[2] - read_bounds[0]) / target_width,
         0,
@@ -76,14 +52,6 @@ def _read_band_at_target_window(
         read_bounds[3],
     )
     with rio.open(href) as src:
-        src_native_res = abs(src.transform.a)
-        overview_factors = src.overviews(band_idx)
-        overview_level = _pick_overview_level(
-            src_native_res, target_res, overview_factors
-        )
-        warp_extras = (
-            {} if overview_level < 0 else {"OVERVIEW_LEVEL": str(overview_level)}
-        )
         with WarpedVRT(
             src,
             crs=target_crs_obj,
@@ -91,7 +59,6 @@ def _read_band_at_target_window(
             width=target_width,
             height=target_height,
             resampling=rio_resampling,
-            warp_extras=warp_extras,
         ) as vrt:
             return vrt.read(band_idx)  # type: ignore[no-any-return]
 
@@ -137,7 +104,7 @@ def _fetch_one_scl_tiled(
     mask_resolution: int,
     width: int,
     height: int,
-    tile_specs: List[Tuple[int, int, int, int]],
+    tile_specs: list[Tuple[int, int, int, int]],
     scene_window: SceneWindow,
 ) -> MaskFetch:
     """Fetch one scene's SCL band using sparse AOI tile windows."""
@@ -160,7 +127,7 @@ def _fetch_one_scl_tiled(
     scene_col, scene_row, scene_w, scene_h = scene_window
     scene_col_stop = scene_col + scene_w
     scene_row_stop = scene_row + scene_h
-    relevant_specs: List[Tuple[int, int, int, int]] = []
+    relevant_specs: list[Tuple[int, int, int, int]] = []
     for r, c, h, w in tile_specs:
         row_start = max(r, scene_row)
         row_stop = min(r + h, scene_row_stop)
@@ -215,7 +182,7 @@ def _source_block_count_for_scl_tiles(
     mask_resolution: int,
     width: int,
     height: int,
-    tile_specs: List[Tuple[int, int, int, int]],
+    tile_specs: list[Tuple[int, int, int, int]],
 ) -> int:
     """Estimate unique source COG blocks touched by output SCL tile windows."""
     transform, expected_width, expected_height, target_crs_obj = _target_grid(
@@ -265,7 +232,7 @@ def _should_use_tiled_scl_fetch(
     mask_resolution: int,
     width: int,
     height: int,
-    tile_specs: List[Tuple[int, int, int, int]],
+    tile_specs: list[Tuple[int, int, int, int]],
 ) -> bool:
     """Whether sparse SCL tile reads are likely to reduce COG block reads."""
     full_spec = [(0, 0, height, width)]

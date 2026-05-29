@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 
 
+## [2.0.0b2] - 2026-05-29
+
+### Fixed
+- Bounds/AOI per-scene mask reads no longer pass `OVERVIEW_LEVEL` through Rasterio `WarpedVRT.warp_extras`. Newer Rasterio/GDAL builds (for example Colab's Rasterio 1.5.0 with GDAL 3.12.1) reject that as an unsupported warp option and log `CPLE_NotSupported ... WARP_EXTRAS`; GDAL's default warp overview selection is used instead.
+
+
 ## [2.0.0b1] - 2026-05-29
 
 ### Added
