@@ -40,6 +40,7 @@ from ..config import (
 )
 from ..helpers import (
     SceneFetchError,
+    SceneNoOverlap,
     define_dates,
     get_band_template,
     get_rasterio_resampling,
@@ -417,7 +418,7 @@ def _stream_bounds_combo_masks(
     def _fetch_scene(idx: int, item: BoundsItemLike) -> MaskFetch:
         window = scene_windows[idx]
         if window is None:
-            raise SceneFetchError(
+            raise SceneNoOverlap(
                 f"Scene {item.id} does not intersect bounds_target after reprojection"
             )
         if cloud_mask == CLOUD_MASK_SCL:
@@ -476,6 +477,19 @@ def _stream_bounds_combo_masks(
             except StopIteration:
                 break
             if isinstance(mask_result, Exception):
+                if isinstance(mask_result, SceneNoOverlap):
+                    # Expected: STAC search uses an inflated lat/lng envelope
+                    # to cover the UTM output extent, so a few returned scenes
+                    # have no overlap with bounds_target. Silently skip — not
+                    # a fetch failure, doesn't count toward dropped_scenes.
+                    logger.debug(
+                        f"Scene {scene_idx + 1}/{n_time} "
+                        f"({items_list[scene_idx].id}): no overlap with "
+                        f"bounds_target, skipping"
+                    )
+                    if mask_progress is not None:
+                        mask_progress.update(1)
+                    continue
                 if isinstance(mask_result, SceneFetchError):
                     dropped_scenes.append(
                         {
@@ -647,6 +661,20 @@ def run_bounds_pipeline(
             bounds_target,
         )
 
+    # STAC search bounds: reproject the target-CRS output extent back to 4326 so
+    # the search covers every scene that overlaps the actual output, not just the
+    # smaller original lat/lng rectangle. Parallels and meridians curve in UTM,
+    # so the UTM envelope of a lat/lng box extends a few km beyond the box at the
+    # corners; a search keyed off bounds_4326 would miss scenes that only touch
+    # those corner pixels, leaving nodata wedges in the output.
+    # bounds_4326 is kept as-is for the filename hash and sidecar metadata so the
+    # same user input keeps producing the same identifying hash.
+    search_bounds_4326 = (
+        bounds_4326
+        if aoi_target is not None
+        else reproject_bbox(bounds_target, target_crs, 4326)
+    )
+
     start_date, end_date = define_dates(
         request.start_year,
         request.start_month,
@@ -698,7 +726,7 @@ def run_bounds_pipeline(
 
     items, _, items_list = _search_and_sort_bounds_items(
         bounds=bounds,
-        bounds_4326=bounds_4326,
+        bounds_4326=search_bounds_4326,
         aoi_4326=aoi_4326,
         start_date=start_date,
         end_date=end_date,

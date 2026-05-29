@@ -1139,3 +1139,159 @@ class TestBoundsOcmContext:
         assert coverage_mask.shape == (h, w)
         # No implicit clip — every envelope pixel is in coverage.
         assert coverage_mask.all()
+
+    def test_cross_crs_bounds_search_covers_target_envelope(self, monkeypatch):
+        """The STAC search bbox must cover the *target-CRS output envelope*
+        reprojected back to 4326, not just the user's original lat/lng box.
+
+        Parallels and meridians curve in UTM, so the axis-aligned UTM envelope
+        of a lat/lng rectangle extends a few km beyond the rectangle at the
+        corners. A search keyed off the original lat/lng box misses scenes
+        whose footprint only touches those corner pixels and leaves nodata
+        wedges in the output. Regression for that bug.
+        """
+        import s2mosaic.pipelines.bounds as bounds_mod
+        from s2mosaic.geometry import reproject_bbox
+
+        captured_search_bboxes = []
+
+        def capture_bbox_search(**kwargs):
+            captured_search_bboxes.append(kwargs["bbox_4326"])
+            return [self.FakeItem()]
+
+        monkeypatch.setattr(
+            bounds_mod, "_search_for_items_by_bbox", capture_bbox_search
+        )
+        monkeypatch.setattr(bounds_mod, "_fetch_one_scl", _fake_scl_fetch_full_window)
+        monkeypatch.setattr(
+            bounds_mod,
+            "compute_masks_from_scl",
+            lambda scl: (
+                np.ones_like(scl, dtype=bool),
+                np.ones_like(scl, dtype=bool),
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "make_bounds_tile_reader",
+            lambda **_: (
+                lambda scene_idx, band_idx, window: np.ones(
+                    (window[2], window[3]), dtype=np.uint16
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "run_tile_aggregation",
+            lambda **kwargs: np.ones(
+                (kwargs["bands_count"], kwargs["height"], kwargs["width"]),
+                dtype=np.uint16,
+            ),
+        )
+
+        # Wide WA strip — same shape as the Advanced notebook AOI that
+        # surfaced the bug.
+        user_bounds = (114.80, -32.35, 120.20, -31.75)
+        output_crs = 32750
+
+        run_bounds_for_test(
+            bounds_mod,
+            bounds=user_bounds,
+            input_crs=4326,
+            output_crs=output_crs,
+            start_year=2023,
+            duration_days=1,
+            bands=["B04"],
+            cloud_mask="SCL",
+            min_coverage_fraction=None,
+            resolution=160,
+            adaptive_tiling=False,
+        )
+
+        assert len(captured_search_bboxes) == 1
+        search_bbox = captured_search_bboxes[0]
+
+        # The search bbox must equal the UTM output envelope reprojected back
+        # to 4326 — that is what guarantees every output pixel has a chance of
+        # being filled by a returned scene.
+        target_envelope = reproject_bbox(user_bounds, 4326, output_crs)
+        expected_search_bbox = reproject_bbox(target_envelope, output_crs, 4326)
+        assert search_bbox == pytest.approx(expected_search_bbox, abs=1e-6)
+
+        # And it must strictly cover the original user bounds (at least one
+        # edge expanded outward) — otherwise the fix has regressed and corner
+        # pixels of the UTM envelope can again be missed by the search.
+        assert search_bbox[0] <= user_bounds[0]
+        assert search_bbox[1] <= user_bounds[1]
+        assert search_bbox[2] >= user_bounds[2]
+        assert search_bbox[3] >= user_bounds[3]
+        assert search_bbox != pytest.approx(user_bounds, abs=1e-6)
+
+    def test_non_overlapping_scenes_are_silently_skipped(self, monkeypatch, caplog):
+        """Scenes returned by the (inflated) STAC search whose footprint
+        doesn't actually overlap ``bounds_target`` must be silently skipped
+        — they shouldn't count toward ``dropped_scenes`` or log at WARNING.
+
+        The expanded search bbox brings in some scenes that touch the lat/lng
+        envelope but not the target-CRS extent. That's expected, not a fetch
+        failure, and shouldn't pollute the log or the dropped-scenes report.
+        """
+        import logging
+
+        import s2mosaic.pipelines.bounds as bounds_mod
+
+        items = [self.FakeItem(), self.FakeItem(), self.FakeItem()]
+        scene_windows = [None, (0, 0, 4, 4), None]
+
+        def fake_window_for_item(item, bounds_target, target_crs, resolution):
+            return scene_windows.pop(0)
+
+        def fake_iter_ordered_fetches(items, fetch_fn, max_workers, on_complete=None):
+            for i, item in enumerate(items):
+                try:
+                    result = fetch_fn(i, item)
+                except Exception as e:
+                    result = e
+                if on_complete is not None:
+                    on_complete(i)
+                yield (i, result)
+
+        monkeypatch.setattr(bounds_mod, "_scene_window_for_item", fake_window_for_item)
+        monkeypatch.setattr(
+            bounds_mod, "iter_ordered_fetches", fake_iter_ordered_fetches
+        )
+        monkeypatch.setattr(bounds_mod, "_fetch_one_scl", _fake_scl_fetch_full_window)
+        monkeypatch.setattr(
+            bounds_mod,
+            "compute_masks_from_scl",
+            lambda scl: (
+                np.ones_like(scl, dtype=bool),
+                np.ones_like(scl, dtype=bool),
+            ),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="s2mosaic.pipelines.bounds"):
+            kept, dropped = bounds_mod._stream_bounds_combo_masks(
+                items_list=items,
+                source=MPC,
+                bounds_target=(0.0, 0.0, 40.0, 40.0),
+                target_crs=32750,
+                mask_resolution=10,
+                mask_w=4,
+                mask_h=4,
+                coverage_mask=np.ones((4, 4), dtype=bool),
+                cloud_mask="SCL",
+                mosaic_method="mean",
+                tile_workers=1,
+                ocm_batch_size=1,
+                ocm_inference_dtype="fp32",
+                scl_tile_specs=None,
+                show_progress=False,
+            )
+
+        # Only the middle scene contributed; the two no-overlap scenes are
+        # silently dropped — not counted as failures, not warned about.
+        assert list(kept.keys()) == [1]
+        assert dropped == []
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert warnings == []

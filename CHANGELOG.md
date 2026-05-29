@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- Cross-CRS `bounds=` no longer leaves nodata wedges at the corners of the output. The STAC scene search now uses the *target-CRS output envelope reprojected back to 4326* instead of the original lat/lng rectangle. Parallels and meridians curve in UTM, so the axis-aligned UTM envelope of a lat/lng box extends a few km beyond the box at the corners; a search keyed off the original lat/lng box missed scenes whose footprint only touched those corner pixels, leaving the output with empty wedges that looked like source-data gaps. The filename hash and sidecar metadata still use the original user-supplied bounds, so the same input keeps producing the same identifying hash.
+
 
 ## [2.0.0b1] - 2026-05-28
 

@@ -37,6 +37,16 @@ class SceneFetchError(Exception):
     """
 
 
+class SceneNoOverlap(SceneFetchError):
+    """Subclass for scenes whose footprint doesn't intersect ``bounds_target``.
+
+    Not a failure — these are returned by the STAC search (which queries a
+    slightly inflated lat/lng envelope to cover the UTM output extent) but
+    have no pixels in the requested area. The pipeline silently drops them
+    without counting them as dropped_scenes or logging a warning.
+    """
+
+
 def _exception_chain_summary(exc: BaseException) -> str:
     """Compactly format an exception plus its Python cause/context chain."""
     parts = []
