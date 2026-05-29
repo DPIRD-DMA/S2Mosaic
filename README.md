@@ -44,14 +44,15 @@ The Colab badge opens [`examples/Quick start.ipynb`](https://github.com/DPIRD-DM
 
 ## Installation
 
-You can install S2Mosaic using pip:
+S2Mosaic 2.0 is currently in beta. Install with pip:
 ```
-pip install s2mosaic
+pip install --pre s2mosaic
 ```
 Or with uv:
 ```
-uv add s2mosaic
+uv add --prerelease=allow s2mosaic
 ```
+Drop `--pre` / `--prerelease=allow` once `2.0.0` ships stable.
 ## Quick start — MGRS grid tile
 
 Mosaic an entire Sentinel-2 MGRS tile by ID, returning a NumPy array and rasterio profile. Find the tile ID for your area of interest with the [Sentinel-2 grid explorer](https://dpird-dma.github.io/Sentinel-2-grid-explorer/).
