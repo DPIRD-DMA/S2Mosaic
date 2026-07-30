@@ -145,7 +145,7 @@ def _finalise_tile(
     return arr.astype(out_dtype, copy=False)  # type: ignore[no-any-return, unused-ignore]
 
 
-@njit(cache=True, nogil=True)  # type: ignore[untyped-decorator]
+@njit(cache=True, nogil=True)  # type: ignore[untyped-decorator, unused-ignore]
 def _nanquantile_axis0(stack: npt.NDArray[Any], q: float) -> npt.NDArray[Any]:
     """Serial NaN-skipping quantile over stack axis 0.
 
@@ -222,7 +222,7 @@ def _warm_nanquantile_axis0() -> None:
     _nanquantile_axis0(sample, 0.5)
 
 
-@njit(cache=True, nogil=True)  # type: ignore[untyped-decorator]
+@njit(cache=True, nogil=True)  # type: ignore[untyped-decorator, unused-ignore]
 def _medoid_axis0_u16(
     stack: npt.NDArray[np.uint16],
     valid: npt.NDArray[np.bool_],
