@@ -3,6 +3,21 @@
 All notable changes to this project will be documented in this file.
 
 
+## [2.0.0b3] - 2026-07-30
+
+### Changed
+- **`opencv-python` replaced by `opencv-python-headless`, and the `multiclean` floor raised to `>=0.4.0`.** multiclean 0.4.0 moved to the headless build; while s2mosaic still declared the non-headless one, a clean install pulled *both* distributions. Each installs a `cv2/` package into site-packages and they overwrite each other's files (37 shared paths, including `cv2/__init__.py`), so whichever was unpacked last silently won — `import cv2` could resolve to a different major than the resolver was asked for. s2mosaic only uses `cv2.dilate` and `cv2.resize`, so the headless build is sufficient. Raising the multiclean floor matters as much as the switch: multiclean 0.3.x still requires the non-headless build and would recreate the same collision from the other side. If your own code relied on s2mosaic to pull full `opencv-python` for GUI functions (`cv2.imshow` and friends), depend on `opencv-python` explicitly.
+- **Dependency upper bounds removed** from `geopandas`, `numpy`, `opencv-python`, `pandas`, `pyproj`, `pystac`, and `shapely`. These came from a blanket "cap at the next major" sweep rather than any observed incompatibility, and two had since turned into hard install failures: `pandas<3` (pandas 3.0.0 shipped 2026-01-21) and `opencv-python<5` (5.0.0 shipped 2026-07-02) made `pip install s2mosaic` fail outright for anyone already holding those majors. An upper bound in a library propagates into every downstream resolution, so a stale one can make an otherwise-valid environment unsolvable. The `numpy` cap was additionally redundant — numba always pins numpy tighter (0.66 requires `numpy<2.5`), so numba, not this list, has always set the real ceiling.
+- `rasterio>=1.3,<2` is kept deliberately, and is now the only upper bound. It is the deepest integration in the codebase (`WarpedVRT`, windowed reads, profile plumbing) and the place a silent geometry or resampling change would hide; it has also not bumped major since 2018, so the cap costs nothing in practice.
+
+### Added
+- Weekly scheduled CI run (Sundays 18:00 UTC) plus manual `workflow_dispatch`. With upper bounds gone, an upstream release can break the build without any commit to this repo, and `uv sync` resolves fresh on every run — so the scheduled job is what surfaces an incompatible dependency before users install into it.
+
+### Fixed
+- `test_streaming.py`'s parallel-fetch test no longer relies on a `sleep` to make two concurrent fetches overlap. It uses a `threading.Barrier`, so the "both fetches were in flight simultaneously" assertion is structural rather than timing-dependent and cannot flake on a loaded CI runner.
+- The first cell of `examples/Mosaic method comparison.ipynb` was missing the `id` field that nbformat 4.5 requires. It only warned so far, but nbformat has announced this will become a hard error — which would have broken the notebook smoke-test step in CI.
+
+
 ## [2.0.0b2] - 2026-05-29
 
 ### Fixed

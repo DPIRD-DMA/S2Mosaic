@@ -11,6 +11,10 @@ Follow [SemVer](https://semver.org/):
   changed signatures, behavioural changes that break existing callers.
 - **Minor** (`v2.0.0` → `v2.1.0`): backwards-compatible feature added.
 - **Patch** (`v2.0.0` → `v2.0.1`): backwards-compatible bug fix.
+- **Pre-release** (`v2.0.0b1`, `v2.0.0b2`, …): a beta of the next version. PyPI
+  treats these as pre-releases, so `pip install s2mosaic` keeps resolving to the
+  latest stable and only `pip install --pre s2mosaic` picks them up. Use one when
+  a change needs real-world exposure before it becomes the default install.
 
 Any commit that lands on `main` between releases shows up at install time as
 a development version like `2.0.1.dev3+g1234abc` — useful but not something
@@ -24,11 +28,12 @@ you publish.
    git pull
    ```
 
-2. **Update [`CHANGELOG.md`](CHANGELOG.md)**: move the `## [Unreleased]` entries to
-   `## [<version>] - <YYYY-MM-DD>` and add a fresh empty `[Unreleased]` block at the top.
-   Commit on `main`:
+2. **Update [`CHANGELOG.md`](CHANGELOG.md)**: add a `## [<version>] - <YYYY-MM-DD>`
+   section at the top, above the previous release, with the changes grouped under
+   `### Added` / `### Changed` / `### Fixed`. There is no `[Unreleased]` block —
+   entries are written straight under the version being released. Commit on `main`:
    ```bash
-   git commit -am "Prepare <version> changelog"
+   git commit -am "Cut <version>: <short summary>"
    git push
    ```
 
@@ -37,8 +42,10 @@ you publish.
    git tag v<version>          # e.g. v2.0.0
    git push origin v<version>
    ```
-   The tag must match `v<major>.<minor>.<patch>` (pre-release suffixes like
-   `v2.0.0rc1` also match the publish workflow's filter).
+   The tag must match `v<major>.<minor>.<patch>`, optionally with a pre-release
+   suffix — the publish workflow filters on `v[0-9]+.[0-9]+.[0-9]+*`, so
+   `v2.0.0b3` and `v2.0.0rc1` both match. Pre-releases are what `v2.0.0b1` and
+   `v2.0.0b2` used.
 
 4. **Approve the deploy**: the [`Publish to PyPI`](.github/workflows/publish.yml)
    workflow runs `uv build` and uploads to PyPI via OIDC trusted publishing.

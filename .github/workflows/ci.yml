@@ -3,6 +3,13 @@ name: CI
 on:
   push:
   pull_request:
+  # Dependencies are declared without upper bounds (see pyproject.toml), so a
+  # new upstream release can break the build without any commit here. uv sync
+  # resolves fresh on every run, so this weekly job is what surfaces that --
+  # without it, "fix it when it breaks" means waiting for a user to report it.
+  schedule:
+    - cron: "0 18 * * 0"  # Sundays 18:00 UTC (Monday morning AWST)
+  workflow_dispatch:
 
 jobs:
   check:
