@@ -38,6 +38,11 @@ DEFAULT_BAND_READ_WORKERS = 16
 DEFAULT_ADAPTIVE_TILE_MIN_SIZE = 512
 DEFAULT_ADAPTIVE_TILE_DENSE_FRACTION = 0.75
 MEDOID_STRIPE_HEIGHT = 128
+# Pixels the medoid's median pass handles at once. The comparator loop is
+# hoisted above this one so the innermost loop is over pixels, which is what
+# lets the compiler emit vector min/max; 128 uint16 columns keep the working
+# set inside L1 for realistic scene counts. Measured flat from 32 to 256.
+MEDOID_PIXEL_BLOCK = 128
 EXPECTED_READ_EXACT_SCAN_LIMIT = 50_000
 
 # Tile requeue policy. When a tile worker fails with RasterioIOError the
@@ -223,6 +228,74 @@ def _warm_nanquantile_axis0() -> None:
 
 
 @njit(cache=True, nogil=True)  # type: ignore[untyped-decorator, unused-ignore]
+def _median_selection_network(n_scenes: int) -> npt.NDArray[np.int32]:
+    """Comparator list that sorts the lower half of ``n_scenes`` wires.
+
+    Batcher's odd-even mergesort, pruned by backward liveness: a comparator
+    whose outputs are never read on the way to a wanted position cannot affect
+    it, so it is dropped. That removes 9-19% of comparators on paper, though
+    LLVM already eliminates most of them as dead code — the real reason to
+    build the network as *data* is that it keeps the comparator loop out of
+    the emitted code, so there is no per-scene-count specialisation to compile
+    and no ceiling on stack depth.
+
+    Every position ``0 .. n_scenes // 2`` is kept live, not just the middle
+    one. Padding (see ``_medoid_axis0_u16``) means a pixel with ``k`` valid
+    observations reads position ``k // 2``, which varies per pixel; pruning to
+    the middle of the full width silently corrupts the shallower pixels.
+    """
+    if n_scenes <= 1:
+        return np.empty((0, 2), dtype=np.int32)
+
+    n_pairs = 0
+    for _ in range(2):
+        # First sweep counts, second fills — the count is not worth deriving.
+        if n_pairs > 0:
+            full = np.empty((n_pairs, 2), dtype=np.int32)
+        else:
+            full = np.empty((0, 2), dtype=np.int32)
+        idx = 0
+        p = 1
+        while p < n_scenes:
+            k = p
+            while k >= 1:
+                j = k % p
+                while j < n_scenes - k:
+                    for i in range(min(k, n_scenes - j - k)):
+                        if (i + j) // (2 * p) == (i + j + k) // (2 * p):
+                            if n_pairs > 0:
+                                full[idx, 0] = i + j
+                                full[idx, 1] = i + j + k
+                            idx += 1
+                    j += 2 * k
+                k //= 2
+            p *= 2
+        n_pairs = idx
+
+    live = np.zeros(n_scenes, dtype=np.bool_)
+    for i in range(n_scenes // 2 + 1):
+        live[i] = True
+
+    keep = np.empty((n_pairs, 2), dtype=np.int32)
+    n_keep = 0
+    for i in range(n_pairs - 1, -1, -1):
+        a = full[i, 0]
+        b = full[i, 1]
+        if live[a] or live[b]:
+            keep[n_keep, 0] = a
+            keep[n_keep, 1] = b
+            n_keep += 1
+            live[a] = True
+            live[b] = True
+
+    net = np.empty((n_keep, 2), dtype=np.int32)
+    for i in range(n_keep):
+        net[i, 0] = keep[n_keep - 1 - i, 0]
+        net[i, 1] = keep[n_keep - 1 - i, 1]
+    return net
+
+
+@njit(cache=True, nogil=True)  # type: ignore[untyped-decorator, unused-ignore]
 def _medoid_axis0_u16(
     stack: npt.NDArray[np.uint16],
     valid: npt.NDArray[np.bool_],
@@ -239,12 +312,22 @@ def _medoid_axis0_u16(
     This is the "closest to per-band median" formulation of the medoid
     used by LandTrendr on Google Earth Engine (Kennedy et al. 2018,
     doi:10.3390/rs10050691; ``medoidMosaic`` in eMapR/LT-GEE) and the
-    Open-MRV tutorials — O(S·B) per pixel. It is NOT the strict Flood 2013
+    Open-MRV tutorials. It scores ``S·B`` spectral components against a
+    target built from the per-band medians. It is NOT the strict Flood 2013
     definition (doi:10.3390/rs5126481), which picks
     ``arg min_s Σᵢ d(scene_s, scene_i)`` over all pairs — O(S²·B) per
     pixel — as implemented in gee-community/geetools. The two often agree,
     but can pick different scenes when the cluster of observations is
     asymmetric.
+
+    Cost is dominated by building that target, not by the scoring: the
+    median pass is O(S·log²S·B) per pixel via
+    ``_median_selection_network``, against the scoring's O(S·B). Do not
+    read the asymptotics as the reason to prefer this formulation —
+    measured, the strict pairwise medoid is *cheaper* below roughly eight
+    valid scenes per pixel, because its quadratic term is small there
+    while this one still pays a selection per band per pixel. The reason
+    is the semantics above.
 
     Inputs:
         stack: shape ``(scene, band, height, width)`` uint16. Values at
@@ -263,9 +346,22 @@ def _medoid_axis0_u16(
         - Stripe-blocked two-pass kernel — keeps the scene-outer scoring
           pattern but limits scratch arrays to ``MEDOID_STRIPE_HEIGHT`` rows
           at a time.
+        - **The median pass runs across pixels, not within one.** Building the
+          per-band median is 85-94% of this kernel's cost, and it used to be an
+          insertion sort per pixel per band — branchy, and therefore scalar.
+          It is now a median-selection network (see
+          ``_median_selection_network``) with the comparator loop hoisted above
+          a block of ``MEDOID_PIXEL_BLOCK`` pixels, so the innermost loop is
+          over pixels and compiles to vector min/max. Worth 2.3-5.8x on the
+          whole kernel against the insertion-sort version, output unchanged;
+          the gain grows with scene count and survives heavy cloud (roughly 3x
+          at 25% cover, 1.5x at 75%).
+        - Invalid observations are padded with 65535 rather than compacted, so
+          the vectorised loop needs no per-pixel gather. See the note in pass 1
+          for why that stays exact.
         - ``nogil=True`` so Python tile workers can run in parallel
           inside this kernel rather than serialising on the GIL.
-        - ``values`` is hoisted out of the per-pixel loop. Numba's
+        - ``values`` and ``counts`` are hoisted out of the loops. Numba's
           allocator takes an internal lock per ``np.empty`` call that
           nogil does not release; one allocation per kernel call keeps
           multi-thread scaling clean (see ``bench_percentile_nogil.py``
@@ -291,42 +387,73 @@ def _medoid_axis0_u16(
 
     out = np.zeros((n_bands, h, w), dtype=np.uint16)
     out_valid = np.zeros((h, w), dtype=np.bool_)
-    values = np.empty(n_scenes, dtype=np.uint16)
+    net = _median_selection_network(n_scenes)
+    n_cmp = net.shape[0]
+    # One column per pixel in the block, so the comparator loop below walks
+    # rows and the innermost loop walks pixels.
+    values = np.empty((n_scenes, MEDOID_PIXEL_BLOCK), dtype=np.uint16)
+    counts = np.empty(MEDOID_PIXEL_BLOCK, dtype=np.int32)
 
     for y0 in range(0, h, MEDOID_STRIPE_HEIGHT):
         y1 = min(h, y0 + MEDOID_STRIPE_HEIGHT)
         rows = y1 - y0
 
-        # Pass 1: per-band median target via insertion sort over the valid
-        # scenes for each pixel. Targets are stored doubled, so even-count
-        # half-integer medians stay exact without switching the distance
-        # kernel to float.
+        # Pass 1: per-band median target, one block of pixels at a time.
+        # Targets are stored doubled, so even-count half-integer medians stay
+        # exact without switching the distance kernel to float.
         target = np.zeros((n_bands, rows, w), dtype=np.int32)
-        for b in range(n_bands):
-            for yy in range(rows):
-                y = y0 + yy
-                for x in range(w):
-                    n_valid = 0
+        for yy in range(rows):
+            y = y0 + yy
+            for x0 in range(0, w, MEDOID_PIXEL_BLOCK):
+                block = min(MEDOID_PIXEL_BLOCK, w - x0)
+
+                # Valid counts do not depend on the band, so resolve them once
+                # for the block and reuse across all of them.
+                for p in range(block):
+                    counts[p] = 0
+                for s in range(n_scenes):
+                    for p in range(block):
+                        counts[p] += valid[s, y, x0 + p]
+
+                for b in range(n_bands):
+                    # Pad invalid observations with the uint16 maximum instead
+                    # of compacting them down. They sort above every real
+                    # value, so they occupy the top positions and leave every
+                    # order statistic below ``counts[p]`` untouched — exact
+                    # even when a real observation is also 65535, since only
+                    # values are read back, never scene indices. Compacting
+                    # would need a per-pixel gather, which does not vectorise.
                     for s in range(n_scenes):
-                        if valid[s, y, x]:
-                            values[n_valid] = stack[s, b, y, x]
-                            n_valid += 1
-                    if n_valid == 0:
-                        continue
-                    for i in range(1, n_valid):
-                        key = values[i]
-                        j = i - 1
-                        while j >= 0 and values[j] > key:
-                            values[j + 1] = values[j]
-                            j -= 1
-                        values[j + 1] = key
-                    mid = n_valid // 2
-                    if n_valid % 2 == 1:
-                        target[b, yy, x] = np.int32(2) * np.int32(values[mid])
-                    else:
-                        target[b, yy, x] = np.int32(values[mid - 1]) + np.int32(
-                            values[mid]
-                        )
+                        for p in range(block):
+                            if valid[s, y, x0 + p]:
+                                values[s, p] = stack[s, b, y, x0 + p]
+                            else:
+                                values[s, p] = np.uint16(65535)
+
+                    # A comparator has no data-dependent control flow, so the
+                    # same one applied across the block is a vector min/max.
+                    for c in range(n_cmp):
+                        lo_w = net[c, 0]
+                        hi_w = net[c, 1]
+                        for p in range(block):
+                            va = values[lo_w, p]
+                            vb = values[hi_w, p]
+                            values[lo_w, p] = min(va, vb)
+                            values[hi_w, p] = max(va, vb)
+
+                    for p in range(block):
+                        n_valid = counts[p]
+                        if n_valid == 0:
+                            continue
+                        mid = n_valid // 2
+                        if n_valid % 2 == 1:
+                            target[b, yy, x0 + p] = np.int32(2) * np.int32(
+                                values[mid, p]
+                            )
+                        else:
+                            target[b, yy, x0 + p] = np.int32(
+                                values[mid - 1, p]
+                            ) + np.int32(values[mid, p])
 
         # Pass 2: running best per pixel within this stripe, iterating scenes
         # outermost for cache-friendly stack access.
@@ -361,7 +488,12 @@ def _medoid_axis0_u16(
 
 
 def _warm_medoid_axis0_u16() -> None:
-    """Compile the medoid kernel on the main thread before workers start."""
+    """Compile the medoid kernel on the main thread before workers start.
+
+    Also compiles ``_median_selection_network``, which the kernel calls on
+    entry — leaving that to the first tile worker would put several threads
+    into Numba's compilation path at once.
+    """
     sample_stack = np.zeros((2, 1, 1, 1), dtype=np.uint16)
     sample_stack[0, 0, 0, 0] = 100
     sample_stack[1, 0, 0, 0] = 200

@@ -11,9 +11,11 @@ import s2mosaic.aggregation as aggregation_mod
 from s2mosaic.aggregation import (
     DEFAULT_TILE_WORKERS,
     _drain_with_requeue,
+    MEDOID_PIXEL_BLOCK,
     _medoid_axis0_u16,
     _nanquantile_axis0,
     _split_tile_size_aligned,
+    _median_selection_network,
     _warm_medoid_axis0_u16,
     _warm_nanquantile_axis0,
     adaptive_tile_specs_for_masks,
@@ -1455,6 +1457,65 @@ class TestMedoidAxis0U16:
     def test_warm_compile_runs_before_threaded_aggregation(self):
         _warm_medoid_axis0_u16()
         assert _medoid_axis0_u16.signatures
+
+    @pytest.mark.parametrize("n_scenes", [1, 2, 3, 5, 8, 9, 16, 17, 33, 64])
+    def test_selection_network_sorts_every_position_it_promises(self, n_scenes):
+        # The kernel pads short pixels, so a pixel with k valid observations
+        # reads position k // 2 — which varies per pixel. Pruning the network
+        # to the middle of the full width alone would corrupt shallow pixels,
+        # so every position up to half the width must come out sorted.
+        net = _median_selection_network(n_scenes)
+        rng = np.random.default_rng(n_scenes)
+        wanted = n_scenes // 2
+        for _ in range(200):
+            values = rng.integers(0, 65536, size=n_scenes).astype(np.uint16)
+            wires = values.copy()
+            for lo_w, hi_w in net:
+                if wires[lo_w] > wires[hi_w]:
+                    wires[lo_w], wires[hi_w] = wires[hi_w], wires[lo_w]
+            expected = np.sort(values)
+            np.testing.assert_array_equal(wires[: wanted + 1], expected[: wanted + 1])
+
+    def test_deep_stack_matches_float_reference(self):
+        # Annual composites run far past the scene counts the old per-pixel
+        # insertion sort was tuned for.
+        rng = np.random.default_rng(7)
+        stack = rng.integers(0, 12000, size=(64, 3, 5, 7), dtype=np.uint16)
+        valid = rng.random((64, 5, 7)) < 0.6
+
+        got, got_valid = _medoid_axis0_u16(stack, valid)
+        expected, expected_valid = self._reference_medoid(stack, valid)
+
+        np.testing.assert_array_equal(got_valid, expected_valid)
+        np.testing.assert_array_equal(got, expected)
+
+    def test_saturated_values_are_not_confused_with_padding(self):
+        # Invalid observations are padded with 65535; real 65535 observations
+        # must still be selected normally.
+        stack = np.full((3, 2, 1, 1), 65535, dtype=np.uint16)
+        stack[1, :, 0, 0] = 10
+        valid = np.array([True, True, False]).reshape(3, 1, 1)
+
+        got, got_valid = _medoid_axis0_u16(stack, valid)
+
+        np.testing.assert_array_equal(got_valid, [[True]])
+        # Two valid observations, 65535 and 10: the doubled median is their
+        # sum, so both are equidistant and the first wins on strict argmin.
+        np.testing.assert_array_equal(got[:, 0, 0], [65535, 65535])
+
+    def test_rows_wider_than_the_pixel_block(self):
+        # Widths that are not a multiple of MEDOID_PIXEL_BLOCK exercise the
+        # short trailing block.
+        rng = np.random.default_rng(11)
+        for width in (MEDOID_PIXEL_BLOCK - 1, MEDOID_PIXEL_BLOCK + 1):
+            stack = rng.integers(0, 9000, size=(6, 2, 2, width), dtype=np.uint16)
+            valid = rng.random((6, 2, width)) < 0.7
+
+            got, got_valid = _medoid_axis0_u16(stack, valid)
+            expected, expected_valid = self._reference_medoid(stack, valid)
+
+            np.testing.assert_array_equal(got_valid, expected_valid)
+            np.testing.assert_array_equal(got, expected)
 
 
 class TestDrainWithRequeue:
