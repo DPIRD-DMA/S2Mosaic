@@ -87,13 +87,11 @@ class MosaicRequest:
     - ``"first"`` — first valid scene in ``scene_order`` (read-cheap).
     - ``"percentile"`` — per-band percentile (requires ``percentile``).
     - ``"median"`` — shortcut for ``"percentile"`` with ``percentile=50``.
-    - ``"medoid"`` — picks the scene whose multi-band spectrum is closest
-      (squared Euclidean) to the per-band median across all valid scenes
-      for that pixel. Returns an actually-observed spectrum rather than a
-      synthetic per-band mix, so band relationships stay coherent for
-      indices and classifiers. This is the approximate-medoid formulation
-      popularised by Google Earth Engine tutorials, not the strict
-      Flood 2013 pairwise-distance medoid; the two often agree, but can differ.
+    - ``"medoid"`` — approximate medoid: the scene whose multi-band spectrum
+      is closest (squared Euclidean) to the per-band median across all valid
+      scenes for that pixel. Returns an actually-observed spectrum rather
+      than a synthetic per-band mix. See ``_medoid_axis0_u16`` for the exact
+      formulation and its references.
 
     Set ``include_observation_count`` to append a final output band containing
     the number of valid source observations contributing to each pixel.

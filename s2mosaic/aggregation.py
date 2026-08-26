@@ -237,11 +237,14 @@ def _medoid_axis0_u16(
     percentile/median which can return a synthetic per-band combination.
 
     This is the "closest to per-band median" formulation of the medoid
-    common in Google Earth Engine tutorials and the gee-community
-    libraries (O(S·B) per pixel). It is NOT the strict Flood 2013
-    definition, which picks ``arg min_s Σᵢ d(scene_s, scene_i)`` over all
-    pairs (O(S²·B) per pixel). The two often agree, but can pick different
-    scenes when the cluster of observations is asymmetric.
+    used by LandTrendr on Google Earth Engine (Kennedy et al. 2018,
+    doi:10.3390/rs10050691; ``medoidMosaic`` in eMapR/LT-GEE) and the
+    Open-MRV tutorials — O(S·B) per pixel. It is NOT the strict Flood 2013
+    definition (doi:10.3390/rs5126481), which picks
+    ``arg min_s Σᵢ d(scene_s, scene_i)`` over all pairs — O(S²·B) per
+    pixel — as implemented in gee-community/geetools. The two often agree,
+    but can pick different scenes when the cluster of observations is
+    asymmetric.
 
     Inputs:
         stack: shape ``(scene, band, height, width)`` uint16. Values at

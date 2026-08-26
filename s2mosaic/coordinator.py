@@ -215,10 +215,10 @@ def mosaic(
             output is therefore always an actually-observed spectrum
             (band relationships preserved for indices/classifiers) rather
             than the synthetic per-band combination produced by
-            ``"median"``/``"percentile"``. This is the approximate-medoid
-            formulation common in Google Earth Engine tutorials, not the
-            strict Flood 2013 pairwise-distance medoid; the two often agree,
-            but can differ.
+            ``"median"``/``"percentile"``. This is the approximate
+            "closest to per-band median" medoid, not the strict Flood 2013
+            pairwise-distance medoid; the two often agree, but can differ.
+            See the README for references.
         percentile (Optional[float], optional): Percentile to calculate
             when using ``mosaic_method="percentile"``. Must be between 0 and 100.
         min_observations (int, optional): Per-tile early-stop target
