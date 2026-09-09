@@ -60,12 +60,12 @@ Mosaic an entire Sentinel-2 MGRS tile by ID, returning a NumPy array and rasteri
 from s2mosaic import mosaic
 
 array, profile = mosaic(
-    grid_id="50HMH",            # Sentinel-2 MGRS tile ID
+    grid_id="50HMH",  # Sentinel-2 MGRS tile ID
     start_year=2022,
     start_month=1,
-    duration_months=2,          # collect scenes over this window
-    scene_order="valid_data",   # prioritise scenes with the most valid pixels
-    mosaic_method="mean",       # combine valid pixels by mean
+    duration_months=2,  # collect scenes over this window
+    scene_order="valid_data",  # prioritise scenes with the most valid pixels
+    mosaic_method="mean",  # combine valid pixels by mean
     bands=["B04", "B03", "B02", "B08"],
 )
 
