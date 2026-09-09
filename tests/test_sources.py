@@ -11,7 +11,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from s2mosaic import SOURCE_AWS, SOURCE_MPC, mosaic
-from s2mosaic.config import validate_inputs
+from s2mosaic.config import VALID_BANDS, validate_inputs
 from s2mosaic.sources import AWS, MPC, VALID_SOURCES, Source, get_source
 from s2mosaic.stac import STAC_RETRY_STATUS_CODES
 
@@ -63,6 +63,19 @@ class TestSourceAssetMap:
         # downstream rather than silent renames.
         assert AWS.asset_name("anything_else") == "anything_else"
 
+    def test_aws_maps_every_requestable_band(self):
+        # The fall-through above is what makes a missing entry dangerous: a
+        # band accepted by validation but absent from band_assets reaches
+        # Earth Search under its canonical name and raises KeyError on the
+        # item's assets. Earth Search publishes ``visual`` under that exact
+        # key; everything else in VALID_BANDS needs a mapping.
+        unmapped = {
+            band
+            for band in VALID_BANDS
+            if band != "visual" and band not in AWS.band_assets
+        }
+        assert unmapped == set()
+
 
 class TestSourceSigning:
     def test_aws_signing_is_identity(self):
@@ -89,7 +102,7 @@ class TestMgrsQuery:
 
     def test_aws_uses_split_field_mgrs_filter(self):
         # Element 84 rejects ``query`` combined with ``intersects``/``bbox``
-        # but accepts query-only — search_for_items drops intersects when an
+        # but accepts query-only, so search_for_items drops intersects when an
         # MGRS filter is present (see s2mosaic/stac.py).
         assert AWS.mgrs_query("50HMH") == {
             "mgrs:utm_zone": {"eq": 50},
@@ -336,7 +349,7 @@ class TestSearchPostFilter:
 
     @staticmethod
     def _make_item(item_id, grid_code):
-        # Real pystac.Item — ItemCollection construction inside
+        # Real pystac.Item, because ItemCollection construction inside
         # search_for_items rejects ad-hoc duck types.
         import datetime as _dt
 
@@ -402,7 +415,7 @@ class TestStacDatetimeFormat:
     string must produce well-formed RFC 3339 for both ``date`` and
     ``datetime`` inputs. The earlier ``f'{d.isoformat()}Z'`` pattern
     happened to produce ``"2023-06-01T00:00:00T00:00:00Z"`` when called
-    from production code, and MPC tolerated that — AWS's pystac_client
+    from production code, and MPC tolerated that. AWS's pystac_client
     validator does not.
     """
 
@@ -580,7 +593,7 @@ class TestSearchQueryShape:
 
     def test_raises_when_source_has_no_mgrs_filter(self, monkeypatch):
         # Without server-side MGRS filtering, a query-only search would
-        # have to scan everything — better to fail loudly so a custom-source
+        # have to scan everything, so better to fail loudly than let a custom-source
         # author sees the gap immediately.
         import s2mosaic.stac as stac_mod
         from datetime import date

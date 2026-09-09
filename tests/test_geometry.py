@@ -1,8 +1,9 @@
 import pytest
-from shapely.geometry import Polygon
+from shapely.geometry import MultiPolygon, Point, Polygon, mapping
 
 from s2mosaic.config import MosaicRequest
 from s2mosaic.geometry import (
+    _scene_window_from_geometry,
     _snap_bounds_to_grid,
     _target_grid,
     densify_bbox_to_polygon,
@@ -59,6 +60,47 @@ class TestTargetGrid:
 
         assert (width, height) == (1, 1)
         assert crs.to_epsg() == 32750
+
+
+class TestSceneWindowFromGeometry:
+    def test_geojson_multipolygon_returns_tight_intersection_window(self):
+        geom = MultiPolygon(
+            [
+                Polygon([(2.0, 3.0), (5.0, 3.0), (5.0, 7.0), (2.0, 7.0)]),
+                Polygon([(20.0, 20.0), (21.0, 20.0), (21.0, 21.0), (20.0, 21.0)]),
+            ]
+        )
+
+        window = _scene_window_from_geometry(
+            mapping(geom),
+            bounds_target=(0.0, 0.0, 10.0, 10.0),
+            target_crs=4326,
+            resolution=1,
+        )
+
+        assert window == (2, 3, 3, 4)
+
+    def test_empty_geometry_returns_none(self):
+        assert (
+            _scene_window_from_geometry(
+                Polygon(),
+                bounds_target=(0.0, 0.0, 10.0, 10.0),
+                target_crs=4326,
+                resolution=1,
+            )
+            is None
+        )
+
+    def test_non_polygon_geometry_returns_none(self):
+        assert (
+            _scene_window_from_geometry(
+                Point(1.0, 1.0),
+                bounds_target=(0.0, 0.0, 10.0, 10.0),
+                target_crs=4326,
+                resolution=1,
+            )
+            is None
+        )
 
 
 class TestSnapBoundsToGrid:

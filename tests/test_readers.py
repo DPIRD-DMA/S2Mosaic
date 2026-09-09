@@ -11,6 +11,7 @@ from s2mosaic.readers import (
     GridTileReader,
     _HandleCache,
     _lazy_signed_url,
+    _prewarm_sources,
     make_grid_tile_reader,
     should_prewarm_sources,
 )
@@ -210,6 +211,24 @@ class TestTileReaderHelpers:
         )
 
         assert calls == {"sign": 1}
+
+    def test_prewarm_logs_failures_and_keeps_going(self, caplog):
+        calls = []
+
+        def failing_resolver():
+            calls.append("fail")
+            raise RuntimeError("signing service unavailable")
+
+        def successful_resolver():
+            calls.append("ok")
+            return "signed.tif"
+
+        with caplog.at_level("WARNING", logger="s2mosaic.readers"):
+            _prewarm_sources([[failing_resolver, successful_resolver]])
+
+        assert sorted(calls) == ["fail", "ok"]
+        assert "Prewarm source signing failed" in caplog.text
+        assert "signing service unavailable" in caplog.text
 
     def test_grid_reader_reopens_with_refreshed_source_on_read_error(self, monkeypatch):
         resolver_calls = []

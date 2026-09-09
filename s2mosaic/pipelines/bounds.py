@@ -381,7 +381,7 @@ def _stream_bounds_combo_masks(
     # corner cases can still drop empty intersections) are skipped up-front so
     # we don't spend any worker time on them. Prefer item.geometry (polygon)
     # over item.bbox so the read window tracks the actual swath footprint
-    # instead of its lon/lat bounding rectangle — meaningfully less nodata is
+    # instead of its lon/lat bounding rectangle, so meaningfully less nodata is
     # fed into OCM, especially for cross-UTM-zone scenes.
     scene_windows: List[Optional[SceneWindow]] = [
         _scene_window_for_item(item, bounds_target, target_crs, mask_resolution)
@@ -466,7 +466,7 @@ def _stream_bounds_combo_masks(
             ):
                 logger.info(
                     "All in-coverage pixels filled after "
-                    f"{scene_position}/{n_time} scenes — "
+                    f"{scene_position}/{n_time} scenes, "
                     "skipping remaining cloud-mask fetches"
                 )
                 break
@@ -480,7 +480,7 @@ def _stream_bounds_combo_masks(
                 if isinstance(mask_result, SceneNoOverlap):
                     # Expected: STAC search uses an inflated lat/lng envelope
                     # to cover the UTM output extent, so a few returned scenes
-                    # have no overlap with bounds_target. Silently skip — not
+                    # have no overlap with bounds_target. Silently skip: not
                     # a fetch failure, doesn't count toward dropped_scenes.
                     logger.debug(
                         f"Scene {scene_idx + 1}/{n_time} "
@@ -531,7 +531,7 @@ def _stream_bounds_combo_masks(
                     continue
                 combo_block = new_pixels
             elif not combo_block.any():
-                # All-cloud scene — no contribution to mean/percentile either.
+                # All-cloud scene, so no contribution to mean/percentile either.
                 continue
 
             kept_combo_masks[scene_idx] = _WindowedBoolMask(
@@ -549,7 +549,7 @@ def _stream_bounds_combo_masks(
         if mask_progress is not None:
             # `first` mode can break the loop early. Snap the bar to total so tqdm
             # renders it as complete rather than red. Set ``n`` directly and force
-            # a refresh — ``update`` honours min-interval throttling and a quick
+            # a refresh. ``update`` honours min-interval throttling and a quick
             # ``close`` after may skip the final redraw in tqdm.notebook.
             if mask_progress.n < mask_progress.total:
                 mask_progress.n = mask_progress.total
@@ -565,7 +565,7 @@ def _stream_bounds_combo_masks(
 
     if not kept_combo_masks:
         raise RuntimeError(
-            "No usable scenes — every scene was fully cloud-masked, invalid, "
+            "No usable scenes: every scene was fully cloud-masked, invalid, "
             "or failed to fetch"
         )
     return kept_combo_masks, dropped_scenes
@@ -576,7 +576,7 @@ def run_bounds_pipeline(
     *,
     source: Source,
 ) -> Union[Tuple[npt.NDArray[Any], Dict[str, Any]], Path]:
-    """Bounds/AOI-mode pipeline. Called from :func:`s2mosaic.mosaic` for non-grid AOIs.
+    """Bounds/AOI-mode pipeline. Called from ``s2mosaic.mosaic`` for non-grid AOIs.
 
     Searches the configured STAC source for Sentinel-2 L2A scenes intersecting
     ``request.bounds`` or ``request.aoi`` over the date window, streams per-scene
@@ -590,8 +590,8 @@ def run_bounds_pipeline(
     rasterio WarpedVRT to land on one common grid in ``request.output_crs``.
 
     Args:
-        request: Normalized and validated :class:`MosaicRequest`. See
-            :func:`s2mosaic.mosaic` for the meaning of each field.
+        request: Normalized and validated ``MosaicRequest``. See
+            ``s2mosaic.mosaic`` for the meaning of each field.
         source: STAC source provider (e.g. MPC, AWS) supplying the catalog,
             asset signing, and band/asset naming.
 
@@ -750,7 +750,7 @@ def run_bounds_pipeline(
     mask_w, mask_h = _grid_shape_for_bounds(bounds_target, mask_resolution)
     n_time = len(items_list)
 
-    # Coverage mask at mask resolution — used for skip decisions.
+    # Coverage mask at mask resolution, used for skip decisions.
     if request.min_coverage_fraction is not None:
         coverage_mask_ocm = get_frequent_coverage_for_bbox(
             scenes=items,
@@ -821,7 +821,7 @@ def run_bounds_pipeline(
     kept_items = [items_list[i] for i in kept_indices]
     logger.info(f"Streaming user bands for {len(kept_items)}/{n_time} kept scenes")
 
-    # User grid is fixed upfront from bounds_target + resolution — every
+    # User grid is fixed upfront from bounds_target + resolution. Every
     # per-scene fetch snaps to exactly this (transform, w, h), so accumulators
     # can be sized before any data is fetched.
     user_transform, w, h, _ = _target_grid(
@@ -869,7 +869,7 @@ def run_bounds_pipeline(
     # OCM/SCL-resolution mask dict can be released once lazy user-grid wrappers exist.
     del kept_combo_masks_ocm
 
-    # Phase 3 — tile-streamed aggregation. Same architecture as grid_id mode:
+    # Phase 3, tile-streamed aggregation. Same architecture as grid_id mode:
     # per-tile workers each read tile windows via the bounds tile reader
     # (WarpedVRT-backed, or direct read from a local cached file), apply
     # the per-tile slice of the precomputed mask, and aggregate by method.
@@ -900,7 +900,7 @@ def run_bounds_pipeline(
     del combo_masks_user
     # Tile small AOIs as a single tile; cap large AOIs at 2048 so each
     # tile read from PC stays one big range request. Smaller tiles trade
-    # round-trip latency for worker utilisation — a bad deal when reads
+    # round-trip latency for worker utilisation, a bad deal when reads
     # are network-bound.
     tile_size = min(2048, max(h, w))
     logger.info(

@@ -37,7 +37,7 @@ def _read_band_at_target_window(
     Uses ``WarpedVRT`` for both same-CRS and cross-CRS reads so the source
     extent is honoured uniformly: pixels whose centres fall outside the
     source COG return 0, matching the behaviour of the user-band reader in
-    :class:`~s2mosaic.readers.BoundsTileReader`. The ``src.read(window, out_shape,
+    ``s2mosaic.readers.BoundsTileReader``. The ``src.read(window, out_shape,
     boundless=True)`` fast path was faster but its boundless padding interacted
     badly with ``out_shape`` downsampling at source-extent boundaries, returning
     in-data values for out-of-source pixels and producing 1-pixel dark stripes
@@ -75,7 +75,7 @@ def _fetch_one_scl(
     """Fetch the scene's SCL band over its footprint within ``bounds_target``.
 
     Like the OCM fetcher, this reads only the scene's window in the target
-    grid instead of the full bounds extent — so SCL read cost per scene
+    grid instead of the full bounds extent, so SCL read cost per scene
     stays bounded by the scene size regardless of how wide the bounds is.
     """
     _, _, win_w, win_h = scene_window

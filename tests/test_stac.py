@@ -3,6 +3,8 @@ from datetime import date, datetime, timezone
 
 import pandas as pd
 import pytest
+from pystac import Item
+from pystac.item_collection import ItemCollection
 from shapely.geometry import Polygon
 
 from s2mosaic.stac import (
@@ -11,6 +13,7 @@ from s2mosaic.stac import (
     ITEM_COL,
     ORBIT_COL,
     filter_latest_processing_baselines,
+    search_for_items,
     sort_items,
 )
 
@@ -113,6 +116,67 @@ class TestStacBoundsSearch:
 
         assert result == ["scene-a"]
         assert dedupe_inputs == [items]
+
+
+class TestStacGridSearch:
+    class FakeSearch:
+        def __init__(self, items):
+            self._items = items
+
+        def item_collection(self):
+            return self._items
+
+    class FakeCatalog:
+        def __init__(self, items):
+            self._items = items
+
+        def search(self, **_query):
+            return TestStacGridSearch.FakeSearch(self._items)
+
+    class FakeSource:
+        name = "fake"
+        collection_id = "sentinel-test"
+
+        def __init__(self, items):
+            self._catalog = TestStacGridSearch.FakeCatalog(items)
+
+        def mgrs_query(self, grid_id):
+            return {"grid:code": {"eq": f"MGRS-{grid_id}"}}
+
+        def open_catalog(self, *, stac_io):
+            return self._catalog
+
+    def _item(self, item_id, grid_code):
+        return Item(
+            id=item_id,
+            geometry=None,
+            bbox=None,
+            datetime=datetime(2023, 1, 1, tzinfo=timezone.utc),
+            properties={
+                "grid:code": grid_code,
+                "s2:processing_baseline": "05.11",
+            },
+        )
+
+    def test_grid_search_post_filters_items_by_mgrs_grid_code(self):
+        items = ItemCollection(
+            [
+                self._item("wanted", "MGRS-50HMH"),
+                self._item("wrong", "MGRS-50HNH"),
+                self._item("missing", None),
+            ]
+        )
+
+        result = search_for_items(
+            grid_id="50HMH",
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 1, 2),
+            additional_query={},
+            source=self.FakeSource(items),
+            ignore_duplicate_items=False,
+        )
+
+        assert [item.id for item in result] == ["wanted"]
 
 
 class TestSortItems:

@@ -32,7 +32,7 @@ class SceneFetchError(Exception):
     """Raised by a per-scene COG/asset fetch after all retries are exhausted.
 
     Caught at the pipeline-loop level so one bad scene doesn't abort the whole
-    mosaic — the loop logs and skips. Errors that aren't fetch-related (e.g.
+    mosaic; the loop logs and skips. Errors that aren't fetch-related (e.g.
     OCM inference failures) bypass this and propagate.
     """
 
@@ -40,7 +40,7 @@ class SceneFetchError(Exception):
 class SceneNoOverlap(SceneFetchError):
     """Subclass for scenes whose footprint doesn't intersect ``bounds_target``.
 
-    Not a failure — these are returned by the STAC search (which queries a
+    Not a failure. These are returned by the STAC search (which queries a
     slightly inflated lat/lng envelope to cover the UTM output extent) but
     have no pixels in the requested area. The pipeline silently drops them
     without counting them as dropped_scenes or logging a warning.
@@ -68,7 +68,7 @@ def report_dropped_scenes(
     """Emit a single end-of-phase line listing scenes that fell out of Phase 1.
 
     Goes through ``print`` (defaulting to ``stderr``) so it's visible even when
-    the user hasn't configured Python logging — the warning logs inside the
+    the user hasn't configured Python logging. The warning logs inside the
     retry loop only surface if a handler is attached. ``stream`` is an
     injection point for tests; in production we always write to ``stderr``.
     """
@@ -132,10 +132,10 @@ def with_scene_retry(
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """Decorator: retry a per-scene fetcher with exponential backoff + jitter.
 
-    On exhaustion, the last exception is wrapped in :class:`SceneFetchError`
+    On exhaustion, the last exception is wrapped in ``SceneFetchError``
     so the pipeline loop can catch fetch failures specifically without also
     swallowing inference or programming errors that arise outside the fetch.
-    Backoff is delegated to :func:`backoff_delay` (shared with the per-tile
+    Backoff is delegated to ``backoff_delay`` (shared with the per-tile
     reader retries) and seeded with ``base_delay``.
     """
     if attempts < 1:
@@ -178,10 +178,10 @@ def get_band_template(
 
     The result is the same shape for grid_id and bounds modes:
 
-        * ``href_template`` — list of ``(stac_asset_name, raster_band_idx)``;
+        * ``href_template``: list of ``(stac_asset_name, raster_band_idx)``;
           one entry per output band.
-        * ``bands_count`` — number of output bands.
-        * ``href_band_indices`` — just the raster band indices, pulled out
+        * ``bands_count``: number of output bands.
+        * ``href_band_indices``: just the raster band indices, pulled out
           for the hot path.
 
     ``"visual"`` is the 3-band TCI asset; spectral requests are one asset
@@ -238,7 +238,7 @@ def pick_ocm_resolution(user_resolution: int) -> int:
 # MGRS Sentinel-2 grid id pattern.
 #
 # Three pieces:
-#   - UTM zone 1-60 (no leading zero — both MPC and Element 84 use bare ints)
+#   - UTM zone 1-60 (no leading zero; both MPC and Element 84 use bare ints)
 #   - latitude band letter: C-X excluding I and O (A, B, Y, Z are polar UPS;
 #     I and O are skipped to avoid confusion with 1 and 0)
 #   - 100 km grid square: column letter A-Z excluding I and O (24 letters),
@@ -254,7 +254,7 @@ def normalize_grid_id(grid_id: str) -> str:
     """Normalize and validate a Sentinel-2 MGRS grid id.
 
     Strips whitespace, uppercases the input, and matches it against
-    :data:`GRID_ID_PATTERN`. Returns the normalized id on success.
+    ``GRID_ID_PATTERN``. Returns the normalized id on success.
 
     Raises ``ValueError`` if the id is empty or doesn't match the MGRS
     grid-square format used by Sentinel-2 (e.g. ``'50HMK'`` or ``'1FBE'``).

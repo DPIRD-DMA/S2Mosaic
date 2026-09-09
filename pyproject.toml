@@ -108,4 +108,5 @@ markers = [
 addopts = "-m 'not slow'"
 filterwarnings = [
     "ignore::rasterio.errors.NotGeoreferencedWarning",
+    "ignore:Support for class-based `config` is deprecated:pydantic.warnings.PydanticDeprecatedSince20:planetary_computer.sas",
 ]

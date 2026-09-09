@@ -178,7 +178,7 @@ def mosaic(
     """
     Create a Sentinel-2 mosaic.
 
-    Three modes — pass exactly one of:
+    Three modes; pass exactly one of:
         * ``grid_id`` (e.g. "50HMH"): mosaic an entire MGRS tile.
         * ``bounds`` (minx, miny, maxx, maxy): mosaic an arbitrary bounding
           box. Scenes from any intersecting MGRS tiles are streamed through
@@ -246,8 +246,9 @@ def mosaic(
         additional_query (Dict[str, Any], optional): Additional query parameters for STAC API.
             Defaults to {"eo:cloud_cover": {"lt": 100}}.
         min_coverage_fraction (float, optional): Drop pixels covered by fewer
-            than this fraction of overlapping scenes. Set to None to disable.
-            Defaults to None.
+            than this fraction of the *maximum* scene-overlap count in the
+            requested area, trimming thin scene-edge coverage. Set to None to
+            disable. Defaults to None.
         ignore_duplicate_items (bool, optional): Whether to remove duplicate scenes based on their IDs. Defaults to True.
         scene_order (str, optional): Scene ordering. Options are "valid_data", "oldest", or "newest". Defaults to "valid_data".
         scene_sort_fn (Callable, optional): Custom sorting function. If provided, overrides scene_order.
@@ -257,13 +258,13 @@ def mosaic(
             (one COG read, no inference) but lower accuracy.
         ocm_batch_size (int, optional): Batch size for OCM inference. Defaults to 1.
         ocm_inference_dtype (str, optional): Data type for OCM inference.
-            Defaults to "fp32" for the broadest device compatibility — runs on
-            every CPU/GPU/MPS backend and is also the fastest option on CPU
-            (most CPUs lack efficient fp16/bf16 paths). On GPU, switch to
+            Defaults to "fp32", which runs on every CPU/GPU/MPS backend and is
+            also the fastest option on CPU (most CPUs lack efficient fp16/bf16
+            paths). On GPU, switch to
             "fp16" for ~2× speedup with lower VRAM use, or "bf16" on hardware
             that supports it (Ampere+ NVIDIA, Apple Silicon).
         output_crs (int, optional): EPSG code for the output grid. Must be a
-            projected CRS — geographic CRSes (e.g. 4326) are rejected at
+            projected CRS. Geographic CRSes (e.g. 4326) are rejected at
             validation, because ``resolution`` is interpreted as metres in the
             target CRS and a geographic output would produce a degenerate
             grid. If you need a lat/lon raster, reproject the mosaic
@@ -277,12 +278,12 @@ def mosaic(
             expand the output extent outward to whole multiples of
             ``resolution`` in the target CRS, so repeat runs over the same area
             produce identical grids and (at ``resolution=10``) align with the
-            native Sentinel-2 pixel grid — making reads zero-cost copies
+            native Sentinel-2 pixel grid, making reads zero-cost copies
             instead of sub-pixel resamples. The output may grow by up to one
             pixel on each side. Defaults to False (use the exact requested
             bounds; sub-pixel offsets are absorbed by ``resampling_method``).
             For repeatable cross-run alignment, also pass ``output_crs``
-            explicitly — otherwise the auto-picked UTM zone can shift between
+            explicitly, otherwise the auto-picked UTM zone can shift between
             runs (e.g. if bounds are tweaked slightly across the centroid's
             UTM-zone boundary), and snapping in a different CRS does not
             preserve the grid.
@@ -297,7 +298,8 @@ def mosaic(
         tile_workers (int, optional): Number of output tiles to aggregate
             concurrently. Higher values can improve throughput for
             network-bound reads, but increase memory use and simultaneous
-            source reads. Defaults to ``min(4, os.cpu_count() or 1)``.
+            source reads. Defaults to 8, tuned above CPU count because the
+            work is I/O-bound on remote COG reads.
         adaptive_tiling (bool, optional): Split sparse output tiles based on
             the actual cloud-valid contribution masks. Reduces wasted reads for
             irregular AOIs and sparse scene coverage. Defaults to True.

@@ -90,7 +90,7 @@ def _compute_one_scene_mask(
 ) -> npt.NDArray[Any]:
     """Phase-1 worker: return the per-scene combo mask.
 
-    Propagates :class:`SceneFetchError` rather than swallowing it so the
+    Propagates ``SceneFetchError`` rather than swallowing it so the
     pipeline can track which scenes dropped (id + reason) and surface the
     summary to the user.
     """
@@ -129,7 +129,7 @@ def _build_output_profile(
 class _HandleCache:
     """Per-thread cache of open rasterio handles, lazy per (scene, band).
 
-    rasterio's DatasetReader is not safe to share across threads — so each
+    rasterio's DatasetReader is not safe to share across threads, so each
     worker thread keeps its own dictionary. Handles open on first use of
     a given (scene, band) so workers that only touch a subset of scenes
     don't pay the open cost for the rest.

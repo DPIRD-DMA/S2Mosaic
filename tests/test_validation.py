@@ -9,7 +9,7 @@ from s2mosaic.config import validate_inputs
 
 
 class TestMosaicBoundsValidation:
-    """Input validation for bounds-mode mosaic — fails before any network call."""
+    """Input validation for bounds-mode mosaic, failing before any network call."""
 
     VALID_BOUNDS = (115.83, -31.97, 115.91, -31.94)
 
@@ -81,13 +81,13 @@ class TestMosaicBoundsValidation:
             self._call((0.0, 85.0, 1.0, 85.1))
 
     def test_swapped_axes_caught_when_lon_exceeds_lat_range(self):
-        # User swapped (lat, lon, lat, lon) for the Perth example — the
+        # User swapped (lat, lon, lat, lon) for the Perth example, so the
         # would-be-latitude slots now hold 115.83/115.91, exceeding ±90.
         with pytest.raises(ValueError, match="latitude must be in"):
             self._call((-31.97, 115.83, -31.94, 115.91))
 
     def test_lon_range_not_checked_when_input_crs_not_4326(self):
-        # Bounds in UTM zone 50S (metres) — values larger than 180 are valid.
+        # Bounds in UTM zone 50S (metres), so values larger than 180 are valid.
         # validate_inputs must accept this without raising on range.
         utm_bounds = (390_000.0, 6_460_000.0, 400_000.0, 6_470_000.0)
         validate_inputs(
@@ -108,14 +108,14 @@ class TestMosaicBoundsValidation:
             self._call(self.VALID_BOUNDS, output_crs=4326)
 
     def test_geographic_output_crs_rejected_grid_mode(self):
-        # Same rule in grid mode — even though output_crs is otherwise ignored
+        # Same rule in grid mode, even though output_crs is otherwise ignored
         # there, surfacing the error keeps the message consistent across modes.
         with pytest.raises(ValueError, match="geographic CRS"):
             mosaic(grid_id="50HMH", start_year=2023, output_crs=4326)
 
     def test_projected_output_crs_accepted(self):
         # Smoke test: projected output_crs passes validation. Use Australian
-        # Albers (EPSG:3577) — the canonical multi-zone alternative for AU.
+        # Albers (EPSG:3577), the canonical multi-zone alternative for AU.
         validate_inputs(
             scene_order="valid_data",
             mosaic_method="mean",
@@ -198,7 +198,7 @@ class TestMosaicBoundsValidation:
 
     def test_typical_cross_tile_bounds_accepted(self):
         # ~80km × 80km, larger than a single S2 tile's overlap zone but well
-        # under the 200km ceiling — must pass validation cleanly.
+        # under the 200km ceiling, so it must pass validation cleanly.
         validate_inputs(
             scene_order="valid_data",
             mosaic_method="mean",
@@ -317,6 +317,24 @@ class TestMosaicSharedParamsValidation:
     def test_bounds_mode_rejects_invalid_tile_workers(self, tile_workers):
         with pytest.raises(ValueError, match="tile_workers must be"):
             mosaic(start_year=2023, bounds=self.BOUNDS, tile_workers=tile_workers)
+
+    @pytest.mark.parametrize("min_observations", [0, -1, True, False, 1.5])
+    def test_rejects_invalid_min_observations(self, min_observations):
+        with pytest.raises(ValueError, match="min_observations must be"):
+            mosaic(
+                grid_id="50HMH",
+                start_year=2023,
+                min_observations=min_observations,
+            )
+
+    @pytest.mark.parametrize("max_observations", [0, -1, True, False, 1.5])
+    def test_rejects_invalid_max_observations(self, max_observations):
+        with pytest.raises(ValueError, match="max_observations must be"):
+            mosaic(
+                grid_id="50HMH",
+                start_year=2023,
+                max_observations=max_observations,
+            )
 
     @pytest.mark.parametrize("adaptive_tiling", [0, 1, "yes", None])
     def test_grid_mode_rejects_invalid_adaptive_tiling(self, adaptive_tiling):

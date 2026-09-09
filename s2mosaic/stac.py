@@ -52,7 +52,7 @@ def add_item_info(items: ItemCollection) -> DataFrame:
 
     Element 84's Earth Search publishes ``s2:nodata_pixel_percentage`` and
     ``s2:high_proba_clouds_percentage`` (so the MPC code path is preserved),
-    but it does *not* publish ``sat:relative_orbit`` — we recover that from
+    but it does *not* publish ``sat:relative_orbit``; we recover that from
     the ``_R(\\d+)_`` token in ``s2:product_uri``.
     """
 
@@ -99,7 +99,7 @@ def search_for_items(
     if additional_query:
         base_query.update(additional_query)
 
-    # Search by MGRS tile only — no ``intersects``. Both MPC and AWS reject
+    # Search by MGRS tile only, with no ``intersects``. Both MPC and AWS reject
     # the combination on the same query, and the per-field MGRS filter is
     # precise enough on its own (one MGRS tile id ↔ one set of items).
     query: Dict[str, Any] = {
@@ -130,7 +130,7 @@ def search_for_items(
     catalog = source.open_catalog(stac_io=stac_api_io)
     items = catalog.search(**query).item_collection()
     logger.info(f"Found {len(items)}")
-    # Defensive client-side filter — both providers should already return
+    # Defensive client-side filter. Both providers should already return
     # exactly the requested tile, but if a provider ever loosens its query
     # semantics this catches the regression rather than silently mosaicking
     # in scenes from an adjacent tile.
@@ -154,7 +154,7 @@ def sort_items(items: DataFrame, scene_order: str) -> DataFrame:
     # The valid_data branch round-robins by relative orbit so the early-stopped
     # mosaic blends scenes from different overpasses within a single MGRS tile.
     # In bounds mode an AOI may pull scenes from several MGRS tiles, where
-    # ``sat:relative_orbit`` no longer identifies a single ground-track pass —
+    # ``sat:relative_orbit`` no longer identifies a single ground-track pass,
     # the round-robin still produces a valid sort but is no longer "balance
     # acquisitions across passes". Acceptable today; revisit if bounds-mode
     # output quality becomes a concern.

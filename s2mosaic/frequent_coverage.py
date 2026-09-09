@@ -33,7 +33,7 @@ def _utm_origin_from_item(item: Item) -> Tuple[float, float]:
 
     Sentinel-2 L2A items expose ``proj:transform`` on their band assets (both
     MPC and Element 84 do this). The MGRS tile that owns the item starts at
-    ``(transform[2], transform[5])`` — i.e. the asset's top-left — and is
+    ``(transform[2], transform[5])``, the asset's top-left. That origin is
     deterministic given the tile id, so any one item from the tile suffices.
     """
     for asset in item.assets.values():

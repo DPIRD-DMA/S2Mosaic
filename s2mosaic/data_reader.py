@@ -21,7 +21,7 @@ def get_full_band(
         target_side = int(10980 / spatial_ratio)
         # Passing an explicit window is required for rasterio to use COG
         # overviews. Single-band reads must use a scalar index rather than
-        # a 1-element list — the latter triggers a slow path that reads at
+        # a 1-element list. The latter triggers a slow path that reads at
         # native resolution.
         window_cls: Any = Window
         full_window = window_cls(0, 0, src.width, src.height)

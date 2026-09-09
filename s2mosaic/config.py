@@ -77,17 +77,17 @@ class MosaicRequest:
     Exactly one of ``grid_id``, ``bounds``, or ``aoi`` selects the spatial
     mode. ``grid_id`` mosaics a full Sentinel-2 MGRS tile; ``bounds`` and
     ``aoi`` stream intersecting scenes onto a common output grid. Call
-    :meth:`normalized` before :meth:`validate` so optional public inputs such as
+    ``normalized`` before ``validate`` so optional public inputs such as
     ``bands`` and ``additional_query`` are expanded to concrete values.
 
     ``mosaic_method`` selects how each output pixel is combined across the
     valid contributing scenes:
 
-    - ``"mean"`` — per-band arithmetic mean.
-    - ``"first"`` — first valid scene in ``scene_order`` (read-cheap).
-    - ``"percentile"`` — per-band percentile (requires ``percentile``).
-    - ``"median"`` — shortcut for ``"percentile"`` with ``percentile=50``.
-    - ``"medoid"`` — approximate medoid: the scene whose multi-band spectrum
+    - ``"mean"``: per-band arithmetic mean.
+    - ``"first"``: first valid scene in ``scene_order`` (read-cheap).
+    - ``"percentile"``: per-band percentile (requires ``percentile``).
+    - ``"median"``: shortcut for ``"percentile"`` with ``percentile=50``.
+    - ``"medoid"``: approximate medoid. The scene whose multi-band spectrum
       is closest (squared Euclidean) to the per-band median across all valid
       scenes for that pixel. Returns an actually-observed spectrum rather
       than a synthetic per-band mix. See ``_medoid_axis0_u16`` for the exact

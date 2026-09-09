@@ -3,13 +3,13 @@
 These settings target the Planetary Computer / AWS Open Data COG-over-HTTPS
 path: enable HTTP/2 multiplexing, merge adjacent ranges, suppress directory
 listing on open, and turn on VSI byte caching. They are applied via
-``os.environ`` because ``rasterio.Env`` is thread-local — its context does
+``os.environ`` because ``rasterio.Env`` is thread-local: its context does
 not propagate into the ThreadPoolExecutor workers used by the tile readers
 and the mask-streaming pipeline, so the settings would have no effect on
 hot-path COG reads.
 
 User-set values are respected; we only fill in defaults that aren't already
-present in the environment. Call :func:`apply_gdal_network_defaults` explicitly
+present in the environment. Call ``apply_gdal_network_defaults`` explicitly
 when a process wants these global GDAL defaults.
 """
 
@@ -27,7 +27,7 @@ GDAL_NETWORK_DEFAULTS: dict[str, str] = {
     "GDAL_HTTP_VERSION": "2TLS",
     "GDAL_HTTP_MULTIPLEX": "YES",
     "GDAL_HTTP_MULTIRANGE": "YES",
-    # Coalesce neighbouring range requests into one — common when tiled reads
+    # Coalesce neighbouring range requests into one, common when tiled reads
     # span adjacent COG blocks. Cheap, always-on win.
     "GDAL_HTTP_MERGE_CONSECUTIVE_RANGES": "YES",
     # Suppress the LIST on open + sidecar (.aux.xml/.ovr) probing. We always
@@ -38,7 +38,7 @@ GDAL_NETWORK_DEFAULTS: dict[str, str] = {
     # window reads don't re-fetch overlapping headers/blocks.
     "VSI_CACHE": "TRUE",
     "VSI_CACHE_SIZE": "5000000",
-    # Cross-handle LRU — survives close()/reopen() so retries don't refetch
+    # Cross-handle LRU. Survives close()/reopen() so retries don't refetch
     # the header.
     "CPL_VSIL_CURL_CACHE_SIZE": "200000000",
     # Bound pathological remote reads so caller retry logic can recover
@@ -68,7 +68,7 @@ def apply_gdal_network_defaults() -> GdalEnvSnapshot:
     These are process-wide environment variables. They are intentionally not
     applied at import time because they affect every GDAL user in the process.
     Returns the previous values for the managed keys so callers can restore
-    the process environment with :func:`restore_gdal_network_env`.
+    the process environment with ``restore_gdal_network_env``.
     """
     previous = {key: os.environ.get(key) for key in GDAL_NETWORK_DEFAULTS}
     if os.environ.get("S2MOSAIC_NO_GDAL_DEFAULTS", "").lower() in ("1", "true", "yes"):
@@ -79,7 +79,7 @@ def apply_gdal_network_defaults() -> GdalEnvSnapshot:
 
 
 def restore_gdal_network_env(snapshot: GdalEnvSnapshot) -> None:
-    """Restore GDAL env vars captured by :func:`apply_gdal_network_defaults`."""
+    """Restore GDAL env vars captured by ``apply_gdal_network_defaults``."""
     for key, value in snapshot.items():
         if value is None:
             os.environ.pop(key, None)

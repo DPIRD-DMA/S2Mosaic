@@ -11,7 +11,7 @@ from s2mosaic.geometry import (
     _expand_window_for_ocm_context,
     _rasterize_aoi_mask,
 )
-from s2mosaic.pipelines.bounds import _mask_resolution_for_request
+from s2mosaic.pipelines.bounds import _ResampledBoolMask, _mask_resolution_for_request
 from s2mosaic.pipelines.bounds_scl import _read_band_at_target_window
 from s2mosaic.sources import MPC
 
@@ -24,7 +24,7 @@ def run_bounds_for_test(bounds_mod, **kwargs):
 
 
 def _fake_scl_fetch_full_window(item, source, bt, tc, mr, scene_window):
-    """All-ones SCL fetch returned at the requested scene_window — shared
+    """All-ones SCL fetch returned at the requested scene_window. Shared
     test stub for the bounds pipeline's per-scene-window fetch contract."""
     return MaskFetch(
         arr=np.ones((scene_window[3], scene_window[2]), dtype=np.uint8),
@@ -40,7 +40,7 @@ class TestReadBandAtTargetWindow:
     ``src.read(window, out_shape=..., boundless=True, fill_value=0)``. When
     the requested window extended west of the source extent, ``out_shape``
     downsampling did not honour the boundless padding for the leftmost
-    output pixels — they came back with valid in-data values instead of 0.
+    output pixels; they came back with valid in-data values instead of 0.
     That made SCL/OCM masks claim "valid" for out-of-source pixels while
     the WarpedVRT-based band reader correctly returned nodata, producing
     1-pixel dark stripes at MGRS overlap-zone edges in the final mosaic.
@@ -70,7 +70,7 @@ class TestReadBandAtTargetWindow:
     def test_pixels_west_of_source_return_zero(self, tmp_path):
         """Output pixel whose centre is west of source must be 0.
 
-        Uses a *fractional* source col_off — the failure mode in production
+        Uses a *fractional* source col_off, the failure mode in production
         only appears when the target grid origin is misaligned to the source
         pixel grid. Integer-aligned offsets accidentally hide the bug.
         """
@@ -90,7 +90,7 @@ class TestReadBandAtTargetWindow:
 
         # Target grid at 60 m starting at x = 99_953.36 so source col_off is
         # the fractional value (-2.332) that triggered the production bug.
-        # Output pixel 0 covers x ∈ [99_953.36, 100_013.36) — centre 99_983.36
+        # Output pixel 0 covers x ∈ [99_953.36, 100_013.36), centre 99_983.36
         # is *outside* source (west of 100_000); pixel 1 onward is inside.
         target_minx = 99_953.36
         target_res = 60.0
@@ -113,7 +113,7 @@ class TestReadBandAtTargetWindow:
         )
 
         assert arr.shape == (target_height, target_width)
-        # Leftmost output pixel's centre is west of source — must be nodata.
+        # Leftmost output pixel's centre is west of source, so it must be nodata.
         np.testing.assert_array_equal(arr[:, 0], 0)
         # Inside columns must carry the source fill.
         np.testing.assert_array_equal(arr[:, 1:], 5)
@@ -869,7 +869,7 @@ class TestBoundsOcmContext:
         """``bounds=`` always fills the rectangle (or its reprojected envelope
         for cross-CRS); there is no implicit polygon mask. Verify cross-CRS
         bounds searches by bbox (not by polygon) and never invokes
-        ``_rasterize_aoi_mask`` — that path is reserved for explicit ``aoi=``.
+        ``_rasterize_aoi_mask``: that path is reserved for explicit ``aoi=``.
         """
         import s2mosaic.pipelines.bounds as bounds_mod
 
@@ -1003,7 +1003,7 @@ class TestBoundsOcmContext:
         self, monkeypatch, tmp_path
     ):
         """Cross-CRS bounds= must still be reported as ``mode: bounds`` in the
-        sidecar — the user asked for bounds mode, regardless of any internal
+        sidecar. The user asked for bounds mode, regardless of any internal
         polygon handling.
         """
         import s2mosaic.pipelines.bounds as bounds_mod
@@ -1069,7 +1069,7 @@ class TestBoundsOcmContext:
     ):
         """``bounds=`` fills the rectangle (or its reprojected envelope for
         cross-CRS) with no implicit polygon clip. The coverage mask passed to
-        aggregation must therefore be all-True across the whole envelope —
+        aggregation must therefore be all-True across the whole envelope,
         envelope corners that sit outside the original lat/lon rectangle are
         still written with imagery (callers who want them clipped use
         ``aoi=shapely.box(*bounds)`` explicitly).
@@ -1129,7 +1129,7 @@ class TestBoundsOcmContext:
         coverage_mask = np.asarray(aggregation_calls[0]["coverage_mask"])
         h, w = aggregation_calls[0]["height"], aggregation_calls[0]["width"]
         assert coverage_mask.shape == (h, w)
-        # No implicit clip — every envelope pixel is in coverage.
+        # No implicit clip: every envelope pixel is in coverage.
         assert coverage_mask.all()
 
     def test_cross_crs_bounds_search_covers_target_envelope(self, monkeypatch):
@@ -1181,7 +1181,7 @@ class TestBoundsOcmContext:
             ),
         )
 
-        # Wide WA strip — same shape as the Advanced notebook AOI that
+        # Wide WA strip, the same shape as the Advanced notebook AOI that
         # surfaced the bug.
         user_bounds = (114.80, -32.35, 120.20, -31.75)
         output_crs = 32750
@@ -1204,14 +1204,14 @@ class TestBoundsOcmContext:
         search_bbox = captured_search_bboxes[0]
 
         # The search bbox must equal the UTM output envelope reprojected back
-        # to 4326 — that is what guarantees every output pixel has a chance of
+        # to 4326. That is what guarantees every output pixel has a chance of
         # being filled by a returned scene.
         target_envelope = reproject_bbox(user_bounds, 4326, output_crs)
         expected_search_bbox = reproject_bbox(target_envelope, output_crs, 4326)
         assert search_bbox == pytest.approx(expected_search_bbox, abs=1e-6)
 
         # And it must strictly cover the original user bounds (at least one
-        # edge expanded outward) — otherwise the fix has regressed and corner
+        # edge expanded outward), otherwise the fix has regressed and corner
         # pixels of the UTM envelope can again be missed by the search.
         assert search_bbox[0] <= user_bounds[0]
         assert search_bbox[1] <= user_bounds[1]
@@ -1221,8 +1221,8 @@ class TestBoundsOcmContext:
 
     def test_non_overlapping_scenes_are_silently_skipped(self, monkeypatch, caplog):
         """Scenes returned by the (inflated) STAC search whose footprint
-        doesn't actually overlap ``bounds_target`` must be silently skipped
-        — they shouldn't count toward ``dropped_scenes`` or log at WARNING.
+        doesn't actually overlap ``bounds_target`` must be silently skipped.
+        They shouldn't count toward ``dropped_scenes`` or log at WARNING.
 
         The expanded search bbox brings in some scenes that touch the lat/lng
         envelope but not the target-CRS extent. That's expected, not a fetch
@@ -1282,8 +1282,186 @@ class TestBoundsOcmContext:
             )
 
         # Only the middle scene contributed; the two no-overlap scenes are
-        # silently dropped — not counted as failures, not warned about.
+        # silently dropped: not counted as failures, not warned about.
         assert list(kept.keys()) == [1]
         assert dropped == []
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert warnings == []
+
+    def test_bounds_first_keeps_only_new_pixels_per_scene(self, monkeypatch):
+        import s2mosaic.pipelines.bounds as bounds_mod
+
+        class FakeItemWithId:
+            def __init__(self, scene_id):
+                self.id = scene_id
+                self.bbox = (-90.0, -45.0, 90.0, 45.0)
+
+        items = [FakeItemWithId("scene-0"), FakeItemWithId("scene-1")]
+        windows = [(0, 0, 3, 2), (1, 0, 3, 2)]
+        scene_masks = {
+            "scene-0": np.array([[1, 1, 0], [0, 1, 0]], dtype=bool),
+            "scene-1": np.array([[1, 1, 1], [1, 0, 0]], dtype=bool),
+        }
+
+        def fake_iter_ordered_fetches(items, fetch_fn, max_workers, on_complete=None):
+            for i, item in enumerate(items):
+                if on_complete is not None:
+                    on_complete(i)
+                yield i, fetch_fn(i, item)
+
+        def fake_fetch_one_scl(
+            item, source, bounds_target, target_crs, mask_resolution, scene_window
+        ):
+            mask = scene_masks[item.id].astype(np.uint8)
+            return MaskFetch(
+                arr=mask,
+                target_window=scene_window,
+                crop=(slice(0, mask.shape[0]), slice(0, mask.shape[1])),
+            )
+
+        monkeypatch.setattr(
+            bounds_mod,
+            "_scene_window_for_item",
+            lambda item, bounds_target, target_crs, resolution: windows[
+                int(item.id[-1])
+            ],
+        )
+        monkeypatch.setattr(
+            bounds_mod, "iter_ordered_fetches", fake_iter_ordered_fetches
+        )
+        monkeypatch.setattr(bounds_mod, "_fetch_one_scl", fake_fetch_one_scl)
+        monkeypatch.setattr(
+            bounds_mod,
+            "compute_masks_from_scl",
+            lambda scl: (scl.astype(bool), np.ones_like(scl, dtype=bool)),
+        )
+
+        kept, dropped = bounds_mod._stream_bounds_combo_masks(
+            items_list=items,
+            source=MPC,
+            bounds_target=(0.0, 0.0, 4.0, 2.0),
+            target_crs=4326,
+            mask_resolution=1,
+            mask_w=4,
+            mask_h=2,
+            coverage_mask=np.ones((2, 4), dtype=bool),
+            cloud_mask="SCL",
+            mosaic_method="first",
+            tile_workers=1,
+            ocm_batch_size=1,
+            ocm_inference_dtype="fp32",
+            scl_tile_specs=None,
+            show_progress=False,
+        )
+
+        assert dropped == []
+        np.testing.assert_array_equal(
+            np.asarray(kept[0]),
+            np.array([[1, 1, 0, 0], [0, 1, 0, 0]], dtype=bool),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(kept[1]),
+            np.array([[0, 0, 1, 1], [0, 0, 0, 0]], dtype=bool),
+        )
+
+    def test_resampled_bool_mask_applies_user_resolution_coverage(self):
+        source = np.array([[1, 0], [0, 1]], dtype=bool)
+        coverage = np.array(
+            [
+                [1, 1, 0, 1],
+                [1, 0, 1, 1],
+                [1, 1, 1, 0],
+                [0, 1, 1, 1],
+            ],
+            dtype=bool,
+        )
+
+        mask = _ResampledBoolMask(source, (4, 4), coverage=coverage)
+
+        np.testing.assert_array_equal(
+            np.asarray(mask),
+            np.array(
+                [
+                    [1, 1, 0, 0],
+                    [1, 0, 0, 0],
+                    [0, 0, 1, 0],
+                    [0, 0, 1, 1],
+                ],
+                dtype=bool,
+            ),
+        )
+
+    def test_bounds_hash_and_sidecar_keep_original_bbox_when_search_expands(
+        self, monkeypatch
+    ):
+        import s2mosaic.pipelines.bounds as bounds_mod
+
+        hash_bounds = []
+        sidecar_bounds = []
+        search_bounds = []
+        original_hash = bounds_mod.output_request_hash
+        original_metadata = bounds_mod.output_sidecar_metadata
+
+        def tracking_hash(request, **kwargs):
+            hash_bounds.append(kwargs["bounds_4326"])
+            return original_hash(request, **kwargs)
+
+        def tracking_metadata(request, **kwargs):
+            sidecar_bounds.append(kwargs["bounds_4326"])
+            return original_metadata(request, **kwargs)
+
+        def tracking_search(**kwargs):
+            search_bounds.append(kwargs["bbox_4326"])
+            return [self.FakeItem()]
+
+        monkeypatch.setattr(bounds_mod, "output_request_hash", tracking_hash)
+        monkeypatch.setattr(bounds_mod, "output_sidecar_metadata", tracking_metadata)
+        monkeypatch.setattr(bounds_mod, "_search_for_items_by_bbox", tracking_search)
+        monkeypatch.setattr(bounds_mod, "_fetch_one_scl", _fake_scl_fetch_full_window)
+        monkeypatch.setattr(
+            bounds_mod,
+            "compute_masks_from_scl",
+            lambda scl: (
+                np.ones_like(scl, dtype=bool),
+                np.ones_like(scl, dtype=bool),
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "make_bounds_tile_reader",
+            lambda **_: (
+                lambda scene_idx, band_idx, window: np.ones(
+                    (window[2], window[3]), dtype=np.uint16
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            bounds_mod,
+            "run_tile_aggregation",
+            lambda **kwargs: np.ones(
+                (kwargs["bands_count"], kwargs["height"], kwargs["width"]),
+                dtype=np.uint16,
+            ),
+        )
+
+        user_bounds = (114.80, -32.35, 120.20, -31.75)
+        run_bounds_for_test(
+            bounds_mod,
+            bounds=user_bounds,
+            input_crs=4326,
+            output_crs=32750,
+            start_year=2023,
+            duration_days=1,
+            bands=["B04"],
+            cloud_mask="SCL",
+            min_coverage_fraction=None,
+            resolution=160,
+            adaptive_tiling=False,
+        )
+
+        assert len(hash_bounds) == 1
+        assert hash_bounds[0] == pytest.approx(user_bounds)
+        assert len(sidecar_bounds) == 1
+        assert sidecar_bounds[0] == pytest.approx(user_bounds)
+        assert len(search_bounds) == 1
+        assert search_bounds[0] != pytest.approx(user_bounds)

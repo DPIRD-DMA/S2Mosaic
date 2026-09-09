@@ -47,7 +47,7 @@ def compute_masks_from_scl(
 ) -> Tuple[npt.NDArray[Any], npt.NDArray[Any]]:
     """Build (clear, valid) masks from an SCL band.
 
-    Mirrors :func:`compute_masks_from_array` so OCM and SCL providers are
+    Mirrors ``compute_masks_from_array`` so OCM and SCL providers are
     interchangeable. ``clear`` is True where the pixel's SCL class is safe for
     compositing; ``valid`` is True where SCL != 0, dilated to erode scene-edge
     no-data the same way the OCM path does.
@@ -70,7 +70,7 @@ def compute_masks_from_array(
 
     Returns (clear_mask, valid_mask) at the same resolution as the input.
 
-    Suppresses omnicloudmask's "Significant no-data areas detected" warning —
+    Suppresses omnicloudmask's "Significant no-data areas detected" warning,
     it fires on every cross-UTM-zone edge scene where the swath polygon is
     tilted relative to the read rectangle (triangular nodata wedge). OCM
     auto-shrinks the patch size and produces correct masks; the warning is
@@ -106,8 +106,8 @@ def get_scl_masks(
 ) -> Tuple[npt.NDArray[Any], npt.NDArray[Any]]:
     """SCL-based clear+valid masks at the user's output resolution.
 
-    Cheaper than :func:`get_masks` (one COG read, no DL inference) but less
-    accurate — relies on the L2A processor's published Scene Classification
+    Cheaper than ``get_masks`` (one COG read, no DL inference) but less
+    accurate, relying on the L2A processor's published Scene Classification
     Layer rather than re-running cloud detection.
     """
     href = item.assets[source.asset_name("SCL")].href

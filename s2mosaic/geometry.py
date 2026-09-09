@@ -54,7 +54,7 @@ def reproject_aoi(aoi: Aoi, src_epsg: int, dst_epsg: int) -> Aoi:
 def densify_bbox_to_polygon(bbox: Bbox, points_per_edge: int = 21) -> Aoi:
     """Build a rectangle polygon with each edge sampled at ``points_per_edge``.
 
-    Used so :func:`reproject_aoi` on the polygon captures CRS edge curvature.
+    Used so ``reproject_aoi`` on the polygon captures CRS edge curvature.
     A 4-vertex polygon reprojected vertex-by-vertex draws its edges as chords
     in the destination CRS, missing the bulge of lines of constant latitude in
     UTM (and similar). Densifying first means the reprojected polygon
@@ -178,7 +178,7 @@ def _scene_window_in_target(
     ``bounds_target``, and snaps to the grid at ``resolution``. Returns
     ``(col_off, row_off, width, height)`` or None if there's no overlap.
 
-    For wide-AOI cases prefer :func:`_scene_window_from_geometry` — the bbox
+    For wide-AOI cases prefer ``_scene_window_from_geometry``. The bbox
     here always circumscribes the actual scene footprint (a UTM-aligned tile
     appears as a tilted trapezoid in lon/lat, so its lon/lat bbox is strictly
     larger than the tile). The slack shows up as nodata fed into OCM.
@@ -205,8 +205,8 @@ def _scene_window_from_geometry(
 
     Reprojects the polygon vertex-by-vertex into ``target_crs``, intersects
     with ``bounds_target`` as polygons, and takes the intersection's bbox.
-    Tighter than :func:`_scene_window_in_target` because the polygon traces
-    the actual data footprint rather than its circumscribing rectangle —
+    Tighter than ``_scene_window_in_target`` because the polygon traces
+    the actual data footprint rather than its circumscribing rectangle,
     cuts the nodata fed into OCM, especially for cross-UTM-zone scenes.
 
     Accepts either a GeoJSON-like mapping (``{"type": "Polygon", ...}``) or a
@@ -249,9 +249,9 @@ def _expand_window_for_ocm_context(
 ) -> Tuple[SceneWindow, Tuple[slice, slice]]:
     """Pad a scene window centered to satisfy OCM's >=``min_pixels`` context.
 
-    Mirrors :func:`_expand_bounds_for_ocm_context` but for per-scene windows.
+    Mirrors ``_expand_bounds_for_ocm_context`` but for per-scene windows.
     The padded window may extend outside bounds_target's grid (negative
-    offsets or beyond the grid edge) — OCM gets context but the crop puts the
+    offsets or beyond the grid edge). OCM gets context but the crop puts the
     inferred pixels back at the original window position. Returns the padded
     window and the crop slices that undo the padding on the OCM output.
     """

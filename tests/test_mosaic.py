@@ -163,7 +163,7 @@ class TestMosaicValidInputs:
     """Verify validate_inputs() accepts known-good parameter combinations.
 
     Calls validate_inputs() directly to avoid the network/processing cost of a
-    full mosaic() run — these tests only care about validation behaviour.
+    full mosaic() run; these tests only care about validation behaviour.
     """
 
     DEFAULT_KWARGS = {
@@ -526,7 +526,7 @@ class TestMosaicEndToEnd:
         array, profile = result
         assert array.ndim == 3 and array.shape[0] == 3
         assert array.dtype in (np.uint8, np.uint16, np.int16)
-        # Some non-zero data — June over land
+        # Some non-zero data: June over land
         assert array.max() > 0
 
 
@@ -586,7 +586,7 @@ class TestMosaicBoundsEndToEnd:
     and short time range so they finish in a few seconds.
     """
 
-    # Small AOI in 50HMH (Perth, WA) — single MGRS tile
+    # Small AOI in 50HMH (Perth, WA), a single MGRS tile
     AOI_SMALL = (115.83, -31.97, 115.91, -31.94)
     # AOI straddling 50HMH/50HNH at ~117 deg E
     AOI_CROSS_TILE = (116.95, -32.05, 117.05, -31.95)
@@ -609,7 +609,7 @@ class TestMosaicBoundsEndToEnd:
             assert arr.dtype == expect_dtype
         assert "crs" in profile and profile["crs"] is not None
         assert "transform" in profile
-        # At least some non-zero data — the AOI should be over land in winter
+        # At least some non-zero data; the AOI should be over land in winter
         assert arr.max() > 0
 
     # --- Resolution sweep ---
@@ -729,7 +729,7 @@ class TestMosaicBoundsEndToEnd:
     def test_visual_band(self):
         # Visual asset is a 3-band uint8 TCI, fetched via the WarpedVRT path
         # with all three bands read in one call. Shape must match the
-        # cloud-mask resize step — guards against the shape-mismatch bug
+        # cloud-mask resize step, guarding against the shape-mismatch bug
         # where the OCM mask probe and the TCI fetch snap bounds differently.
         arr, profile = mosaic(
             bounds=self.AOI_SMALL,

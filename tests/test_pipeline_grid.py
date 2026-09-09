@@ -118,7 +118,7 @@ class TestGridOrderedMaskStreaming:
         assert [d["id"] for d in dropped] == ["scene-1"]
         assert "simulated transient network failure" in dropped[0]["reason"]
         # The user-facing summary line must go to stderr regardless of logging
-        # config — that's the whole point of report_dropped_scenes.
+        # config, which is the whole point of report_dropped_scenes.
         captured = capsys.readouterr()
         assert "1/3 scenes dropped" in captured.err
         assert "scene-1" in captured.err

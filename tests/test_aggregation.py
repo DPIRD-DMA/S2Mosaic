@@ -13,11 +13,11 @@ from s2mosaic.aggregation import (
     _drain_with_requeue,
     MEDOID_PIXEL_BLOCK,
     _medoid_axis0_u16,
-    _nanquantile_axis0,
+    _quantile_axis0_u16,
     _split_tile_size_aligned,
-    _median_selection_network,
+    _selection_network,
     _warm_medoid_axis0_u16,
-    _warm_nanquantile_axis0,
+    _warm_quantile_axis0_u16,
     adaptive_tile_specs_for_masks,
     iter_tile_aggregation,
     run_tile_aggregation,
@@ -313,6 +313,66 @@ class TestRunTileAggregation:
         expected[:, :, 0] = 15
         np.testing.assert_array_equal(out, expected)
 
+    @pytest.mark.parametrize("percentile, expected", [(25.0, 7), (75.0, 22)])
+    def test_percentile_percentage_converts_to_kernel_fraction(
+        self, percentile, expected
+    ):
+        # Ties the public 0-100 parameter to the kernel's 0-1 fraction. With
+        # four evenly spaced observations q=0.25 interpolates to 7.5 and
+        # q=0.75 to 22.5, both of which truncate on the cast to uint16, so a
+        # percentage/fraction mix-up cannot pass by landing on a round number.
+        scenes = np.stack(
+            [np.full((1, self.H, self.W), v, dtype=np.uint16) for v in (0, 10, 20, 30)],
+            axis=0,
+        )
+        masks = [np.ones((self.H, self.W), dtype=bool) for _ in range(4)]
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=self._read_fn_for(scenes),
+            bands_count=1,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            mosaic_method="percentile",
+            percentile=percentile,
+            tile_size=2,
+            tile_workers=1,
+        )
+
+        np.testing.assert_array_equal(out, expected)
+
+    def test_percentile_works_with_uint8_visual_source(self):
+        # Visual mode hands uint8 RGB tiles to the aggregator and expects
+        # uint8 output. tile_percentile stacks them as uint16 (the kernel is
+        # specialised to uint16) and _finalise_tile clips back to uint8.
+        scenes = np.stack(
+            [
+                np.full((3, self.H, self.W), 50, dtype=np.uint8),
+                np.full((3, self.H, self.W), 120, dtype=np.uint8),
+                np.full((3, self.H, self.W), 200, dtype=np.uint8),
+            ],
+            axis=0,
+        )
+        masks = [np.ones((self.H, self.W), dtype=bool) for _ in range(3)]
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=self._read_fn_for(scenes),
+            bands_count=3,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            mosaic_method="percentile",
+            percentile=50.0,
+            tile_size=3,
+            tile_workers=1,
+            out_dtype=np.dtype(np.uint8),
+        )
+
+        assert out.dtype == np.uint8
+        np.testing.assert_array_equal(out, 120)
+
     def test_medoid_picks_scene_closest_to_band_median(self):
         # Three scenes, 3 bands. The per-band median is the middle scene's
         # values; the medoid must return that scene's full spectrum (not a
@@ -345,9 +405,9 @@ class TestRunTileAggregation:
 
     def test_medoid_returns_observed_spectrum_not_synthetic(self):
         # Two scenes whose per-band median spectrum is closer to scene 0
-        # than scene 1. The medoid must return scene 0's actual values —
-        # this is the property that distinguishes medoid from per-band
-        # median (which would interpolate).
+        # than scene 1. The medoid must return scene 0's actual values, the
+        # property that distinguishes medoid from per-band median (which
+        # would interpolate).
         s0 = np.array([5, 8, 12], dtype=np.uint16)
         s1 = np.array([100, 80, 60], dtype=np.uint16)
         scenes = np.zeros((2, 3, self.H, self.W), dtype=np.uint16)
@@ -436,7 +496,7 @@ class TestRunTileAggregation:
         np.testing.assert_array_equal(out, 0)
 
     def test_medoid_ignores_all_zero_multi_band_source_pixels(self):
-        # First scene's column-0 pixels are all-zero across bands — the
+        # First scene's column-0 pixels are all-zero across bands, so the
         # source-valid check should treat those as no-data and exclude
         # them from medoid candidates. Remaining scene wins.
         scenes = np.stack(
@@ -970,8 +1030,8 @@ class TestRunTileAggregation:
 
     def test_percentile_caps_at_max_observations_per_pixel(self):
         # Six clear scenes with values 0, 10, 20, 30, 40, 50. With
-        # max_observations=3 each pixel sees only 0, 10, 20 — median is 10
-        # rather than 25.
+        # max_observations=3 each pixel sees only 0, 10, 20, so the median is
+        # 10 rather than 25.
         reads = []
         n_scenes = 6
         scene_values = np.arange(n_scenes) * 10
@@ -999,6 +1059,110 @@ class TestRunTileAggregation:
 
         assert sorted(set(reads)) == [0, 1, 2]
         np.testing.assert_array_equal(out, np.full((1, self.H, self.W), 10))
+
+    def test_medoid_stops_at_min_observations(self):
+        # Documented as applying to medoid as well as mean/percentile, but
+        # ``tile_medoid`` keeps its own copy of the early-stop rather than
+        # sharing ``tile_percentile``'s, so it needs its own coverage.
+        # Four clear scenes; stopping after three leaves the median at 20 and
+        # the outlier scene unread.
+        reads = []
+        scene_values = [10, 20, 30, 99]
+
+        def read_fn(scene_idx, band_idx, spec):
+            reads.append(scene_idx)
+            _, _, h, w = spec
+            return np.full((h, w), scene_values[scene_idx], dtype=np.uint16)
+
+        out = run_tile_aggregation(
+            masks=[np.ones((self.H, self.W), dtype=bool) for _ in scene_values],
+            read_fn=read_fn,
+            bands_count=2,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            mosaic_method="medoid",
+            percentile=None,
+            tile_size=10,
+            tile_workers=1,
+            min_observations=3,
+        )
+
+        assert sorted(set(reads)) == [0, 1, 2]
+        np.testing.assert_array_equal(out, np.full((2, self.H, self.W), 20))
+
+    def test_medoid_caps_at_max_observations_per_pixel(self):
+        # The cap is per pixel, not per tile, so a pixel that is cloudy early
+        # keeps accepting later scenes after its neighbours have filled up.
+        # Pixel (0, 0) misses scene 0, so with max_observations=2 it composes
+        # scenes 1 and 2 (medoid 20) while every other pixel composes scenes
+        # 0 and 1 (medoid 10). A cap applied tile-wide would make them equal.
+        reads = []
+        scene_values = [10, 20, 30, 40]
+        masks = [np.ones((self.H, self.W), dtype=bool) for _ in scene_values]
+        masks[0][0, 0] = False
+
+        def read_fn(scene_idx, band_idx, spec):
+            reads.append(scene_idx)
+            _, _, h, w = spec
+            return np.full((h, w), scene_values[scene_idx], dtype=np.uint16)
+
+        out = run_tile_aggregation(
+            masks=masks,
+            read_fn=read_fn,
+            bands_count=2,
+            height=self.H,
+            width=self.W,
+            coverage_mask=np.ones((self.H, self.W), dtype=bool),
+            mosaic_method="medoid",
+            percentile=None,
+            tile_size=10,
+            tile_workers=1,
+            max_observations=2,
+        )
+
+        expected = np.full((2, self.H, self.W), 10, dtype=np.uint16)
+        expected[:, 0, 0] = 20
+        assert sorted(set(reads)) == [0, 1, 2]
+        np.testing.assert_array_equal(out, expected)
+
+    @pytest.mark.parametrize(
+        "limits", [{"min_observations": 2}, {"max_observations": 2}]
+    )
+    def test_medoid_and_percentile_read_the_same_scenes(self, limits):
+        # The two methods carry duplicate copies of the contributor scan and
+        # the per-scene early-stop. They currently agree scene for scene; this
+        # pins that, so a change to one that is not made to the other fails
+        # here rather than silently changing how much a medoid mosaic reads.
+        # A scene fully cloudy at one pixel makes the stop depend on the
+        # per-pixel counts rather than a flat scene count.
+        masks = [np.ones((self.H, self.W), dtype=bool) for _ in range(4)]
+        masks[1][0, 0] = False
+
+        def reads_for(mosaic_method):
+            reads = []
+
+            def read_fn(scene_idx, band_idx, spec):
+                reads.append(scene_idx)
+                _, _, h, w = spec
+                return np.full((h, w), 10 + scene_idx * 10, dtype=np.uint16)
+
+            run_tile_aggregation(
+                masks=masks,
+                read_fn=read_fn,
+                bands_count=2,
+                height=self.H,
+                width=self.W,
+                coverage_mask=np.ones((self.H, self.W), dtype=bool),
+                mosaic_method=mosaic_method,
+                percentile=50.0 if mosaic_method == "percentile" else None,
+                tile_size=10,
+                tile_workers=1,
+                **limits,
+            )
+            return reads
+
+        assert reads_for("medoid") == reads_for("percentile")
 
     def test_write_tile_aggregation_geotiff_streams_tiles(self, tmp_path):
         reads = []
@@ -1319,26 +1483,85 @@ class TestRunTileAggregation:
         assert large_allocations == []
 
 
-class TestNanquantileAxis0:
-    """Custom Numba percentile reducer must match NumPy nanquantile semantics."""
+class TestSelectionNetwork:
+    """The shared comparator builder must sort exactly what it promises."""
+
+    @pytest.mark.parametrize("n_scenes", [1, 2, 3, 5, 8, 9, 16, 17, 33])
+    @pytest.mark.parametrize("live_fraction", [0.0, 0.25, 0.5, 0.75, 1.0])
+    def test_sorts_every_position_up_to_max_live(self, n_scenes, live_fraction):
+        # Both kernels prune the network to a live range, then read a position
+        # that moves per pixel with that pixel's valid count. The medoid asks
+        # for n // 2; the quantile asks for ceil(q*(n-1)), which spans 0 (q=0)
+        # to n-1 (q=1). A builder that under-sorts the top of the range fails
+        # only on the pixels that read there, so pin the contract here rather
+        # than relying on the kernels to notice.
+        max_live = int(np.ceil(live_fraction * (n_scenes - 1)))
+        net = _selection_network(n_scenes, max_live)
+        rng = np.random.default_rng(n_scenes * 100 + max_live)
+
+        for _ in range(100):
+            values = rng.integers(0, 65536, size=n_scenes).astype(np.uint16)
+            wires = values.copy()
+            for lo_w, hi_w in net:
+                if wires[lo_w] > wires[hi_w]:
+                    wires[lo_w], wires[hi_w] = wires[hi_w], wires[lo_w]
+            expected = np.sort(values)
+            np.testing.assert_array_equal(
+                wires[: max_live + 1], expected[: max_live + 1]
+            )
+
+    @pytest.mark.parametrize("n_scenes", [4, 7, 16])
+    def test_max_live_beyond_the_last_wire_is_clamped(self, n_scenes):
+        # ceil(q*(n-1)) tops out at n-1, but nothing in the signature stops a
+        # caller passing more; clamping keeps it a full sort rather than an
+        # out-of-bounds write into the liveness array.
+        net = _selection_network(n_scenes, n_scenes + 5)
+        rng = np.random.default_rng(n_scenes)
+        for _ in range(50):
+            values = rng.integers(0, 65536, size=n_scenes).astype(np.uint16)
+            wires = values.copy()
+            for lo_w, hi_w in net:
+                if wires[lo_w] > wires[hi_w]:
+                    wires[lo_w], wires[hi_w] = wires[hi_w], wires[lo_w]
+            np.testing.assert_array_equal(wires, np.sort(values))
+
+    def test_single_wire_needs_no_comparators(self):
+        assert _selection_network(1, 0).shape == (0, 2)
+
+
+class TestQuantileAxis0U16:
+    """Vectorised integer quantile reducer must match NumPy nanquantile."""
 
     def test_warm_compile_runs_before_threaded_aggregation(self):
-        _warm_nanquantile_axis0()
-        assert _nanquantile_axis0.signatures
+        _warm_quantile_axis0_u16()
+        assert _quantile_axis0_u16.signatures
 
     @staticmethod
-    def _assert_matches_numpy(stack: np.ndarray, q: float):
-        got = _nanquantile_axis0(stack.astype(np.float32), q)
+    def _assert_matches_numpy(stack: np.ndarray, valid: np.ndarray, q: float):
+        """Compare against ``np.nanquantile`` on an equivalent float stack.
+
+        NumPy needs NaN sentinels to skip invalid observations, so the
+        reference is the same data with ``~valid`` positions set to NaN.
+
+        ``valid`` is per (scene, pixel), matching what the tile workers build:
+        ``_source_valid_from_bands`` resolves all bands of a scene down to one
+        mask, so a scene is either a candidate at a pixel or it is not.
+
+        The comparison is exact, not approximate. The kernel computes the read
+        position and the blend the way NumPy does, so anything short of
+        bit-identity means one of them drifted.
+        """
+        reference = stack.astype(np.float32)
+        reference[~np.broadcast_to(valid[:, None], stack.shape)] = np.nan
+
+        got = _quantile_axis0_u16(stack, valid, q)
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message="All-NaN slice encountered")
-            expected = np.nanquantile(stack, q, axis=0).astype(np.float32)
-        np.testing.assert_allclose(got, expected, rtol=1e-6, atol=1e-3, equal_nan=True)
-        got_uint16 = np.nan_to_num(got, nan=0.0).astype(np.uint16)
-        expected_uint16 = np.nan_to_num(expected, nan=0.0).astype(np.uint16)
-        assert np.abs(got_uint16.astype(int) - expected_uint16.astype(int)).max() <= 1
+            expected = np.nanquantile(reference, q, axis=0).astype(np.float32)
+        np.testing.assert_array_equal(got, expected)
 
     @pytest.mark.parametrize("q", [0.0, 0.1, 0.25, 0.5, 0.9, 1.0])
-    def test_random_sparse_nan_stacks(self, q):
+    def test_random_sparse_stacks(self, q):
         rng = np.random.default_rng(42)
         for scenes, bands, h, w, valid_fraction in [
             (1, 1, 3, 4, 0.7),
@@ -1346,48 +1569,118 @@ class TestNanquantileAxis0:
             (5, 2, 4, 6, 0.8),
             (17, 3, 5, 7, 0.35),
         ]:
-            stack = rng.integers(
-                0, 12000, size=(scenes, bands, h, w), dtype=np.uint16
-            ).astype(np.float32)
-            valid = rng.random((scenes, bands, h, w)) < valid_fraction
-            stack[~valid] = np.nan
-            self._assert_matches_numpy(stack, q)
+            stack = rng.integers(0, 12000, size=(scenes, bands, h, w), dtype=np.uint16)
+            valid = rng.random((scenes, h, w)) < valid_fraction
+            self._assert_matches_numpy(stack, valid, q)
 
     @pytest.mark.parametrize("q", [0.0, 0.5, 1.0])
-    def test_all_nan_stack(self, q):
-        stack = np.full((4, 2, 3, 5), np.nan, dtype=np.float32)
-        self._assert_matches_numpy(stack, q)
+    def test_all_invalid_stack(self, q):
+        stack = np.zeros((4, 2, 3, 5), dtype=np.uint16)
+        valid = np.zeros((4, 3, 5), dtype=bool)
+        self._assert_matches_numpy(stack, valid, q)
 
     @pytest.mark.parametrize("q", [0.1, 0.5, 0.9])
-    def test_single_valid_value_among_nans(self, q):
-        stack = np.full((6, 2, 3, 4), np.nan, dtype=np.float32)
-        stack[3] = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
-        self._assert_matches_numpy(stack, q)
+    def test_single_valid_scene_among_invalid(self, q):
+        stack = np.zeros((6, 2, 3, 4), dtype=np.uint16)
+        stack[3] = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
+        valid = np.zeros((6, 3, 4), dtype=bool)
+        valid[3] = True
+        self._assert_matches_numpy(stack, valid, q)
 
     @pytest.mark.parametrize("q", [0.1, 0.25, 0.5, 0.75, 0.9])
     def test_interpolation_matches_numpy(self, q):
-        base = np.array([0, 10, 20, 40, 80], dtype=np.float32)
+        base = np.array([0, 10, 20, 40, 80], dtype=np.uint16)
         stack = np.broadcast_to(base[:, None, None, None], (5, 1, 3, 4)).copy()
-        self._assert_matches_numpy(stack, q)
+        valid = np.ones((5, 3, 4), dtype=bool)
+        self._assert_matches_numpy(stack, valid, q)
 
     def test_preserves_band_pixel_independence(self):
         stack = np.array(
             [
-                [[[1, 100], [np.nan, 4]], [[10, np.nan], [30, 40]]],
-                [[[3, np.nan], [5, 6]], [[20, 25], [np.nan, 60]]],
-                [[[7, 200], [9, np.nan]], [[np.nan, 35], [50, 80]]],
+                [[[1, 100], [0, 4]], [[10, 0], [30, 40]]],
+                [[[3, 0], [5, 6]], [[20, 25], [0, 60]]],
+                [[[7, 200], [9, 0]], [[0, 35], [50, 80]]],
             ],
-            dtype=np.float32,
+            dtype=np.uint16,
         )
-        self._assert_matches_numpy(stack, 0.5)
+        valid = np.array(
+            [
+                [[True, True], [False, True]],
+                [[True, False], [True, True]],
+                [[True, True], [False, True]],
+            ]
+        )
+        self._assert_matches_numpy(stack, valid, 0.5)
+
+    @pytest.mark.parametrize("q", [0.0, 0.25, 0.5, 0.75, 1.0])
+    def test_every_valid_count_is_covered_by_the_pruned_network(self, q):
+        # The network is pruned to ceil(q*(n-1)) live positions, but a pixel
+        # with k valid observations reads floor/ceil(q*(k-1)), a position that
+        # moves with k. One pixel per possible k pins that the pruning is not
+        # tighter than the shallowest pixel needs.
+        n_scenes = 12
+        rng = np.random.default_rng(int(q * 100) + 5)
+        stack = rng.integers(
+            0, 12000, size=(n_scenes, 2, 1, n_scenes + 1), dtype=np.uint16
+        )
+        valid = np.zeros((n_scenes, 1, n_scenes + 1), dtype=bool)
+        for k in range(n_scenes + 1):
+            valid[:k, 0, k] = True
+        self._assert_matches_numpy(stack, valid, q)
+
+    @pytest.mark.parametrize(
+        "n_scenes,percentile", [(26, 60.0), (46, 60.0), (51, 30.0), (101, 15.0)]
+    )
+    def test_read_position_matches_numpy_where_float32_would_not(
+        self, n_scenes, percentile
+    ):
+        # For these (n, percentile) pairs q*(n-1) lands exactly on an integer
+        # in float64 but just above it in float32. Computing the read position
+        # in float32 both interpolated where NumPy returns an order statistic
+        # outright, and — for the deepest pixel — read one position past what
+        # the pruned network sorted. Deviation was small enough to survive the
+        # uint16 cast, so only an exact comparison catches it.
+        rng = np.random.default_rng(n_scenes)
+        stack = rng.integers(0, 65536, size=(n_scenes, 1, 1, 512), dtype=np.uint16)
+        valid = np.ones((n_scenes, 1, 512), dtype=bool)
+
+        got = _quantile_axis0_u16(stack, valid, percentile / 100.0)
+        expected = np.quantile(stack.astype(np.float64), percentile / 100.0, axis=0)
+        np.testing.assert_array_equal(got, expected.astype(np.float32))
+
+    @pytest.mark.parametrize("q", [0.0, 0.5, 1.0])
+    def test_saturated_values_are_not_confused_with_padding(self, q):
+        # Invalid observations are padded with 65535; real 65535 observations
+        # must still be ranked normally.
+        stack = np.full((3, 2, 1, 1), 65535, dtype=np.uint16)
+        stack[1, :, 0, 0] = 10
+        valid = np.array([True, True, False]).reshape(3, 1, 1)
+        self._assert_matches_numpy(stack, valid, q)
+
+    def test_invalid_positions_need_not_be_zeroed(self):
+        # Callers flag validity separately, so whatever sits at an invalid
+        # position must never reach the output.
+        rng = np.random.default_rng(3)
+        stack = rng.integers(0, 12000, size=(5, 2, 4, 4), dtype=np.uint16)
+        valid = rng.random((5, 4, 4)) < 0.6
+
+        clean = np.where(np.broadcast_to(valid[:, None], stack.shape), stack, 0)
+        dirty = np.where(
+            np.broadcast_to(valid[:, None], stack.shape), stack, np.uint16(54321)
+        )
+
+        np.testing.assert_array_equal(
+            _quantile_axis0_u16(clean, valid, 0.5),
+            _quantile_axis0_u16(dirty, valid, 0.5),
+        )
 
     def test_default_tile_workers_uses_thread_safe_percentile_kernel(self):
-        _warm_nanquantile_axis0()
+        _warm_quantile_axis0_u16()
 
         # The kernel-warming guard exists because the default runs threaded.
         # Pin the bound (>1) rather than the value so the test survives tuning.
         assert DEFAULT_TILE_WORKERS > 1
-        assert _nanquantile_axis0.signatures
+        assert _quantile_axis0_u16.signatures
 
 
 class TestMedoidAxis0U16:
@@ -1461,10 +1754,10 @@ class TestMedoidAxis0U16:
     @pytest.mark.parametrize("n_scenes", [1, 2, 3, 5, 8, 9, 16, 17, 33, 64])
     def test_selection_network_sorts_every_position_it_promises(self, n_scenes):
         # The kernel pads short pixels, so a pixel with k valid observations
-        # reads position k // 2 — which varies per pixel. Pruning the network
+        # reads position k // 2, which varies per pixel. Pruning the network
         # to the middle of the full width alone would corrupt shallow pixels,
         # so every position up to half the width must come out sorted.
-        net = _median_selection_network(n_scenes)
+        net = _selection_network(n_scenes, n_scenes // 2)
         rng = np.random.default_rng(n_scenes)
         wanted = n_scenes // 2
         for _ in range(200):

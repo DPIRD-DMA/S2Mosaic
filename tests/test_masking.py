@@ -135,7 +135,7 @@ class TestZoomAlignmentConvention:
 
     def test_3x_upsample_uses_pixel_area_layout(self):
         # Pixel-area: input pixel i fills output cells [i*N, (i+1)*N).
-        # Scipy's order=0 would yield [1, 1, 2, 2, 2, 2, 3, 3, 3] — different.
+        # Scipy's order=0 would instead yield [1, 1, 2, 2, 2, 2, 3, 3, 3].
         src = np.array([[1, 2, 3]], dtype=np.uint16)
         out = cv2.resize(src, (9, 1), interpolation=cv2.INTER_NEAREST)
         expected = np.array([[1, 1, 1, 2, 2, 2, 3, 3, 3]], dtype=np.uint16)

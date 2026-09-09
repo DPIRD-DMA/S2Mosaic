@@ -3,16 +3,16 @@
 s2mosaic supports multiple STAC sources for Sentinel-2 L2A. Each ``Source``
 captures the per-provider knowledge needed to search, sign, and read assets:
 
-- ``stac_url`` — STAC API root
-- ``collection_id`` — L2A collection name on this provider
-- ``sign(href)`` — return a usable HTTPS URL (SAS-signed for MPC, identity
+- ``stac_url``: STAC API root
+- ``collection_id``: L2A collection name on this provider
+- ``sign(href)``: return a usable HTTPS URL (SAS-signed for MPC, identity
   for AWS public buckets)
-- ``asset_name(canonical)`` — map s2mosaic's canonical band names
+- ``asset_name(canonical)``: map s2mosaic's canonical band names
   (``B04``, ``SCL`` ...) to the provider's STAC asset key
-- ``mgrs_query(grid_id)`` — build a STAC ``query`` clause that filters to a
+- ``mgrs_query(grid_id)``: build a STAC ``query`` clause that filters to a
   single MGRS tile, or ``None`` if the provider doesn't expose one (callers
   then rely on ``intersects`` alone)
-- ``open_catalog(stac_io)`` — open the STAC client; provider-specific options
+- ``open_catalog(stac_io)``: open the STAC client; provider-specific options
   (e.g. MPC's ``sign_inplace`` modifier) live here
 """
 
@@ -131,14 +131,20 @@ MPC = Source(
 )
 
 # Element 84 Earth Search v1. The ``sentinel-2-l2a`` collection here uses
-# common-name asset keys (``red``, ``green`` ...) rather than band IDs and
-# lowercases ``scl``. Public S3 backing — no signing required.
+# common-name asset keys (``red``, ``green`` ...) rather than band IDs, and
+# lowercases the non-spectral ones (``scl``, ``aot``, ``wvp``). Every band in
+# ``VALID_BANDS`` needs an entry here except ``visual``, which is spelled the
+# same on both providers: ``asset_name`` falls through to the canonical name,
+# so a gap surfaces as a KeyError on the item's assets rather than an error
+# anyone can read. Public S3 backing, so no signing required.
 AWS = Source(
     name=SOURCE_AWS,
     stac_url="https://earth-search.aws.element84.com/v1",
     collection_id="sentinel-2-l2a",
     sign=_identity_sign,
     band_assets={
+        "AOT": "aot",
+        "WVP": "wvp",
         "B01": "coastal",
         "B02": "blue",
         "B03": "green",
@@ -157,7 +163,7 @@ AWS = Source(
     # Element 84's Sentinel-2 L2A COGs use 1024-pixel blocks for the
     # native-10m bands (verified for B02/B03/B04/B08/visual) and 512-pixel
     # blocks for SCL. Bands not yet measured fall back to default_block_size
-    # (512), which is safe — a smaller default just means the adaptive tiler
+    # (512), which is safe: a smaller default just means the adaptive tiler
     # is allowed to split tiles further than strictly optimal.
     asset_block_sizes={
         "B02": 1024,

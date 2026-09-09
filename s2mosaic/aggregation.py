@@ -31,17 +31,18 @@ DEFAULT_OUTPUT_DTYPE = np.dtype(np.uint16)
 # fans out ``bands_count`` concurrent range requests on the same HTTP/2
 # connection, so the work per worker is I/O-bound and benefits from a higher
 # tile-worker count than CPU count would suggest. 8 was the sweet spot on a
-# 400 Mbps Starlink benchmark — more workers gave diminishing returns and
+# 400 Mbps Starlink benchmark. More workers gave diminishing returns and
 # multiplied concurrent requests against the source server.
 DEFAULT_TILE_WORKERS = 8
 DEFAULT_BAND_READ_WORKERS = 16
 DEFAULT_ADAPTIVE_TILE_MIN_SIZE = 512
 DEFAULT_ADAPTIVE_TILE_DENSE_FRACTION = 0.75
 MEDOID_STRIPE_HEIGHT = 128
-# Pixels the medoid's median pass handles at once. The comparator loop is
-# hoisted above this one so the innermost loop is over pixels, which is what
-# lets the compiler emit vector min/max; 128 uint16 columns keep the working
-# set inside L1 for realistic scene counts. Measured flat from 32 to 256.
+# Pixels the selection-network sort handles at once, in both the medoid and
+# the quantile kernel. The comparator loop is hoisted above this one so the
+# innermost loop is over pixels, which is what lets the compiler emit vector
+# min/max; 128 uint16 columns keep the working set inside L1 for realistic
+# scene counts. Measured flat from 32 to 256.
 MEDOID_PIXEL_BLOCK = 128
 EXPECTED_READ_EXACT_SCAN_LIMIT = 50_000
 
@@ -54,7 +55,8 @@ EXPECTED_READ_EXACT_SCAN_LIMIT = 50_000
 # receive on top of the in-worker retries already done by the reader.
 # MAX_TOTAL_REQUEUE_FRACTION: ceiling on requeues across the whole run as a
 # fraction of total tile count. If a quarter of all tiles have already been
-# requeued, the next failure surfaces immediately — the run is in trouble.
+# requeued, the next failure surfaces immediately, because the run is in
+# trouble.
 MAX_REQUEUES_PER_TILE = 2
 MAX_TOTAL_REQUEUE_FRACTION = 0.25
 
@@ -151,105 +153,51 @@ def _finalise_tile(
 
 
 @njit(cache=True, nogil=True)  # type: ignore[untyped-decorator, unused-ignore]
-def _nanquantile_axis0(stack: npt.NDArray[Any], q: float) -> npt.NDArray[Any]:
-    """Serial NaN-skipping quantile over stack axis 0.
-
-    ``stack`` shape is ``(scene, band, height, width)``. This is intentionally
-    specialised to the tile aggregation hot path: scene counts are small, so a
-    per-pixel insertion sort avoids allocations and is faster than a generic
-    quantile implementation.
-
-    This kernel deliberately avoids Numba's parallel mode. Numba's default
-    ``workqueue`` threading layer is not safe to enter concurrently from
-    several Python threads, and users may also call ``mosaic`` from their own
-    thread pools. Tile-level concurrency supplies the parallelism instead.
-    ``nogil=True`` lets those Python tile-worker threads actually run this
-    kernel in parallel rather than serialising on the GIL.
-    """
-    n_scenes, n_bands, height, width = stack.shape
-    out = np.empty((n_bands, height, width), dtype=np.float32)
-    # ``values`` is hoisted out of the per-pixel loop. Numba's allocator
-    # holds an internal lock per ``np.empty`` call that nogil does not
-    # release — allocating once per pixel was serialising tile workers
-    # on that lock. One allocation per kernel call keeps multi-thread
-    # scaling clean and is also ~17% faster single-thread.
-    values = np.empty(n_scenes, dtype=np.float32)
-    total = n_bands * height * width
-
-    for idx in range(total):
-        band = idx // (height * width)
-        rem = idx - band * height * width
-        row = rem // width
-        col = rem - row * width
-
-        n_valid = 0
-        for scene_idx in range(n_scenes):
-            value = stack[scene_idx, band, row, col]
-            if not np.isnan(value):
-                values[n_valid] = value
-                n_valid += 1
-
-        if n_valid == 0:
-            out[band, row, col] = np.nan
-        elif n_valid == 1:
-            out[band, row, col] = values[0]
-        else:
-            for i in range(1, n_valid):
-                key = values[i]
-                j = i - 1
-                while j >= 0 and values[j] > key:
-                    values[j + 1] = values[j]
-                    j -= 1
-                values[j + 1] = key
-
-            q32 = np.float32(q)
-            pos = q32 * np.float32(n_valid - 1)
-            lo = int(np.floor(pos))
-            hi = int(np.ceil(pos))
-            if lo == hi:
-                out[band, row, col] = values[lo]
-            else:
-                frac = pos - lo
-                out[band, row, col] = values[lo] + (values[hi] - values[lo]) * frac
-
-    return out
-
-
-def _warm_nanquantile_axis0() -> None:
-    """Compile the Numba percentile kernel on the main thread.
-
-    Letting the first call happen inside the worker pool can make multiple
-    threads enter Numba's compilation path at once, which is fragile on macOS.
-    A tiny warm call here pays the compile cost before the pool starts and keeps
-    workers on the already-compiled execution path.
-    """
-    sample = np.array([[[[0.0]]], [[[1.0]]]], dtype=np.float32)
-    _nanquantile_axis0(sample, 0.5)
-
-
-@njit(cache=True, nogil=True)  # type: ignore[untyped-decorator, unused-ignore]
-def _median_selection_network(n_scenes: int) -> npt.NDArray[np.int32]:
-    """Comparator list that sorts the lower half of ``n_scenes`` wires.
+def _selection_network(n_scenes: int, max_live: int) -> npt.NDArray[np.int32]:
+    """Comparator list that sorts positions ``0 .. max_live`` of ``n_scenes`` wires.
 
     Batcher's odd-even mergesort, pruned by backward liveness: a comparator
     whose outputs are never read on the way to a wanted position cannot affect
-    it, so it is dropped. That removes 9-19% of comparators on paper, though
-    LLVM already eliminates most of them as dead code — the real reason to
-    build the network as *data* is that it keeps the comparator loop out of
-    the emitted code, so there is no per-scene-count specialisation to compile
-    and no ceiling on stack depth.
+    it, so it is dropped. How much that removes depends on where ``max_live``
+    sits: at most 12.5% for the median's ``n // 2`` (0% at the scene counts
+    where the network needs every comparator anyway), and much more the lower
+    the quantile — around a third at ``q=0.1``, and 88% at ``q=0``, where only
+    the minimum is wanted. LLVM already eliminates most of them as dead code,
+    though. The real reason to build the network as *data* is that it keeps
+    the comparator loop out of the emitted code, so there is no
+    per-scene-count specialisation to compile and no ceiling on stack depth.
 
-    Every position ``0 .. n_scenes // 2`` is kept live, not just the middle
-    one. Padding (see ``_medoid_axis0_u16``) means a pixel with ``k`` valid
-    observations reads position ``k // 2``, which varies per pixel; pruning to
-    the middle of the full width silently corrupts the shallower pixels.
+    Both kernels that call this share two tricks, described here rather than
+    repeated in each:
+
+    * The sort runs across pixels, not within one. A comparator has no
+      data-dependent control flow, so applying the same one across a block of
+      ``MEDOID_PIXEL_BLOCK`` pixels compiles to vector min/max. A per-pixel
+      insertion sort is branchy and therefore scalar.
+    * Invalid observations are padded with 65535 rather than compacted out.
+      They sort above every real value and so occupy the top positions,
+      leaving every order statistic below the pixel's valid count untouched.
+      This stays exact even when a real observation is also 65535, because
+      only values are ever read back, never scene indices. Compacting would
+      need a per-pixel gather, which does not vectorise.
+
+    That padding is why a *range* of positions is kept live rather than the
+    single wanted one: the read position varies per pixel with its valid
+    count ``k``.
+
+    * medoid / median take position ``k // 2``, so ``max_live = n_scenes // 2``
+    * a quantile at fraction ``q`` takes ``floor(q*(k-1))`` and
+      ``ceil(q*(k-1))``, so ``max_live = ceil(q*(n_scenes-1))``
+
+    Pruning any tighter than the deepest pixel's read position silently
+    corrupts the shallower pixels.
     """
     if n_scenes <= 1:
         return np.empty((0, 2), dtype=np.int32)
 
     n_pairs = 0
     for _ in range(2):
-        # First sweep counts, second fills — the count is not worth deriving.
+        # First sweep counts, second fills. The count is not worth deriving.
         if n_pairs > 0:
             full = np.empty((n_pairs, 2), dtype=np.int32)
         else:
@@ -273,7 +221,8 @@ def _median_selection_network(n_scenes: int) -> npt.NDArray[np.int32]:
         n_pairs = idx
 
     live = np.zeros(n_scenes, dtype=np.bool_)
-    for i in range(n_scenes // 2 + 1):
+    top = min(max_live, n_scenes - 1)
+    for i in range(top + 1):
         live[i] = True
 
     keep = np.empty((n_pairs, 2), dtype=np.int32)
@@ -296,6 +245,146 @@ def _median_selection_network(n_scenes: int) -> npt.NDArray[np.int32]:
 
 
 @njit(cache=True, nogil=True)  # type: ignore[untyped-decorator, unused-ignore]
+def _quantile_axis0_u16(
+    stack: npt.NDArray[np.uint16],
+    valid: npt.NDArray[np.bool_],
+    q: float,
+) -> npt.NDArray[np.float32]:
+    """Per-pixel quantile over a uint16 scene stack with a bool validity plane.
+
+    The sort is a pruned selection network applied across a block of pixels at
+    a time. See ``_selection_network`` for why it is built as data, why
+    invalid observations are padded rather than compacted, and why the
+    innermost loop walks pixels.
+
+    Taking the stack as uint16 with a separate ``valid`` plane, rather than as
+    float32 with NaN sentinels, halves the memory traffic of the dominant
+    working buffer and removes the per-cell NaN test from the hot loop. Values
+    at invalid positions are never read, so the caller need not zero them.
+
+    Worth 4.6-9.2x over the per-pixel insertion sort this replaced, timing the
+    kernel alone on fully-valid 2048px tiles. What a caller sees is smaller:
+    ``profiling/bench_methods.py`` puts whole-tile ``median`` at roughly
+    1.2-4x, the rest of the time being per-scene reads and bookkeeping
+    outside the kernel. The gain grows with scene count, and with band count once the
+    stack is deep enough for the band loop to amortise the valid-count pass
+    (at 24 scenes, 7.1x at one band against 9.2x at ten; at 3 scenes the
+    ordering reverses).
+
+    ``q`` is a fraction in ``[0, 1]``. Output is bit-identical to
+    ``np.nanquantile``'s default linear interpolation, pinned by
+    ``TestQuantileAxis0U16._assert_matches_numpy``. The two bracketing order
+    statistics are found in integer space, and the read position and the
+    blend are computed the way NumPy computes them (float64, and NumPy's
+    switch of lerp anchor at ``frac >= 0.5``), so a quantile landing exactly
+    on a position involves no rounding and one landing between two does not
+    drift an ulp.
+
+    ``nogil=True`` so Python tile workers run this kernel in parallel rather
+    than serialising on the GIL. Scratch arrays are hoisted out of the loops
+    because Numba's allocator takes an internal lock per ``np.empty`` that
+    nogil does not release.
+
+    Args:
+        stack: ``(scene, band, height, width)`` uint16.
+        valid: ``(scene, height, width)`` bool, true where the scene is a
+            candidate for that pixel. Validity is per pixel, not per band.
+            ``_source_valid_from_bands`` resolves bands to a single mask.
+
+    Returns:
+        ``(band, height, width)`` float32, NaN where no observation is valid.
+    """
+    n_scenes, n_bands, h, w = stack.shape
+    out = np.empty((n_bands, h, w), dtype=np.float32)
+
+    # The deepest pixel reads ceil(q*(n-1)); every position below it is a
+    # possible read for some shallower pixel, so all of them must sort. This
+    # and the per-pixel ``pos`` below are both float64, which is what NumPy
+    # uses: computing either in float32 puts a product that lands exactly on
+    # an integer in float64 just above it instead, which both shifts the
+    # result off the order statistic NumPy returns and, for the deepest
+    # pixel, reads one position past the sorted range.
+    max_live = int(np.ceil(q * (n_scenes - 1)))
+    net = _selection_network(n_scenes, max_live)
+    n_cmp = net.shape[0]
+
+    values = np.empty((n_scenes, MEDOID_PIXEL_BLOCK), dtype=np.uint16)
+    counts = np.empty(MEDOID_PIXEL_BLOCK, dtype=np.int32)
+
+    for y in range(h):
+        for x0 in range(0, w, MEDOID_PIXEL_BLOCK):
+            block = min(MEDOID_PIXEL_BLOCK, w - x0)
+
+            # Valid counts do not depend on the band, so resolve them once for
+            # the block and reuse across all of them.
+            for p in range(block):
+                counts[p] = 0
+            for s in range(n_scenes):
+                for p in range(block):
+                    counts[p] += valid[s, y, x0 + p]
+
+            for b in range(n_bands):
+                for s in range(n_scenes):
+                    for p in range(block):
+                        if valid[s, y, x0 + p]:
+                            values[s, p] = stack[s, b, y, x0 + p]
+                        else:
+                            values[s, p] = np.uint16(65535)
+
+                for c in range(n_cmp):
+                    lo_w = net[c, 0]
+                    hi_w = net[c, 1]
+                    for p in range(block):
+                        va = values[lo_w, p]
+                        vb = values[hi_w, p]
+                        values[lo_w, p] = min(va, vb)
+                        values[hi_w, p] = max(va, vb)
+
+                for p in range(block):
+                    n_valid = counts[p]
+                    x = x0 + p
+                    if n_valid == 0:
+                        out[b, y, x] = np.nan
+                    elif n_valid == 1:
+                        out[b, y, x] = np.float32(values[0, p])
+                    else:
+                        pos = q * (n_valid - 1)
+                        lo = int(np.floor(pos))
+                        hi = int(np.ceil(pos))
+                        if lo == hi:
+                            out[b, y, x] = np.float32(values[lo, p])
+                        else:
+                            # NumPy's lerp, in float64 and including its
+                            # switch of anchor at frac >= 0.5, so the blend
+                            # rounds to the same float32 rather than an ulp
+                            # off it.
+                            frac = pos - lo
+                            vlo = np.float64(values[lo, p])
+                            vhi = np.float64(values[hi, p])
+                            span = vhi - vlo
+                            if frac >= 0.5:
+                                blend = vhi - span * (1.0 - frac)
+                            else:
+                                blend = vlo + span * frac
+                            out[b, y, x] = np.float32(blend)
+
+    return out
+
+
+def _warm_quantile_axis0_u16() -> None:
+    """Compile the quantile kernel on the main thread before workers start.
+
+    Also compiles ``_selection_network``, which the kernel calls on entry.
+    Leaving that to the first tile worker would put several threads into
+    Numba's compilation path at once, which is fragile on macOS.
+    """
+    sample_stack = np.zeros((2, 1, 1, 1), dtype=np.uint16)
+    sample_stack[1, 0, 0, 0] = 1
+    sample_valid = np.ones((2, 1, 1), dtype=np.bool_)
+    _quantile_axis0_u16(sample_stack, sample_valid, 0.5)
+
+
+@njit(cache=True, nogil=True)  # type: ignore[untyped-decorator, unused-ignore]
 def _medoid_axis0_u16(
     stack: npt.NDArray[np.uint16],
     valid: npt.NDArray[np.bool_],
@@ -305,9 +394,9 @@ def _medoid_axis0_u16(
     For each pixel, picks the scene whose multi-band spectrum is closest
     (squared Euclidean) to the per-band median spectrum computed across
     all valid scenes at that pixel. The result is always an actually
-    observed spectrum — band relationships are preserved, which matters
-    for downstream indices and classifiers — unlike per-band
-    percentile/median which can return a synthetic per-band combination.
+    observed spectrum, so band relationships are preserved, which matters
+    for downstream indices and classifiers. Per-band percentile/median can
+    instead return a synthetic combination that no scene ever recorded.
 
     This is the "closest to per-band median" formulation of the medoid
     used by LandTrendr on Google Earth Engine (Kennedy et al. 2018,
@@ -315,23 +404,21 @@ def _medoid_axis0_u16(
     Open-MRV tutorials. It scores ``S·B`` spectral components against a
     target built from the per-band medians. It is NOT the strict Flood 2013
     definition (doi:10.3390/rs5126481), which picks
-    ``arg min_s Σᵢ d(scene_s, scene_i)`` over all pairs — O(S²·B) per
-    pixel — as implemented in gee-community/geetools. The two often agree,
-    but can pick different scenes when the cluster of observations is
-    asymmetric.
+    ``arg min_s Σᵢ d(scene_s, scene_i)`` over all pairs, O(S²·B) per pixel,
+    as implemented in gee-community/geetools. The two often agree, but can
+    pick different scenes when the cluster of observations is asymmetric.
 
     Cost is dominated by building that target, not by the scoring: the
-    median pass is O(S·log²S·B) per pixel via
-    ``_median_selection_network``, against the scoring's O(S·B). Do not
-    read the asymptotics as the reason to prefer this formulation —
-    measured, the strict pairwise medoid is *cheaper* below roughly eight
-    valid scenes per pixel, because its quadratic term is small there
-    while this one still pays a selection per band per pixel. The reason
-    is the semantics above.
+    median pass is O(S·log²S·B) per pixel via ``_selection_network``,
+    against the scoring's O(S·B). Do not read the asymptotics as the reason
+    to prefer this formulation. Measured, the strict pairwise medoid is
+    *cheaper* below roughly eight valid scenes per pixel, because its
+    quadratic term is small there while this one still pays a selection per
+    band per pixel. The reason is the semantics above.
 
-    Inputs:
+    Args:
         stack: shape ``(scene, band, height, width)`` uint16. Values at
-            invalid (scene, pixel) positions are ignored — they must be
+            invalid (scene, pixel) positions are ignored, so they must be
             flagged via ``valid``.
         valid: shape ``(scene, height, width)`` bool. ``True`` where scene
             is a candidate (all bands present) for that pixel.
@@ -342,33 +429,27 @@ def _medoid_axis0_u16(
         out_valid: ``(height, width)`` bool, true where a candidate was
             chosen. Used by the caller to propagate the no-data mask.
 
-    Implementation notes:
-        - Stripe-blocked two-pass kernel — keeps the scene-outer scoring
+    Notes:
+        - Stripe-blocked two-pass kernel. Keeps the scene-outer scoring
           pattern but limits scratch arrays to ``MEDOID_STRIPE_HEIGHT`` rows
           at a time.
-        - **The median pass runs across pixels, not within one.** Building the
-          per-band median is 85-94% of this kernel's cost, and it used to be an
-          insertion sort per pixel per band — branchy, and therefore scalar.
-          It is now a median-selection network (see
-          ``_median_selection_network``) with the comparator loop hoisted above
-          a block of ``MEDOID_PIXEL_BLOCK`` pixels, so the innermost loop is
-          over pixels and compiles to vector min/max. Worth 2.3-5.8x on the
-          whole kernel against the insertion-sort version, output unchanged;
-          the gain grows with scene count and survives heavy cloud (roughly 3x
-          at 25% cover, 1.5x at 75%).
-        - Invalid observations are padded with 65535 rather than compacted, so
-          the vectorised loop needs no per-pixel gather. See the note in pass 1
-          for why that stays exact.
+        - The median pass is where the time goes: building the per-band
+          median is 85-94% of this kernel's cost. It runs through
+          ``_selection_network`` across a block of ``MEDOID_PIXEL_BLOCK``
+          pixels rather than as a per-pixel insertion sort, which is worth
+          2.3-5.8x on the whole kernel with output unchanged, measured with
+          ``profiling/bench_methods.py``. The gain grows with scene count and
+          survives heavy cloud (roughly 3x at 25% cover, 1.5x at 75%).
         - ``nogil=True`` so Python tile workers can run in parallel
           inside this kernel rather than serialising on the GIL.
         - ``values`` and ``counts`` are hoisted out of the loops. Numba's
           allocator takes an internal lock per ``np.empty`` call that
-          nogil does not release; one allocation per kernel call keeps
-          multi-thread scaling clean (see ``bench_percentile_nogil.py``
-          for the same lesson on the quantile kernel).
-        - **Doubled-target trick keeps even-count medians exact in
-          integer math.** For an even count of valid scenes the true
-          median is a half-integer — naively floor-dividing by 2 shifts
+          nogil does not release, so one allocation per kernel call is what
+          keeps multi-thread scaling clean. ``_quantile_axis0_u16`` hoists
+          its scratch for the same reason.
+        - The doubled-target trick keeps even-count medians exact in
+          integer math. For an even count of valid scenes the true
+          median is a half-integer, and naively floor-dividing by 2 shifts
           the target by 0.5, which directly shifts squared distances
           and can flip the chosen scene (covered by
           ``TestMedoidAxis0U16.test_even_count_median_uses_exact_half_integer_target``).
@@ -376,18 +457,18 @@ def _medoid_axis0_u16(
           targets are ``values[mid-1] + values[mid]`` and odd-count
           targets are ``2 * values[mid]``. Pass 2 then computes
           ``diff = 2 * stack[s,b,y,x] - target[b,y,x]`` so both operands
-          are at the same scale; all per-scene distances scale by the
+          are at the same scale. All per-scene distances scale by the
           same factor of 4, so argmin is identical to the true-median
           ranking with no floats and no precision loss.
         - Squared-distance accumulator is int64 to absorb worst-case
           doubled-diff² × bands. Doubled diffs reach ~2·65535, squared
-          ~1.7e10; summed over 13 bands ≈ 2.2e11 — well within int64.
+          ~1.7e10; summed over 13 bands ≈ 2.2e11, well within int64.
     """
     n_scenes, n_bands, h, w = stack.shape
 
     out = np.zeros((n_bands, h, w), dtype=np.uint16)
     out_valid = np.zeros((h, w), dtype=np.bool_)
-    net = _median_selection_network(n_scenes)
+    net = _selection_network(n_scenes, n_scenes // 2)
     n_cmp = net.shape[0]
     # One column per pixel in the block, so the comparator loop below walks
     # rows and the innermost loop walks pixels.
@@ -416,13 +497,8 @@ def _medoid_axis0_u16(
                         counts[p] += valid[s, y, x0 + p]
 
                 for b in range(n_bands):
-                    # Pad invalid observations with the uint16 maximum instead
-                    # of compacting them down. They sort above every real
-                    # value, so they occupy the top positions and leave every
-                    # order statistic below ``counts[p]`` untouched — exact
-                    # even when a real observation is also 65535, since only
-                    # values are read back, never scene indices. Compacting
-                    # would need a per-pixel gather, which does not vectorise.
+                    # Pad invalid observations with the uint16 maximum rather
+                    # than compacting them down; see _selection_network.
                     for s in range(n_scenes):
                         for p in range(block):
                             if valid[s, y, x0 + p]:
@@ -430,8 +506,6 @@ def _medoid_axis0_u16(
                             else:
                                 values[s, p] = np.uint16(65535)
 
-                    # A comparator has no data-dependent control flow, so the
-                    # same one applied across the block is a vector min/max.
                     for c in range(n_cmp):
                         lo_w = net[c, 0]
                         hi_w = net[c, 1]
@@ -490,9 +564,9 @@ def _medoid_axis0_u16(
 def _warm_medoid_axis0_u16() -> None:
     """Compile the medoid kernel on the main thread before workers start.
 
-    Also compiles ``_median_selection_network``, which the kernel calls on
-    entry — leaving that to the first tile worker would put several threads
-    into Numba's compilation path at once.
+    Also compiles ``_selection_network``, which the kernel calls on entry.
+    Leaving that to the first tile worker would put several threads into
+    Numba's compilation path at once, which is fragile on macOS.
     """
     sample_stack = np.zeros((2, 1, 1, 1), dtype=np.uint16)
     sample_stack[0, 0, 0, 0] = 100
@@ -639,7 +713,11 @@ def tile_percentile(
             include_observation_count,
         )
 
-    stack = np.full((len(contributing), bands_count, h, w), np.nan, dtype=np.float32)
+    # Stack stays uint16 with validity carried in a separate bool plane rather
+    # than NaN sentinels in float32. That halves the largest working buffer and
+    # is what lets the quantile kernel vectorise; see ``_quantile_axis0_u16``.
+    stack = np.zeros((len(contributing), bands_count, h, w), dtype=np.uint16)
+    valid = np.zeros((len(contributing), h, w), dtype=np.bool_)
     observation_count = np.zeros((h, w), dtype=np.uint16)
     pixel_count = (
         np.zeros((h, w), dtype=np.uint16) if max_observations is not None else None
@@ -660,11 +738,10 @@ def tile_percentile(
         if source_valid is not None:
             pick = pick & source_valid
             if not pick.any():
-                stack[k].fill(np.nan)
                 continue
         for j, data in enumerate(band_data):
-            stack[k, j].fill(np.nan)
             np.copyto(stack[k, j], data, where=pick, casting="unsafe")
+        valid[k] = pick
         np.add(observation_count, pick, out=observation_count, casting="unsafe")
         if pixel_count is not None:
             np.add(pixel_count, pick, out=pixel_count, casting="unsafe")
@@ -683,7 +760,7 @@ def tile_percentile(
         ):
             break
 
-    res = _nanquantile_axis0(stack, percentile / 100.0)
+    res = _quantile_axis0_u16(stack, valid, percentile / 100.0)
     res = np.nan_to_num(res, nan=0.0)
     tile = _finalise_tile(res, out_dtype)
     if include_observation_count:
@@ -744,10 +821,10 @@ def tile_medoid(
             include_observation_count,
         )
 
-    # Stack stays uint16 — medoid picks an actual observed spectrum so it
-    # needs no fractional precision. Validity carried in a separate bool
-    # array instead of NaN sentinels in float32, which halves stack memory
-    # and removes the per-cell NaN check from the kernel hot loop.
+    # Same uint16 stack plus bool validity plane as tile_percentile, and the
+    # same size: medoid picks an actual observed spectrum, so it needs no
+    # fractional precision either. Peak differs only downstream, where this
+    # kernel returns uint16 and stripe-blocks its scratch.
     stack = np.zeros((len(contributing), bands_count, h, w), dtype=np.uint16)
     valid = np.zeros((len(contributing), h, w), dtype=np.bool_)
     observation_count = np.zeros((h, w), dtype=np.uint16)
@@ -900,7 +977,7 @@ def tile_mean(
             break
     # Integer floor-divide reuses ``sum_block`` as the quotient buffer
     # (avoids a second (bands_count, h, w) allocation). ``safe_count`` is 1
-    # at unobserved pixels — sum_block is also 0 there, so 0 // 1 = 0 and
+    # at unobserved pixels; sum_block is also 0 there, so 0 // 1 = 0 and
     # no explicit mask is needed.
     safe_count = np.maximum(count, np.uint16(1)).astype(np.uint32, copy=False)
     for b in range(bands_count):
@@ -928,7 +1005,7 @@ def tile_first(
             spec, bands_count, out_dtype, include_observation_count
         )
     # FIRST copies source pixels straight through, so we can accumulate
-    # directly in the output dtype — no float32 working buffer needed.
+    # directly in the output dtype, with no float32 working buffer needed.
     result = np.zeros((bands_count, h, w), dtype=out_dtype)
     filled = np.zeros((h, w), dtype=bool)
     for scene_idx, m in enumerate(masks):
@@ -1031,9 +1108,9 @@ def _expected_reads_upper_bound(
 
     Counts, for each tile spec, the scenes whose mask intersects that tile,
     times the number of user bands. ``first`` and ``min_observations``
-    can stop reading mid-tile, so the actual count may be lower — that's
-    fine for the progress bar; we just won't naturally hit 100% in those
-    cases and fast-forward at the end.
+    can stop reading mid-tile, so the actual count may be lower. That's fine
+    for the progress bar; we just won't naturally hit 100% in those cases and
+    fast-forward at the end.
     """
     non_empty_masks = sum(1 for m in masks if m is not None)
     if len(specs) * non_empty_masks > EXPECTED_READ_EXACT_SCAN_LIMIT:
@@ -1075,7 +1152,7 @@ def run_tile_aggregation(
 
     ``out_dtype`` is the pipeline's final output dtype (``uint16`` for
     spectral, ``uint8`` for visual). Tile workers cast to it before
-    returning, so the output buffer can be allocated as the final dtype —
+    returning, so the output buffer can be allocated as the final dtype, with
     no intermediate float32 array the size of the whole mosaic.
 
     When ``include_observation_count`` is true, the returned array has one
@@ -1130,8 +1207,8 @@ def _drain_with_requeue(
     Yields ``(spec, tile_data)`` in completion order. When a worker raises
     ``RasterioIOError`` the spec is re-submitted to the same executor (so it
     naturally lands at the back of the queue while other tiles fill the gap),
-    bounded by :data:`MAX_REQUEUES_PER_TILE` per spec and
-    :data:`MAX_TOTAL_REQUEUE_FRACTION` across the run. Any other exception
+    bounded by ``MAX_REQUEUES_PER_TILE`` per spec and
+    ``MAX_TOTAL_REQUEUE_FRACTION`` across the run. Any other exception
     propagates immediately.
     """
     total_specs = len(specs)
@@ -1215,7 +1292,7 @@ def iter_tile_aggregation(
         specs = tile_specs_for(height, width, tile_size)
 
     # Phase 2 progress is per band-read rather than per tile so the bar
-    # advances smoothly. Total is the upper bound — each (scene, band) read
+    # advances smoothly. Total is the upper bound: each (scene, band) read
     # that *would* happen if no early-stop kicks in. ``first`` /
     # min_observations modes may finish below 100%, which we fast-forward.
     progress_bar: Optional["tqdm[Any]"] = None
@@ -1243,7 +1320,7 @@ def iter_tile_aggregation(
             effective_read_fn = _counting_read_fn
 
     if mosaic_method == MOSAIC_PERCENTILE:
-        _warm_nanquantile_axis0()
+        _warm_quantile_axis0_u16()
         pv = percentile if percentile is not None else 50.0
 
     elif mosaic_method == MOSAIC_MEDOID:

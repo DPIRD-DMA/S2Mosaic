@@ -23,7 +23,7 @@ class TestNormalizeGridId:
             ("  50HMK ", "50HMK"),  # whitespace stripped
             ("1FBE", "1FBE"),  # single-digit zone
             ("60XVQ", "60XVQ"),  # zone 60, last valid row letter
-            ("01CAA", None),  # leading zero — bad: regex requires no leading zero
+            ("01CAA", None),  # leading zero: regex requires none
         ],
     )
     def test_accepts_or_rejects(self, raw, expected):
@@ -39,8 +39,8 @@ class TestNormalizeGridId:
             "",  # empty
             "   ",  # whitespace only
             "50AMK",  # latitude band A (polar UPS)
-            "50IMK",  # latitude band I (forbidden — looks like 1)
-            "50OMK",  # latitude band O (forbidden — looks like 0)
+            "50IMK",  # latitude band I (forbidden, looks like 1)
+            "50OMK",  # latitude band O (forbidden, looks like 0)
             "50YMK",  # latitude band Y (polar UPS)
             "50HIM",  # first grid letter I forbidden
             "50HOI",  # second grid letter O forbidden
@@ -53,7 +53,7 @@ class TestNormalizeGridId:
         ],
     )
     def test_rejects_malformed(self, bad):
-        # 50HMV is actually valid (row letter V is the last allowed) — drop it
+        # 50HMV is actually valid (row letter V is the last allowed), so drop it
         # from the rejection list by checking explicitly here.
         if bad == "50HMV":
             assert normalize_grid_id(bad) == "50HMV"
@@ -122,7 +122,7 @@ class TestSceneRetry:
     def test_retry_delegates_to_backoff_delay_with_base(self, monkeypatch):
         # Guard: the dedupe relies on with_scene_retry going through
         # backoff_delay. If a future refactor inlines the math, jitter would
-        # silently disappear from Phase 1 — this catches that drift.
+        # silently disappear from Phase 1; this catches that drift.
         monkeypatch.setattr("s2mosaic.helpers.time.sleep", lambda _: None)
         calls = []
 

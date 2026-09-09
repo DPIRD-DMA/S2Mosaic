@@ -213,9 +213,13 @@ def stream_mosaic_pipeline(
 ) -> Tuple[Optional[npt.NDArray[Any]], Dict[str, Any], List[Dict[str, str]]]:
     """Tile-streamed mosaic for grid_id mode.
 
-    Replaces the old in-memory ``download_bands_pool`` path. Peak working
-    set is per-worker (a few hundred MB), so 34-scene full-MGRS percentile
-    mosaics that previously needed ~65 GB of RAM now fit in a few GB.
+    Scenes are streamed tile by tile rather than downloaded whole, so the peak
+    working set is bounded by one tile per worker rather than by the mosaic.
+    It still scales with scene count: a 34-scene 4-band 2048px percentile tile
+    peaks at ~1.5 GB, so ~12 GB across the default 8 tile workers, against the
+    ~65 GB a 34-scene full-MGRS percentile mosaic needed as one in-memory
+    stack under the old path. Lower ``tile_workers`` when that ceiling is the
+    binding constraint.
 
     ``min_observations`` is an optional per-tile early-stop target for
     ``mean`` and ``percentile``: each tile walks scenes in priority order and
@@ -296,7 +300,7 @@ def stream_mosaic_pipeline(
                 and (good_pixel_tracker | ~coverage_mask).all()
             ):
                 logger.info(
-                    "All in-coverage pixels filled after %d/%d scenes — "
+                    "All in-coverage pixels filled after %d/%d scenes; "
                     "skipping remaining cloud-mask fetches",
                     scene_position,
                     n_scenes,
@@ -343,7 +347,7 @@ def stream_mosaic_pipeline(
         mask_iter.close()
         if mask_progress is not None:
             # The FIRST-coverage-filled early-stop path leaves the bar short.
-            # Snap to total and force a refresh — setting ``n`` directly bypasses
+            # Snap to total and force a refresh. Setting ``n`` directly bypasses
             # ``update``'s min-interval throttling so the final 100% state
             # actually renders before ``close``.
             if mask_progress.n < mask_progress.total:
@@ -361,11 +365,11 @@ def stream_mosaic_pipeline(
         report_dropped_scenes(dropped_scenes, total=n_scenes)
     if n_succeeded == 0:
         raise RuntimeError(
-            f"All {n_scenes} scenes failed to fetch masks — no data to mosaic"
+            f"All {n_scenes} scenes failed to fetch masks, no data to mosaic"
         )
 
     # Pull a sample profile for output georeferencing. Any valid scene's
-    # first band will do — they all snap to the same MGRS grid.
+    # first band will do; they all snap to the same MGRS grid.
     sample_idx = next(i for i, m in enumerate(masks) if m is not None)
     first_asset, _ = href_template[0]
     first_asset_key = source.asset_name(first_asset)
@@ -404,7 +408,7 @@ def stream_mosaic_pipeline(
 
         # Pick the smallest adaptive sub-tile that still aligns with source
         # COG blocks for every band being read. AWS Earth Search uses
-        # 1024-pixel blocks for 10m bands while MPC uses 512 throughout —
+        # 1024-pixel blocks for 10m bands while MPC uses 512 throughout,
         # going below the max source block only wastes the fringe of each
         # block-aligned read without reducing bytes-on-wire.
         min_tile_size = source.max_block_size_for_bands(bands)
