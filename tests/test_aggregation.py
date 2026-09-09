@@ -14,6 +14,7 @@ from s2mosaic.aggregation import (
     MEDOID_PIXEL_BLOCK,
     _medoid_axis0_u16,
     _quantile_axis0_u16,
+    _source_valid_from_bands,
     _split_tile_size_aligned,
     _selection_network,
     _warm_medoid_axis0_u16,
@@ -313,16 +314,20 @@ class TestRunTileAggregation:
         expected[:, :, 0] = 15
         np.testing.assert_array_equal(out, expected)
 
-    @pytest.mark.parametrize("percentile, expected", [(25.0, 7), (75.0, 22)])
+    @pytest.mark.parametrize("percentile, expected", [(25.0, 17), (75.0, 32)])
     def test_percentile_percentage_converts_to_kernel_fraction(
         self, percentile, expected
     ):
         # Ties the public 0-100 parameter to the kernel's 0-1 fraction. With
-        # four evenly spaced observations q=0.25 interpolates to 7.5 and
-        # q=0.75 to 22.5, both of which truncate on the cast to uint16, so a
+        # four evenly spaced observations q=0.25 interpolates to 17.5 and
+        # q=0.75 to 32.5, both of which truncate on the cast to uint16, so a
         # percentage/fraction mix-up cannot pass by landing on a round number.
+        # Values start at 10 because 0 is NODATA, not an observation.
         scenes = np.stack(
-            [np.full((1, self.H, self.W), v, dtype=np.uint16) for v in (0, 10, 20, 30)],
+            [
+                np.full((1, self.H, self.W), v, dtype=np.uint16)
+                for v in (10, 20, 30, 40)
+            ],
             axis=0,
         )
         masks = [np.ones((self.H, self.W), dtype=bool) for _ in range(4)]
@@ -934,10 +939,11 @@ class TestRunTileAggregation:
         ]
         masks[0][0, 0] = False
 
+        # Scene values 10/20/30: 0 would read as NODATA, not an observation.
         def read_fn(scene_idx, band_idx, spec):
             reads.append(scene_idx)
             _, _, h, w = spec
-            return np.full((h, w), scene_idx * 10, dtype=np.uint16)
+            return np.full((h, w), 10 + scene_idx * 10, dtype=np.uint16)
 
         out = run_tile_aggregation(
             masks=masks,
@@ -953,8 +959,10 @@ class TestRunTileAggregation:
             min_observations=2,
         )
 
-        expected = np.full((1, self.H, self.W), 10, dtype=np.uint16)
-        expected[0, 0, 0] = 15
+        # Every pixel but (0, 0) sees all three scenes, so the median is 20;
+        # (0, 0) is masked out of scene 0 and medians 20 and 30 to 25.
+        expected = np.full((1, self.H, self.W), 20, dtype=np.uint16)
+        expected[0, 0, 0] = 25
         assert reads == [0, 1, 2]
         np.testing.assert_array_equal(out, expected)
 
@@ -1029,12 +1037,12 @@ class TestRunTileAggregation:
         np.testing.assert_array_equal(out, expected)
 
     def test_percentile_caps_at_max_observations_per_pixel(self):
-        # Six clear scenes with values 0, 10, 20, 30, 40, 50. With
-        # max_observations=3 each pixel sees only 0, 10, 20, so the median is
-        # 10 rather than 25.
+        # Six clear scenes with values 10, 20, 30, 40, 50, 60. With
+        # max_observations=3 each pixel sees only 10, 20, 30, so the median is
+        # 20 rather than 35. Values start at 10 because 0 is NODATA.
         reads = []
         n_scenes = 6
-        scene_values = np.arange(n_scenes) * 10
+        scene_values = 10 + np.arange(n_scenes) * 10
 
         def read_fn(scene_idx, band_idx, spec):
             reads.append(scene_idx)
@@ -1058,7 +1066,7 @@ class TestRunTileAggregation:
         )
 
         assert sorted(set(reads)) == [0, 1, 2]
-        np.testing.assert_array_equal(out, np.full((1, self.H, self.W), 10))
+        np.testing.assert_array_equal(out, np.full((1, self.H, self.W), 20))
 
     def test_medoid_stops_at_min_observations(self):
         # Documented as applying to medoid as well as mean/percentile, but
@@ -1483,6 +1491,79 @@ class TestRunTileAggregation:
         assert large_allocations == []
 
 
+class TestSourceValidFromBands:
+    """A pixel is usable only where every requested band has a value.
+
+    0 is Sentinel-2 L2A's NODATA, never a measurable reflectance, so a zero
+    in any band means that band dropped out at that pixel. These pin the
+    stricter reading, because the earlier all-bands-zero test passed such a
+    pixel through and wrote the 0 into the output as if it were data.
+    """
+
+    def test_rejects_pixel_where_a_single_band_dropped_out(self):
+        # The MPC defect this was written for: one band reads 0 while the
+        # rest carry ordinary dark-water values around DN 1000.
+        band_data = [
+            np.array([[1026, 1040]], dtype=np.uint16),
+            np.array([[0, 1013]], dtype=np.uint16),
+            np.array([[977, 986]], dtype=np.uint16),
+        ]
+        valid = _source_valid_from_bands(band_data)
+        assert valid is not None
+        np.testing.assert_array_equal(valid, [[False, True]])
+
+    def test_rejects_pixel_where_every_band_is_zero(self):
+        # The scene-footprint case the previous test already handled; it must
+        # keep working, since that is what keeps all-zero scenes from
+        # consuming the max_observations budget.
+        band_data = [np.zeros((1, 2), dtype=np.uint16) for _ in range(3)]
+        valid = _source_valid_from_bands(band_data)
+        assert valid is not None
+        np.testing.assert_array_equal(valid, [[False, False]])
+
+    def test_keeps_pixel_where_every_band_has_data(self):
+        band_data = [
+            np.array([[1, 65535]], dtype=np.uint16),
+            np.array([[1000, 1]], dtype=np.uint16),
+            np.array([[65535, 1000]], dtype=np.uint16),
+        ]
+        valid = _source_valid_from_bands(band_data)
+        assert valid is not None
+        np.testing.assert_array_equal(valid, [[True, True]])
+
+    def test_single_band_reads_are_filtered_too(self):
+        # This returned None before, so a one-band request got no zero
+        # filtering at all and wrote NODATA out as if it were a reading.
+        band_data = [np.array([[0, 1200]], dtype=np.uint16)]
+        valid = _source_valid_from_bands(band_data)
+        assert valid is not None
+        np.testing.assert_array_equal(valid, [[False, True]])
+
+    def test_empty_read_returns_none(self):
+        assert _source_valid_from_bands([]) is None
+
+    @pytest.mark.parametrize("n_bands", [1, 2, 3, 4, 13])
+    def test_matches_an_explicit_all_bands_non_zero_reduction(self, n_bands):
+        rng = np.random.default_rng(0)
+        band_data = [
+            rng.integers(0, 3, size=(8, 8), dtype=np.uint16) for _ in range(n_bands)
+        ]
+        expected = np.logical_and.reduce([b != 0 for b in band_data])
+        np.testing.assert_array_equal(_source_valid_from_bands(band_data), expected)
+
+    def test_visual_channel_dropout_is_rejected(self):
+        # uint8 TCI: nodata-region quantisation noise leaves 1-2 DN in one
+        # channel while another is 0. Same rule, different dtype.
+        band_data = [
+            np.array([[1, 40]], dtype=np.uint8),
+            np.array([[0, 38]], dtype=np.uint8),
+            np.array([[2, 44]], dtype=np.uint8),
+        ]
+        valid = _source_valid_from_bands(band_data)
+        assert valid is not None
+        np.testing.assert_array_equal(valid, [[False, True]])
+
+
 class TestSelectionNetwork:
     """The shared comparator builder must sort exactly what it promises."""
 
@@ -1550,8 +1631,19 @@ class TestQuantileAxis0U16:
         The comparison is exact, not approximate. The kernel computes the read
         position and the blend the way NumPy does, so anything short of
         bit-identity means one of them drifted.
+
+        The reference is built as float64 even though the kernel returns
+        float32, because that is the quantile the kernel actually targets: it
+        finds the bracketing order statistics in integer space and does the
+        position and blend in float64, casting only at the end. Handing
+        ``nanquantile`` a float32 stack instead makes the reference depend on
+        the NumPy version. Up to 1.26 it computed the lerp in float64 and
+        agreed; from 2.x it computes in float32 and lands an ulp off for
+        quantiles falling between two observations, so the same correct kernel
+        output started failing. Comparing against the float64 quantile pins
+        the property that matters and is stable across both.
         """
-        reference = stack.astype(np.float32)
+        reference = stack.astype(np.float64)
         reference[~np.broadcast_to(valid[:, None], stack.shape)] = np.nan
 
         got = _quantile_axis0_u16(stack, valid, q)

@@ -115,12 +115,35 @@ def _read_scene_bands(
 def _source_valid_from_bands(
     band_data: List[npt.NDArray[Any]],
 ) -> Optional[npt.NDArray[np.bool_]]:
-    """Pixels with at least one non-zero band in a multi-band source read."""
-    if len(band_data) <= 1:
+    """Pixels whose every band is non-zero in a source read.
+
+    0 is the NODATA value in Sentinel-2 L2A, not a measurable reflectance.
+    From processing baseline 04.00 the ``BOA_ADD_OFFSET`` of -1000 puts true
+    zero reflectance at DN 1000, so DN 0 would decode to -0.1; before it,
+    valid data still started at 1. A zero in any band is therefore missing
+    data, and a pixel is only usable where every requested band has a value.
+
+    This is deliberately stricter than the all-bands-zero test it replaced.
+    That one asked "did this scene contribute anything here?", which is the
+    right question for scene footprints and the wrong one for per-band data
+    quality: it kept pixels where a single band had dropped out and copied
+    that band's 0 straight into the output. Those dropouts are rare (order
+    0.01% of valid pixels) but they are a ~1000 DN error where they land,
+    and per-band, so they corrupt band ratios and spectral indices rather
+    than merely darkening a pixel.
+
+    Scene edges are unaffected in practice: every band drops out together
+    there, and both mask providers already exclude the region (SCL reports
+    NO_DATA, and ``get_valid_mask`` tests the band sum), so this changes
+    nothing that masking had already handled.
+
+    Returns None only for an empty read, so callers skip the intersection.
+    """
+    if not band_data:
         return None
-    valid = np.zeros(band_data[0].shape, dtype=bool)
+    valid = np.ones(band_data[0].shape, dtype=bool)
     for data in band_data:
-        valid |= data != 0
+        valid &= data != 0
     return valid
 
 
