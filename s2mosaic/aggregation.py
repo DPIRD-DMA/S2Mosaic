@@ -115,35 +115,46 @@ def _read_scene_bands(
 def _source_valid_from_bands(
     band_data: List[npt.NDArray[Any]],
 ) -> Optional[npt.NDArray[np.bool_]]:
-    """Pixels whose every band is non-zero in a source read.
+    """Pixels with at least one non-zero band in a source read.
 
-    0 is the NODATA value in Sentinel-2 L2A, not a measurable reflectance.
-    From processing baseline 04.00 the ``BOA_ADD_OFFSET`` of -1000 puts true
-    zero reflectance at DN 1000, so DN 0 would decode to -0.1; before it,
-    valid data still started at 1. A zero in any band is therefore missing
-    data, and a pixel is only usable where every requested band has a value.
+    0 is Sentinel-2 L2A's NODATA value, so a pixel where every requested
+    band reads 0 carries no measurement and must not reach the output.
 
-    This is deliberately stricter than the all-bands-zero test it replaced.
-    That one asked "did this scene contribute anything here?", which is the
-    right question for scene footprints and the wrong one for per-band data
-    quality: it kept pixels where a single band had dropped out and copied
-    that band's 0 straight into the output. Those dropouts are rare (order
-    0.01% of valid pixels) but they are a ~1000 DN error where they land,
-    and per-band, so they corrupt band ratios and spectral indices rather
-    than merely darkening a pixel.
+    This deliberately matches, rather than tightens, what the cloud-mask
+    providers already test. ``get_valid_mask`` marks no-data as
+    ``bands.sum(axis=0) == 0`` and dilates it; ``compute_masks_from_scl``
+    marks ``SCL == NO_DATA`` and dilates the same way. Keeping the rules
+    aligned preserves an invariant the pipeline depends on: a pixel the
+    phase-1 mask calls usable is a pixel phase-3 can actually fill.
 
-    Scene edges are unaffected in practice: every band drops out together
-    there, and both mask providers already exclude the region (SCL reports
-    NO_DATA, and ``get_valid_mask`` tests the band sum), so this changes
-    nothing that masking had already handled.
+    That invariant is load-bearing. Scene selection happens in phase 1 from
+    masks alone, before any band is read -- ``first`` mode narrows each
+    scene's mask by ``good_pixel_tracker`` and stops fetching once coverage
+    is claimed, and ``_contributing_scene_indices`` truncates the scene list
+    against observation targets. A validity rule stricter than the mask is
+    invisible to all of it, so a pixel gets claimed by a scene that later
+    declines to fill it, with no other scene left to try.
+
+    2.0.0b4 briefly tried the stricter "every band must be non-zero" rule,
+    to catch the isolated single-band zeros MPC serves in dark water (order
+    0.01-0.04% of valid pixels; Element 84's copy of the same acquisitions
+    is unaffected). Those artifacts sit below a 20m SCL cell and below OCM's
+    band-sum test, so no mask can see them, and rejecting them stranded the
+    pixel: ``first`` wrote 0 across every band rather than the one bad band,
+    which is worse than the error it set out to fix. See CHANGELOG 2.0.0b4.
+
+    A one-band read goes through the same rule, where "every band is zero"
+    and "this band is zero" coincide. Before 2.0.0b4 it returned ``None``
+    and applied no filtering at all, which let genuine scene-edge NODATA
+    through as a value.
 
     Returns None only for an empty read, so callers skip the intersection.
     """
     if not band_data:
         return None
-    valid = np.ones(band_data[0].shape, dtype=bool)
+    valid = np.zeros(band_data[0].shape, dtype=bool)
     for data in band_data:
-        valid &= data != 0
+        valid |= data != 0
     return valid
 
 
@@ -702,9 +713,7 @@ def tile_percentile(
             spec, bands_count, out_dtype, include_observation_count
         )
 
-    if bands_count > 1 and (
-        min_observations is not None or max_observations is not None
-    ):
+    if min_observations is not None or max_observations is not None:
         contributing = _contributing_scene_indices(
             spec, masks, tile_coverage, None, None
         )
@@ -769,15 +778,13 @@ def tile_percentile(
         if pixel_count is not None:
             np.add(pixel_count, pick, out=pixel_count, casting="unsafe")
         if (
-            bands_count > 1
-            and min_observations is not None
+            min_observations is not None
             and max_observations is None
             and ((observation_count >= min_observations) | ~tile_coverage).all()
         ):
             break
         if (
-            bands_count > 1
-            and max_observations is not None
+            max_observations is not None
             and pixel_count is not None
             and ((pixel_count >= max_observations) | ~tile_coverage).all()
         ):
@@ -810,9 +817,7 @@ def tile_medoid(
             spec, bands_count, out_dtype, include_observation_count
         )
 
-    if bands_count > 1 and (
-        min_observations is not None or max_observations is not None
-    ):
+    if min_observations is not None or max_observations is not None:
         contributing = _contributing_scene_indices(
             spec, masks, tile_coverage, None, None
         )
@@ -878,15 +883,13 @@ def tile_medoid(
         if pixel_count is not None:
             np.add(pixel_count, pick, out=pixel_count, casting="unsafe")
         if (
-            bands_count > 1
-            and min_observations is not None
+            min_observations is not None
             and max_observations is None
             and ((observation_count >= min_observations) | ~tile_coverage).all()
         ):
             break
         if (
-            bands_count > 1
-            and max_observations is not None
+            max_observations is not None
             and pixel_count is not None
             and ((pixel_count >= max_observations) | ~tile_coverage).all()
         ):
@@ -918,7 +921,12 @@ def tile_mean(
             spec, bands_count, out_dtype, include_observation_count
         )
 
-    source_valid_can_change_observations = bands_count > 1 and (
+    # _contributing_scene_indices counts observations from masks alone, so it
+    # can truncate the scene list before _source_valid_from_bands has had a say.
+    # Where an observation target is set, take every scene and let the
+    # data-driven count below drive the early stop instead. This holds at any
+    # band count: a one-band read is filtered on the same rule as any other.
+    source_valid_can_change_observations = (
         min_observations is not None or max_observations is not None
     )
     if source_valid_can_change_observations:

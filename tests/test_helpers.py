@@ -6,6 +6,7 @@ from rasterio.errors import RasterioIOError
 
 from s2mosaic.helpers import (
     SceneFetchError,
+    get_band_template,
     normalize_grid_id,
     report_dropped_scenes,
     with_scene_retry,
@@ -208,3 +209,33 @@ class TestReportDroppedScenes:
         text = buf.getvalue()
         assert "2/10 scenes dropped" in text
         assert "S2A_X" in text and "S2B_Y" in text
+
+
+class TestGetBandTemplate:
+    """`visual` is one STAC asset but three output bands.
+
+    The expansion is what keeps ``_source_valid_from_bands`` looking at three
+    2D channels rather than one (3, h, w) array. A single array would make it
+    return a 3D mask, which callers intersect with a 2D ``pick`` -- that
+    broadcasts to a wrong answer instead of raising, so pin the contract here.
+    """
+
+    def test_visual_expands_to_three_raster_bands_of_one_asset(self):
+        href_template, bands_count, indices = get_band_template(["visual"])
+        assert href_template == [("visual", 1), ("visual", 2), ("visual", 3)]
+        assert bands_count == 3
+        assert indices == [1, 2, 3]
+
+    def test_spectral_bands_are_one_asset_each_at_raster_band_one(self):
+        href_template, bands_count, indices = get_band_template(["B04", "B03", "B02"])
+        assert href_template == [("B04", 1), ("B03", 1), ("B02", 1)]
+        assert bands_count == 3
+        assert indices == [1, 1, 1]
+
+    @pytest.mark.parametrize(
+        "bands", [["B08"], ["B04", "B03"], ["B04", "B03", "B02", "B08"]]
+    )
+    def test_bands_count_matches_the_request_for_spectral(self, bands):
+        _, bands_count, indices = get_band_template(bands)
+        assert bands_count == len(bands)
+        assert len(indices) == len(bands)

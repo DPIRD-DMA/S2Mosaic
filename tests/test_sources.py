@@ -382,6 +382,11 @@ class TestSearchPostFilter:
                 return ItemCollection([wanted, neighbour])
 
         class _FakeCatalog:
+            # Source.open_catalog asserts QUERY conformance on the real
+            # client, because MPC honours the extension without declaring it.
+            def add_conforms_to(self, _name):
+                pass
+
             def search(self, **_):
                 return _FakeSearch()
 
@@ -433,6 +438,11 @@ class TestStacDatetimeFormat:
                 return ItemCollection([])
 
         class _FakeCatalog:
+            # Source.open_catalog asserts QUERY conformance on the real
+            # client, because MPC honours the extension without declaring it.
+            def add_conforms_to(self, _name):
+                pass
+
             def search(self, **kwargs):
                 captured.update(kwargs)
                 return _FakeSearch()
@@ -536,6 +546,11 @@ class TestSearchQueryShape:
                 return ItemCollection([])
 
         class _FakeCatalog:
+            # Source.open_catalog asserts QUERY conformance on the real
+            # client, because MPC honours the extension without declaring it.
+            def add_conforms_to(self, _name):
+                pass
+
             def search(self, **kwargs):
                 captured.update(kwargs)
                 return _FakeSearch()

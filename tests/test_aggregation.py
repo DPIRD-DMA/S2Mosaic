@@ -8,6 +8,7 @@ from rasterio.errors import RasterioIOError
 from rasterio.transform import from_origin
 
 import s2mosaic.aggregation as aggregation_mod
+from s2mosaic.masking import get_valid_mask
 from s2mosaic.aggregation import (
     DEFAULT_TILE_WORKERS,
     _drain_with_requeue,
@@ -22,6 +23,10 @@ from s2mosaic.aggregation import (
     adaptive_tile_specs_for_masks,
     iter_tile_aggregation,
     run_tile_aggregation,
+    tile_first,
+    tile_mean,
+    tile_medoid,
+    tile_percentile,
     write_tile_aggregation_geotiff,
 )
 
@@ -1492,17 +1497,22 @@ class TestRunTileAggregation:
 
 
 class TestSourceValidFromBands:
-    """A pixel is usable only where every requested band has a value.
+    """A pixel is unusable only where every requested band reads zero.
 
-    0 is Sentinel-2 L2A's NODATA, never a measurable reflectance, so a zero
-    in any band means that band dropped out at that pixel. These pin the
-    stricter reading, because the earlier all-bands-zero test passed such a
-    pixel through and wrote the 0 into the output as if it were data.
+    0 is Sentinel-2 L2A's NODATA, so an all-zero pixel carries no
+    measurement. The rule stops exactly there, matching what the cloud-mask
+    providers already reject rather than tightening past them --
+    ``TestSourceValidityMatchesMaskValidity`` pins that correspondence, and
+    the docstring on ``_source_valid_from_bands`` explains why the pipeline
+    depends on it.
     """
 
-    def test_rejects_pixel_where_a_single_band_dropped_out(self):
-        # The MPC defect this was written for: one band reads 0 while the
-        # rest carry ordinary dark-water values around DN 1000.
+    def test_keeps_pixel_where_a_single_band_dropped_out(self):
+        # The MPC artifact: one band reads 0 while the rest carry ordinary
+        # dark-water values near DN 1000. 2.0.0b4 rejected this pixel, which
+        # stranded it in `first` mode and zeroed all three bands rather than
+        # the one that dropped out. The bad band's 0 reaching the output is
+        # the lesser error, and it is what every released version does.
         band_data = [
             np.array([[1026, 1040]], dtype=np.uint16),
             np.array([[0, 1013]], dtype=np.uint16),
@@ -1510,12 +1520,12 @@ class TestSourceValidFromBands:
         ]
         valid = _source_valid_from_bands(band_data)
         assert valid is not None
-        np.testing.assert_array_equal(valid, [[False, True]])
+        np.testing.assert_array_equal(valid, [[True, True]])
 
     def test_rejects_pixel_where_every_band_is_zero(self):
-        # The scene-footprint case the previous test already handled; it must
-        # keep working, since that is what keeps all-zero scenes from
-        # consuming the max_observations budget.
+        # The scene-footprint case: no band saw anything, so the scene did
+        # not observe this pixel at all. This is what keeps all-zero scenes
+        # from consuming the max_observations budget.
         band_data = [np.zeros((1, 2), dtype=np.uint16) for _ in range(3)]
         valid = _source_valid_from_bands(band_data)
         assert valid is not None
@@ -1532,8 +1542,10 @@ class TestSourceValidFromBands:
         np.testing.assert_array_equal(valid, [[True, True]])
 
     def test_single_band_reads_are_filtered_too(self):
-        # This returned None before, so a one-band request got no zero
-        # filtering at all and wrote NODATA out as if it were a reading.
+        # This returned None before 2.0.0b4, so a one-band request got no
+        # zero filtering at all and wrote scene-edge NODATA out as a reading.
+        # With one band "every band is zero" and "this band is zero" are the
+        # same test, so the rule applies unchanged.
         band_data = [np.array([[0, 1200]], dtype=np.uint16)]
         valid = _source_valid_from_bands(band_data)
         assert valid is not None
@@ -1543,25 +1555,319 @@ class TestSourceValidFromBands:
         assert _source_valid_from_bands([]) is None
 
     @pytest.mark.parametrize("n_bands", [1, 2, 3, 4, 13])
-    def test_matches_an_explicit_all_bands_non_zero_reduction(self, n_bands):
+    def test_matches_an_explicit_any_band_non_zero_reduction(self, n_bands):
         rng = np.random.default_rng(0)
         band_data = [
             rng.integers(0, 3, size=(8, 8), dtype=np.uint16) for _ in range(n_bands)
         ]
-        expected = np.logical_and.reduce([b != 0 for b in band_data])
+        expected = np.logical_or.reduce([b != 0 for b in band_data])
         np.testing.assert_array_equal(_source_valid_from_bands(band_data), expected)
 
-    def test_visual_channel_dropout_is_rejected(self):
-        # uint8 TCI: nodata-region quantisation noise leaves 1-2 DN in one
-        # channel while another is 0. Same rule, different dtype.
+    def test_dark_water_tci_keeps_its_zero_channels(self):
+        # Real uint8 TCI pixels from the Perth AOI, over Swan River water.
+        # TCI is a quantised render, so near-zero reflectance rounds channels
+        # to 0: here blue is 0 at every pixel and green at some. The matching
+        # spectral read is B04/B03/B02 ~= 1040/994/974, which after the
+        # baseline 04.00 BOA_ADD_OFFSET of -1000 is reflectance ~0.004/-0.001
+        # -- dark water, faithfully rendered, not a dropout.
+        #
+        # This is the case that made the 2.0.0b4 rule untenable. Over that
+        # AOI 13679 of 143375 valid pixels (9.5%) carry a zero channel in
+        # TCI, so rejecting them would have gutted `visual` mosaics over
+        # water. The 0.01-0.04% figure b4 was designed against came from
+        # spectral bands and never got checked against TCI.
         band_data = [
-            np.array([[1, 40]], dtype=np.uint8),
-            np.array([[0, 38]], dtype=np.uint8),
-            np.array([[2, 44]], dtype=np.uint8),
+            np.array([[5, 4, 6, 8]], dtype=np.uint8),
+            np.array([[0, 0, 3, 8]], dtype=np.uint8),
+            np.array([[0, 0, 0, 0]], dtype=np.uint8),
         ]
         valid = _source_valid_from_bands(band_data)
         assert valid is not None
-        np.testing.assert_array_equal(valid, [[False, True]])
+        np.testing.assert_array_equal(valid, [[True, True, True, True]])
+
+    def test_all_zero_tci_is_treated_as_nodata(self):
+        # The one case TCI cannot disambiguate. ESA reserves 0 for NODATA,
+        # but quantisation drops genuinely black targets there too, so a
+        # [0,0,0] pixel over very dark water is indistinguishable from an
+        # unobserved one and is dropped. Measured at 329 of 143375 valid
+        # pixels on the Perth AOI (0.23%), inside water that renders near
+        # black anyway. Callers who need dark water should request the
+        # spectral bands, where DN 0 really is NODATA.
+        band_data = [np.zeros((1, 2), dtype=np.uint8) for _ in range(3)]
+        valid = _source_valid_from_bands(band_data)
+        assert valid is not None
+        np.testing.assert_array_equal(valid, [[False, False]])
+
+    @pytest.mark.parametrize("n_bands", [1, 3, 6])
+    def test_returns_a_two_dimensional_mask_matching_one_band(self, n_bands):
+        # Callers intersect this with a 2D `pick`, so a 3D result would
+        # broadcast into a wrong answer rather than raise. `visual` is the
+        # way that could happen: it reads as three 2D bands, and anything
+        # that let a single (3, h, w) array through instead would land here.
+        band_data = [np.ones((4, 5), dtype=np.uint16) for _ in range(n_bands)]
+        valid = _source_valid_from_bands(band_data)
+        assert valid is not None
+        assert valid.shape == (4, 5)
+        assert valid.dtype == np.bool_
+
+
+class TestSourceValidityMatchesMaskValidity:
+    """Source validity must not be stricter than the cloud-mask providers.
+
+    Scene selection runs in phase 1 from masks alone, before a single band is
+    read. ``first`` narrows each scene's mask by ``good_pixel_tracker`` and
+    stops fetching once coverage is claimed; ``_contributing_scene_indices``
+    truncates the scene list against observation targets. All of it assumes a
+    pixel the mask calls usable is one the band read can actually fill.
+
+    A rule stricter than the mask is invisible to every one of those
+    decisions, so the pixel gets claimed by a scene that then declines to
+    fill it, with nothing left to try. 2.0.0b4 tightened this to "every band
+    non-zero" and produced exactly that: isolated NODATA holes in `first`
+    mosaics. These tests pin the correspondence so the next attempt fails
+    here, loudly, instead of in an output raster months later.
+    """
+
+    @pytest.mark.parametrize("n_bands", [1, 2, 3, 6, 13])
+    def test_agrees_with_get_valid_mask_pixel_for_pixel(self, n_bands):
+        # get_valid_mask is what the OCM path uses to decide a pixel was
+        # observed at all. Undilated, it is the same question this function
+        # asks, so the two must return the same mask for any input. Values
+        # are drawn from a tiny range so zeros land densely in every
+        # combination of bands.
+        rng = np.random.default_rng(7)
+        for _ in range(20):
+            band_data = [
+                rng.integers(0, 2, size=(6, 9), dtype=np.uint16) for _ in range(n_bands)
+            ]
+            expected = get_valid_mask(np.stack(band_data), dilation_count=0)
+            np.testing.assert_array_equal(_source_valid_from_bands(band_data), expected)
+
+    def test_never_rejects_a_pixel_the_mask_would_keep(self):
+        # The invariant stated directly, over every 4-band zero pattern.
+        # Only the all-zero pattern may be rejected; anything else is a
+        # pixel phase 1 could hand to phase 3 and expect back.
+        for pattern in range(1, 16):
+            band_data = [
+                np.array([[1000 if pattern & (1 << b) else 0]], dtype=np.uint16)
+                for b in range(4)
+            ]
+            valid = _source_valid_from_bands(band_data)
+            assert valid is not None
+            assert valid[0, 0], (
+                f"pattern {pattern:04b} was rejected; the cloud mask keeps "
+                "this pixel, so `first` would strand it with no scene left "
+                "to fill it"
+            )
+
+
+class TestFirstModeSurvivesNarrowedMasks:
+    """`first` must not leave a hole where a later scene could have filled.
+
+    Phase 1 hands ``tile_first`` masks already narrowed by
+    ``good_pixel_tracker``: the first scene to claim a pixel is the only one
+    whose mask is True there. So a rejection at read time has no fallback,
+    which is what turned single-band dropouts into all-band holes.
+    """
+
+    @staticmethod
+    def _narrow(masks):
+        """Reproduce the phase-1 narrowing both pipelines apply in `first`."""
+        tracker = np.zeros(masks[0].shape, dtype=bool)
+        out = []
+        for m in masks:
+            new = m & ~tracker
+            out.append(new)
+            tracker |= new
+        return out
+
+    def test_single_band_dropout_does_not_punch_a_hole(self):
+        # Scene 0 is cloud-free everywhere but has a dropout in band 1 at the
+        # middle pixel. Under narrowing no other scene may touch that pixel,
+        # so the output must still carry scene 0's other bands rather than
+        # zeroing all three.
+        h, w, bands = 1, 3, 3
+        scenes = {
+            0: [
+                np.array([[1026, 1040, 1033]], dtype=np.uint16),
+                np.array([[1011, 0, 1013]], dtype=np.uint16),
+                np.array([[977, 986, 982]], dtype=np.uint16),
+            ],
+            1: [np.full((h, w), 500, dtype=np.uint16) for _ in range(bands)],
+        }
+
+        def read_fn(scene_idx, band_idx, spec):
+            return scenes[scene_idx][band_idx]
+
+        masks = self._narrow([np.ones((h, w), bool) for _ in scenes])
+        _, out = tile_first(
+            (0, 0, h, w),
+            masks,
+            read_fn,
+            bands,
+            np.ones((h, w), bool),
+            np.dtype(np.uint16),
+        )
+        assert out[0][0, 1] == 1040, "band 0 was discarded over band 1's dropout"
+        assert out[2][0, 1] == 986, "band 2 was discarded over band 1's dropout"
+        assert not (out[:, 0, 1] == 0).all(), "pixel became an all-band hole"
+
+    def test_all_band_dropout_still_falls_through_to_the_next_scene(self):
+        # The genuine scene-footprint case must keep working: scene 0 saw
+        # nothing at the middle pixel, so scene 1 fills it. Narrowing would
+        # block this too, which is why the rule has to agree with the mask
+        # rather than the mask being narrowed around it -- here scene 0's
+        # mask is False at that pixel because the mask provider saw the
+        # no-data as well.
+        h, w, bands = 1, 3, 2
+        scenes = {
+            0: [
+                np.array([[1026, 0, 1033]], dtype=np.uint16),
+                np.array([[1011, 0, 1013]], dtype=np.uint16),
+            ],
+            1: [np.full((h, w), 500, dtype=np.uint16) for _ in range(bands)],
+        }
+
+        def read_fn(scene_idx, band_idx, spec):
+            return scenes[scene_idx][band_idx]
+
+        scene0_mask = np.ones((h, w), bool)
+        scene0_mask[0, 1] = False  # what get_valid_mask returns for all-zero
+        masks = self._narrow([scene0_mask, np.ones((h, w), bool)])
+        _, out = tile_first(
+            (0, 0, h, w),
+            masks,
+            read_fn,
+            bands,
+            np.ones((h, w), bool),
+            np.dtype(np.uint16),
+        )
+        assert out[0][0, 1] == 500
+        assert out[1][0, 1] == 500
+
+    def test_dark_water_visual_tile_is_not_holed(self):
+        # The `visual` shape of the same regression, in uint8 and with the
+        # real numbers. Scene 0 is cloud-free over water; TCI quantises its
+        # blue channel to 0 across the row and green to 0 at two pixels.
+        # Under narrowing no later scene may touch them, so rejecting on a
+        # zero channel would blank 9.5% of a water mosaic.
+        h, w, bands = 1, 4, 3
+        scenes = {
+            0: [
+                np.array([[5, 4, 6, 8]], dtype=np.uint8),
+                np.array([[0, 0, 3, 8]], dtype=np.uint8),
+                np.array([[0, 0, 0, 0]], dtype=np.uint8),
+            ],
+            1: [np.full((h, w), 120, dtype=np.uint8) for _ in range(bands)],
+        }
+
+        def read_fn(scene_idx, band_idx, spec):
+            return scenes[scene_idx][band_idx]
+
+        masks = self._narrow([np.ones((h, w), bool) for _ in scenes])
+        _, out = tile_first(
+            (0, 0, h, w),
+            masks,
+            read_fn,
+            bands,
+            np.ones((h, w), bool),
+            np.dtype(np.uint8),
+        )
+        assert out.dtype == np.uint8
+        np.testing.assert_array_equal(out[0], [[5, 4, 6, 8]])
+        np.testing.assert_array_equal(out[1], [[0, 0, 3, 8]])
+        # Not one pixel taken from scene 1, and none blanked.
+        assert not (out == 120).any()
+
+
+class TestObservationTargetsCountRealData:
+    """min/max_observations must count observations that survive the read.
+
+    ``_contributing_scene_indices`` counts from masks alone, so where an
+    observation target is set the tile functions take every scene and drive
+    the early stop from the post-``_source_valid_from_bands`` count instead.
+    That handover was gated on ``bands_count > 1``, which silently skipped
+    one-band requests once they began to be zero-filtered.
+    """
+
+    @staticmethod
+    def _read_fn(values):
+        def read_fn(scene_idx, band_idx, spec):
+            return np.array([[values[scene_idx]]], dtype=np.uint16)
+
+        return read_fn
+
+    @pytest.mark.parametrize("bands_count", [1, 3])
+    def test_a_dropped_scene_does_not_consume_the_target(self, bands_count):
+        # Scene 0 is all-zero at this pixel, so it contributes nothing. With
+        # min_observations=2 the mosaic must reach past it to scenes 1 and 2
+        # and report two observations, not stop at the mask-level count.
+        values = [0, 50, 90]
+        masks = [np.ones((1, 1), bool) for _ in values]
+
+        def read_fn(scene_idx, band_idx, spec):
+            return np.array([[values[scene_idx]]], dtype=np.uint16)
+
+        _, out = tile_mean(
+            (0, 0, 1, 1),
+            masks,
+            read_fn,
+            bands_count,
+            np.ones((1, 1), bool),
+            2,
+            None,
+            np.dtype(np.uint16),
+            include_observation_count=True,
+        )
+        assert out[bands_count][0, 0] == 2
+        assert out[0][0, 0] == 70
+
+    @pytest.mark.parametrize("method", [tile_mean, tile_medoid])
+    def test_a_target_of_one_is_not_satisfied_by_a_dropped_scene(self, method):
+        # min_observations=1 stopped the scene scan at the first mask-clear
+        # scene. When that scene turned out to be all-zero the pixel came
+        # back empty even though later scenes had data.
+        values = [0, 50, 90]
+        masks = [np.ones((1, 1), bool) for _ in values]
+
+        def read_fn(scene_idx, band_idx, spec):
+            return np.array([[values[scene_idx]]], dtype=np.uint16)
+
+        _, out = method(
+            (0, 0, 1, 1),
+            masks,
+            read_fn,
+            1,
+            np.ones((1, 1), bool),
+            1,
+            None,
+            np.dtype(np.uint16),
+            include_observation_count=True,
+        )
+        assert out[0][0, 0] != 0, "pixel lost to a scene that contributed nothing"
+        assert out[1][0, 0] >= 1
+
+    def test_percentile_target_of_one_is_not_satisfied_by_a_dropped_scene(self):
+        values = [0, 50, 90]
+        masks = [np.ones((1, 1), bool) for _ in values]
+
+        def read_fn(scene_idx, band_idx, spec):
+            return np.array([[values[scene_idx]]], dtype=np.uint16)
+
+        _, out = tile_percentile(
+            (0, 0, 1, 1),
+            masks,
+            read_fn,
+            1,
+            50.0,
+            np.ones((1, 1), bool),
+            1,
+            None,
+            np.dtype(np.uint16),
+            include_observation_count=True,
+        )
+        assert out[0][0, 0] != 0
+        assert out[1][0, 0] >= 1
 
 
 class TestSelectionNetwork:

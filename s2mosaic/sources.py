@@ -88,7 +88,24 @@ class Source:
         return self._mgrs_query(grid_id)
 
     def open_catalog(self, stac_io: StacApiIO) -> pystac_client.Client:
-        return pystac_client.Client.open(self.stac_url, stac_io=stac_io)
+        client = pystac_client.Client.open(self.stac_url, stac_io=stac_io)
+        # Every search this package issues carries ``query`` -- the MGRS tile
+        # filter in grid mode, and ``eo:cloud_cover`` everywhere. MPC's
+        # landing page declares only four conformance classes and omits
+        # ``item-search#query``, so pystac_client warns on every search even
+        # though MPC honours the extension; verified against ``s2:mgrs_tile``
+        # and ``eo:cloud_cover``, and pinned by the slow test
+        # ``TestServerSideQueryFiltering``. Element 84 declares it, where this
+        # is a no-op. Asserting it is narrower than filtering the warning:
+        # it records what was checked and leaves every other warning intact.
+        #
+        # The Query extension, not the newer CQL2 Filter extension, is what
+        # both providers actually implement. Neither declares
+        # ``item-search#filter``, and Element 84 answers a CQL2 search with
+        # HTTP 200 and an unfiltered item list, which would put scenes from
+        # the wrong MGRS tiles into a grid mosaic with nothing raised.
+        client.add_conforms_to("QUERY")
+        return client
 
 
 def _mpc_mgrs_query(grid_id: str) -> Dict[str, Any]:
