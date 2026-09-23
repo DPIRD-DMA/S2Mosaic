@@ -1,4 +1,5 @@
 import logging
+import re
 import warnings
 from datetime import date, datetime, timezone
 
@@ -11,6 +12,8 @@ from shapely.geometry import Polygon
 from s2mosaic.sources import get_source
 from s2mosaic.stac import (
     DATETIME_COL,
+    _acquisition_key,
+    _extract_relative_orbit,
     GOOD_DATA_PCT_COL,
     ITEM_COL,
     ORBIT_COL,
@@ -345,6 +348,80 @@ class TestProcessingBaselineFilter:
 
         assert [item.id for item in filtered] == ["good"]
         assert "Invalid processing baseline" in caplog.text
+
+
+@pytest.mark.slow
+class TestAcquisitionKeyGroupsOneCapture:
+    """Everything the key puts in a group must be one capture reprocessed.
+
+    ``_acquisition_key`` decides which items are interchangeable, and
+    ``filter_latest_processing_baselines`` then throws all but one away. If
+    the key ever groups two genuinely different granules, that discard
+    becomes silent data loss -- which is exactly the bug the datetime key
+    caused on Microsoft, so a key that merges too eagerly just moves it.
+
+    A reprocessing may legitimately change the baseline, the measured
+    percentages by rounding, the cloud estimate (Collection-1 changed the
+    algorithm: one group here reads 67.9% at baseline 02.13 and 99.3% at
+    05.00 over identical pixels), the reported footprint, and on Element 84
+    the sensing timestamp itself. What it cannot change is which overpass
+    the imagery came from, so the datatake and the orbit are the invariants
+    worth asserting, with nodata as a numeric cross-check.
+
+    Checked against the live catalogue, since the whole point is whether
+    real published metadata holds the property.
+    """
+
+    NODATA_TOLERANCE_PP = 1.0
+
+    @pytest.mark.parametrize("source_name", ["MPC", "AWS"])
+    # 2017-2019 is where duplicates concentrate: the Collection-1
+    # reprocessing restamped sensing times there, and both providers still
+    # carry the superseded baselines alongside 05.00.
+    @pytest.mark.parametrize("year", [2017, 2019])
+    def test_every_group_holds_a_single_datatake_and_orbit(self, source_name, year):
+        items = search_for_items(
+            grid_id="50HMH",
+            start_date=date(year, 1, 1),
+            end_date=date(year + 1, 1, 1),
+            additional_query={},
+            source=get_source(source_name),
+            ignore_duplicate_items=False,
+        )
+        assert len(items) > 0
+
+        groups: dict[str, list] = {}
+        for item in items:
+            groups.setdefault(_acquisition_key(item), []).append(item)
+        if not any(len(g) > 1 for g in groups.values()):
+            # Nothing to check rather than nothing wrong: say so out loud, so
+            # a provider retiring its superseded baselines reads as a skip
+            # instead of a silently vacuous pass.
+            pytest.skip(f"{source_name} has no duplicate groups for 50HMH in {year}")
+
+        for key, group in groups.items():
+            if len(group) == 1:
+                continue
+            datatakes = {
+                re.sub(r"_N\d{2}\.\d{2}$", "", p.properties.get("s2:datatake_id", ""))
+                for p in group
+            }
+            assert len(datatakes) == 1, f"{key} merges datatakes {datatakes}"
+
+            orbits = {_extract_relative_orbit(p.properties) for p in group}
+            assert len(orbits) == 1, f"{key} merges orbits {orbits}"
+
+            nodata = [
+                p.properties["s2:nodata_pixel_percentage"]
+                for p in group
+                if p.properties.get("s2:nodata_pixel_percentage") is not None
+            ]
+            if len(nodata) > 1:
+                spread = max(nodata) - min(nodata)
+                assert spread <= self.NODATA_TOLERANCE_PP, (
+                    f"{key} groups items whose nodata differs by {spread:.2f}pp "
+                    f"({nodata}) -- too far apart to be one capture reprocessed"
+                )
 
 
 @pytest.mark.slow
