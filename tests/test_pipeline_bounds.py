@@ -1288,7 +1288,8 @@ class TestBoundsOcmContext:
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert warnings == []
 
-    def test_bounds_first_keeps_only_new_pixels_per_scene(self, monkeypatch):
+    def _stream_first_masks(self, monkeypatch, scene_masks, windows):
+        """Run the FIRST mask-streaming pass over fake scenes."""
         import s2mosaic.pipelines.bounds as bounds_mod
 
         class FakeItemWithId:
@@ -1296,12 +1297,7 @@ class TestBoundsOcmContext:
                 self.id = scene_id
                 self.bbox = (-90.0, -45.0, 90.0, 45.0)
 
-        items = [FakeItemWithId("scene-0"), FakeItemWithId("scene-1")]
-        windows = [(0, 0, 3, 2), (1, 0, 3, 2)]
-        scene_masks = {
-            "scene-0": np.array([[1, 1, 0], [0, 1, 0]], dtype=bool),
-            "scene-1": np.array([[1, 1, 1], [1, 0, 0]], dtype=bool),
-        }
+        items = [FakeItemWithId(f"scene-{i}") for i in range(len(scene_masks))]
 
         def fake_iter_ordered_fetches(items, fetch_fn, max_workers, on_complete=None):
             for i, item in enumerate(items):
@@ -1336,7 +1332,7 @@ class TestBoundsOcmContext:
             lambda scl: (scl.astype(bool), np.ones_like(scl, dtype=bool)),
         )
 
-        kept, dropped = bounds_mod._stream_bounds_combo_masks(
+        return bounds_mod._stream_bounds_combo_masks(
             items_list=items,
             source=MPC,
             bounds_target=(0.0, 0.0, 4.0, 2.0),
@@ -1354,15 +1350,56 @@ class TestBoundsOcmContext:
             show_progress=False,
         )
 
+    def test_bounds_first_stores_masks_unnarrowed(self, monkeypatch):
+        """A later scene keeps the pixels an earlier one already claimed.
+
+        Narrowing each scene's mask to the pixels no earlier scene claimed
+        looks harmless, because ``tile_first`` takes the earliest scene per
+        pixel anyway. It is not: a claim made from the cloud mask can still
+        fail once the bands are read -- the SCL mask comes from SCL classes,
+        not the band data, so it can call a pixel clear where every band
+        reads 0 -- and a narrowed mask has already told every later scene not
+        to look there. The pixel is then stranded as an isolated hole.
+        ``tile_first`` tracks ``filled`` itself, so nothing needs the stored
+        mask to be narrowed.
+        """
+        kept, dropped = self._stream_first_masks(
+            monkeypatch,
+            scene_masks={
+                "scene-0": np.array([[1, 1, 0], [0, 1, 0]], dtype=bool),
+                "scene-1": np.array([[1, 1, 1], [1, 0, 0]], dtype=bool),
+            },
+            windows=[(0, 0, 3, 2), (1, 0, 3, 2)],
+        )
+
         assert dropped == []
         np.testing.assert_array_equal(
             np.asarray(kept[0]),
             np.array([[1, 1, 0, 0], [0, 1, 0, 0]], dtype=bool),
         )
+        # Column 1 row 0 is claimed by scene-0 and stays set here, where the
+        # narrowed mask cleared it.
         np.testing.assert_array_equal(
             np.asarray(kept[1]),
-            np.array([[0, 0, 1, 1], [0, 0, 0, 0]], dtype=bool),
+            np.array([[0, 1, 1, 1], [0, 1, 0, 0]], dtype=bool),
         )
+
+    def test_bounds_first_still_drops_a_scene_that_adds_nothing(self, monkeypatch):
+        # The tracker still decides whether a scene is worth keeping at all;
+        # only the stored mask stopped being narrowed to it. A scene wholly
+        # inside what earlier scenes claimed is not fetched in phase 3.
+        kept, dropped = self._stream_first_masks(
+            monkeypatch,
+            scene_masks={
+                "scene-0": np.array([[1, 1, 1], [1, 1, 1]], dtype=bool),
+                "scene-1": np.array([[1, 0, 0], [0, 1, 0]], dtype=bool),
+            },
+            windows=[(0, 0, 3, 2), (0, 0, 3, 2)],
+        )
+
+        assert dropped == []
+        assert 0 in kept
+        assert 1 not in kept, "a scene covering no new pixel should be skipped"
 
     def test_resampled_bool_mask_applies_user_resolution_coverage(self):
         source = np.array([[1, 0], [0, 1]], dtype=bool)

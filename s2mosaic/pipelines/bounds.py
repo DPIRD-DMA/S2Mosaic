@@ -523,13 +523,16 @@ def _stream_bounds_combo_masks(
 
             col_off, row_off, win_w, win_h = mask_result.target_window
             if mosaic_method == MOSAIC_FIRST:
+                # Worth keeping is decided against the tracker; what gets
+                # stored is not narrowed to it. See the matching comment in
+                # pipelines/grid.py: a narrowed mask forbids every later scene
+                # from a pixel an earlier one claimed, and a claim the cloud
+                # mask made can still fail once the bands are read.
                 tracker_slice = good_pixel_tracker[
                     row_off : row_off + win_h, col_off : col_off + win_w
                 ]
-                new_pixels = combo_block & ~tracker_slice
-                if not new_pixels.any():
+                if not (combo_block & ~tracker_slice).any():
                     continue
-                combo_block = new_pixels
             elif not combo_block.any():
                 # All-cloud scene, so no contribution to mean/percentile either.
                 continue

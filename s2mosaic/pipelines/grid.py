@@ -332,13 +332,25 @@ def stream_mosaic_pipeline(
                 items[scene_idx].id,
             )
             if mosaic_method == MOSAIC_FIRST:
-                new_pixels = combo & ~good_pixel_tracker
-                if not new_pixels.any():
+                # The tracker decides whether this scene is worth keeping, but
+                # the mask stored for it stays un-narrowed. Narrowing it to
+                # ``new_pixels`` would tell every later scene not to look at a
+                # pixel an earlier one claimed -- and a claim can still fail at
+                # read time, because the SCL mask is built from SCL classes
+                # rather than the band data and can call a pixel clear where
+                # every band reads 0. ``tile_first`` then rejects it with no
+                # scene left permitted to fill it, which is the isolated-hole
+                # case. Its own ``filled`` tracker already takes the earliest
+                # scene per pixel and skips the read otherwise, so narrowing
+                # bought nothing that survives here.
+                if not (combo & ~good_pixel_tracker).any():
                     continue
-                combo = new_pixels
             elif not combo.any():
                 continue
             masks[scene_idx] = combo
+            # Unchanged by the above: ``tracker |= combo & ~tracker`` and
+            # ``tracker |= combo`` accumulate the same bits, so the coverage
+            # early-stop fires on exactly the same scene as before.
             good_pixel_tracker |= combo
     finally:
         # Close the prefetch iterator first so its on_complete callbacks
