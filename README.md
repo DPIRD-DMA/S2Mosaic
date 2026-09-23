@@ -237,6 +237,10 @@ If your application already configures the `logging` module, the package logger 
 
 - **SCL is less accurate than OCM.** The L2A Scene Classification Layer is fast (one COG read per scene, no inference) but is consistently less accurate than OCM at identifying clouds and cloud shadow. Use SCL when compute is the bottleneck (CPU-only machines, bulk processing); use OCM when accuracy matters.
 
+- **Microsoft Planetary Computer serves isolated single-band zeros over dark water.** At roughly 0.01-0.04% of valid pixels, one band reads `0` while its neighbours read around DN 1000. 0 is Sentinel-2 L2A's NODATA and never a measurable reflectance, so that band is wrong by about 1000 DN where it lands, which distorts band ratios and spectral indices at those pixels rather than merely darkening them. A pixel is only discarded when *every* requested band reads 0, so these survive: discarding them instead would throw away the good bands to avoid the bad one, and leave a hole no other scene could fill. Element 84's copy of the same acquisitions is unaffected, so `source="AWS"` avoids it entirely.
+
+- **`bands=["visual"]` cannot distinguish black water from no data.** TCI is a quantised 8-bit render, so near-zero reflectance rounds to 0, and ESA also reserves 0 for NODATA. A pixel whose three channels all round to 0 is therefore indistinguishable from an unobserved one and is dropped - about 0.23% of valid pixels on a Perth AOI, all inside water that renders near black anyway. Request the spectral bands instead where dark water matters, since there DN 0 really is NODATA.
+
 ## Contributing
 
 Contributions are welcome. Open an issue or a pull request.
