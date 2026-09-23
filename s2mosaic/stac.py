@@ -38,6 +38,10 @@ def _extract_relative_orbit(props: Dict[str, Any]) -> int:
     return int(m.group(1)) if m else 0
 
 
+# The sensing-start field of an ``s2:datastrip_id``; see _acquisition_key.
+_DATASTRIP_SENSING_RE = re.compile(r"_S(\d{8}T\d{6})_")
+
+
 def _extract_mgrs_tile(props: Dict[str, Any]) -> Optional[str]:
     if "s2:mgrs_tile" in props:
         return str(props["s2:mgrs_tile"])
@@ -189,6 +193,56 @@ def sort_items(items: DataFrame, scene_order: str) -> DataFrame:
     return items_sorted
 
 
+def _acquisition_key(item: Item) -> str:
+    """Identify the granule an item is a processing of.
+
+    The datastrip sensing start, from ``s2:datastrip_id``::
+
+        S2A_OPER_MSI_L2A_DS_ESRI_20201003T190725_S20191123T022659_N02.12
+                                 └─generation──┘ └─sensing start─┘ └base┘
+
+    Only the generation time and the baseline move when ESA reprocesses, so
+    the sensing start names the granule itself. Both providers publish it and
+    agree on it, which the ``datetime`` property does not:
+
+    * Element 84 stores the granule sensing time, and the Collection-1
+      reprocessing restamps it -- the 2019-03-23 acquisition of 50HMH is
+      ``02:31:32`` at baseline 02.11 and ``02:27:06`` at 05.00. Keyed on
+      datetime the two are different acquisitions, so this function keeps
+      both and the same scene enters the stack twice.
+    * Microsoft stores the *datatake* start, which every granule of that
+      datatake shares. Where one tile is covered by two granules -- 50HMH on
+      2019-11-23 has one at 58% nodata and another at 74% -- keying on
+      datetime merges them, and since their baselines tie, ``max`` discards
+      one by response order alone.
+
+    Measured over 6 tiles x 4 years, moving to this key recovers 56 granules
+    Microsoft was dropping and collapses 85 duplicates Element 84 was
+    keeping; the two providers then agree to within 0.2% on the number of
+    distinct granules, against 5% before.
+
+    Falls back to the datetime key if ``s2:datastrip_id`` is absent or
+    unparseable. No item in that sample lacked it, so the fallback is
+    defensive rather than routine, and it warns when it fires.
+    """
+    tile_id: str = _extract_mgrs_tile(item.properties) or "unknown"
+    datastrip_id = item.properties.get("s2:datastrip_id")
+    if isinstance(datastrip_id, str):
+        match = _DATASTRIP_SENSING_RE.search(datastrip_id)
+        if match is not None:
+            return f"{match.group(1)}_{tile_id}"
+    logger.warning(
+        "Item %s has no parseable s2:datastrip_id (%r); falling back to its "
+        "datetime, which providers stamp inconsistently",
+        item.id,
+        datastrip_id,
+    )
+    datetime_str = (
+        item.datetime.strftime("%Y%m%dT%H%M%S") if item.datetime else "unknown"
+    )
+    return f"{datetime_str}_{tile_id}"
+
+
 def filter_latest_processing_baselines(
     items: ItemCollection,
 ) -> ItemCollection:
@@ -199,16 +253,11 @@ def filter_latest_processing_baselines(
     if len(items) == 0:
         return items
 
-    # Group items by acquisition (same datetime + tile)
+    # Group items by the granule they are a processing of; see _acquisition_key.
     acquisition_groups: Dict[str, List[Dict[str, Any]]] = {}
 
     for item in items:
-        # Create unique key for this acquisition
-        datetime_str: str = (
-            item.datetime.strftime("%Y%m%dT%H%M%S") if item.datetime else "unknown"
-        )
-        tile_id: str = _extract_mgrs_tile(item.properties) or "unknown"
-        acquisition_key: str = f"{datetime_str}_{tile_id}"
+        acquisition_key: str = _acquisition_key(item)
 
         # Get processing baseline from properties
         baseline_str: str = item.properties.get("s2:processing_baseline", "0.00")

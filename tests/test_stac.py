@@ -212,6 +212,124 @@ class TestProcessingBaselineFilter:
             },
         )
 
+    def _granule(self, item_id, baseline, datastrip_sensing, dt, tile="50HMH"):
+        """An item as the providers actually publish one.
+
+        ``datastrip_sensing`` names the granule and survives reprocessing;
+        ``dt`` is the datetime property, which does not.
+        """
+        from pystac import Item
+
+        return Item(
+            id=item_id,
+            geometry=None,
+            bbox=None,
+            datetime=dt,
+            properties={
+                "s2:mgrs_tile": tile,
+                "s2:processing_baseline": baseline,
+                "s2:datastrip_id": (
+                    f"S2A_OPER_MSI_L2A_DS_S2RP_20230614T234954_"
+                    f"S{datastrip_sensing}_N{baseline}"
+                ),
+            },
+        )
+
+    def test_a_restamped_reprocessing_is_not_kept_as_a_second_scene(self):
+        """Element 84's Collection-1 restamping must not duplicate a scene.
+
+        The real case: 50HMH on 2019-03-23 is published at 02:31:32 under
+        baseline 02.11 and at 02:27:06 under 05.00 -- the same granule, four
+        minutes apart. Keyed on datetime these look like two acquisitions,
+        so both survive and the same scene enters the stack twice.
+        """
+        from pystac.item_collection import ItemCollection
+
+        items = ItemCollection(
+            [
+                self._granule(
+                    "old",
+                    "02.11",
+                    "20190323T022444",
+                    datetime(2019, 3, 23, 2, 31, 32, tzinfo=timezone.utc),
+                ),
+                self._granule(
+                    "reprocessed",
+                    "05.00",
+                    "20190323T022444",
+                    datetime(2019, 3, 23, 2, 27, 6, tzinfo=timezone.utc),
+                ),
+            ]
+        )
+
+        filtered = filter_latest_processing_baselines(items)
+        assert [item.id for item in filtered] == ["reprocessed"]
+
+    def test_two_granules_of_one_datatake_both_survive(self):
+        """Microsoft's datatake stamping must not discard a granule.
+
+        MPC stamps every granule of a datatake with the datatake start, so
+        50HMH on 2019-11-23 has two granules -- 58% and 74% nodata -- both
+        reading 02:13:51. Keyed on datetime they collide, and because their
+        baselines tie, ``max`` drops one by response order alone. They are
+        different imagery and both belong in the mosaic.
+        """
+        from pystac.item_collection import ItemCollection
+
+        shared = datetime(2019, 11, 23, 2, 13, 51, tzinfo=timezone.utc)
+        items = ItemCollection(
+            [
+                self._granule("granule-a", "02.12", "20191123T022659", shared),
+                self._granule("granule-b", "02.12", "20191123T022134", shared),
+            ]
+        )
+
+        filtered = filter_latest_processing_baselines(items)
+        assert sorted(item.id for item in filtered) == ["granule-a", "granule-b"]
+
+    def test_each_granule_keeps_its_own_latest_baseline(self):
+        # The two behaviours together: two granules, each published twice.
+        from pystac.item_collection import ItemCollection
+
+        shared = datetime(2019, 11, 23, 2, 13, 51, tzinfo=timezone.utc)
+        later = datetime(2019, 11, 23, 2, 27, 8, tzinfo=timezone.utc)
+        items = ItemCollection(
+            [
+                self._granule("a-old", "02.13", "20191123T022659", shared),
+                self._granule("a-new", "05.00", "20191123T022659", later),
+                self._granule("b-old", "02.13", "20191123T022134", shared),
+                self._granule("b-new", "05.00", "20191123T022134", later),
+            ]
+        )
+
+        filtered = filter_latest_processing_baselines(items)
+        assert sorted(item.id for item in filtered) == ["a-new", "b-new"]
+
+    def test_a_missing_datastrip_id_falls_back_to_datetime_and_warns(self, caplog):
+        # No item in the sampled archive lacked s2:datastrip_id, so this path
+        # is defensive; it must still behave and say so rather than crash.
+        from pystac import Item
+        from pystac.item_collection import ItemCollection
+
+        def bare(item_id, baseline):
+            return Item(
+                id=item_id,
+                geometry=None,
+                bbox=None,
+                datetime=datetime(2023, 1, 1, tzinfo=timezone.utc),
+                properties={
+                    "s2:mgrs_tile": "50HMH",
+                    "s2:processing_baseline": baseline,
+                },
+            )
+
+        items = ItemCollection([bare("old", "02.13"), bare("new", "05.00")])
+        with caplog.at_level(logging.WARNING):
+            filtered = filter_latest_processing_baselines(items)
+
+        assert [item.id for item in filtered] == ["new"]
+        assert "no parseable s2:datastrip_id" in caplog.text
+
     def test_malformed_processing_baseline_is_treated_as_lowest(self, caplog):
         from pystac.item_collection import ItemCollection
 
