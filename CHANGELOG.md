@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 
-## [2.0.0b4] - 2026-09-22
+## [2.0.0b4] - 2026-09-23
 
 ### Changed
 - **`percentile` and `median` run on a new kernel, `_quantile_axis0_u16`.** The old one held each tile as `float32` with NaN marking invalid observations, and sorted every pixel with an insertion sort. Both choices cost throughput. An insertion sort branches on data, so it ran one pixel at a time, and the NaN test sat in the innermost loop. The replacement keeps the stack as `uint16` and carries validity in a separate `bool` plane. It sorts with the same pruned selection network the medoid uses, generalised here from the median to any quantile. Hoisting the comparator loop above a block of 128 pixels puts pixels in the innermost loop, which compiles to vector min/max. Timed on its own against fully-valid 2048px tiles, the kernel is 4.6-9.2x faster. A whole `median` tile gains less, roughly 1.2-4x, because the per-scene reads and bookkeeping outside the kernel then dominate. Dropping `float32` also halves the largest working buffer: a 34-scene 4-band 2048px percentile tile peaks at ~1.5 GB, so ~12 GB across the default 8 tile workers.
