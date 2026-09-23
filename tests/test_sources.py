@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -13,7 +15,7 @@ sys.path.insert(0, str(project_root))
 from s2mosaic import SOURCE_AWS, SOURCE_MPC, mosaic
 from s2mosaic.config import VALID_BANDS, validate_inputs
 from s2mosaic.sources import AWS, MPC, VALID_SOURCES, Source, get_source
-from s2mosaic.stac import STAC_RETRY_STATUS_CODES
+from s2mosaic.stac import STAC_RETRY_STATUS_CODES, search_for_items
 
 
 class TestSourceConstants:
@@ -651,3 +653,89 @@ class TestSourceCustomDataclass:
         # source now raise (see TestSearchQueryShape), so this is purely a
         # source-configuration contract.
         assert custom.mgrs_query("50HMH") is None
+
+
+@pytest.mark.slow
+class TestAwsCollectionArchiveCoverage:
+    """Whatever collection AWS points at must cover the archive.
+
+    Element 84 will eventually retire ``sentinel-2-l2a`` in favour of
+    ``sentinel-2-c1-l2a`` (issue #5), the Collection-1 reprocessing to a
+    single ESA baseline. Swapping ``Source.collection_id`` looks like a
+    one-line change -- the MGRS query, ``_extract_mgrs_tile``, the asset map
+    and every property used for scene ordering all work unchanged against
+    c1 -- which is exactly why it needs a guard. The blocker is not the API
+    surface, it is that the backfill is unfinished, and a short collection
+    fails silently: fewer scenes, thinner mosaics, no error.
+
+    Measured 2026-09-23 over 36 tiles worldwide, counting unique
+    acquisitions: 2016 0%, 2017 2.6%, 2018 29%, 2019 71%, 2020 99.6%,
+    2021 99.6%, 2022 7.8%, 2023 onwards ~100%. 2022 is a hole between two
+    complete years, not a backfill frontier.
+
+    Cross-checked against ``sentinel-2-l1c``, the parent product, which is
+    independent of either L2A collection's ingestion: on 50HMH, v1 tracks
+    L1C at ~100% every year while c1 shows the same profile as above, so
+    the shortfall is c1's and not an artifact of the reference. ESA has the
+    products -- the CDSE catalogue lists 150 L2A granules for 50HMH in 2022
+    against Earth Search's 13 -- so this is an Element 84 ingestion backlog
+    rather than missing upstream reprocessing, and should clear in time.
+    Earth Search is not short of the imagery either: its L1C holding for
+    2022 is 145 scenes against CDSE's 146, and the two agree exactly from
+    2019 on, so only the Collection-1 L2A side is behind. (Before 2019
+    Earth Search's own L1C runs 7-20% under ESA, so part of the early
+    shortfall above is not c1's to make up.)
+
+    (``sentinel-2-pre-c1-l2a`` is not the legacy half of a split archive:
+    it holds ~35k items in total, so there is no pre-c1 + c1 union that
+    would add up to v1.)
+
+    This compares the configured collection against ``sentinel-2-l2a``. It
+    is a self-comparison today and passes trivially; it only bites when
+    someone changes ``collection_id``, and then only for years the new
+    collection has not caught up on.
+
+    The threshold is deliberately loose. Neither collection is a perfect
+    reference: they are ingested independently and drift by a few tenths of
+    a percent in both directions, and v1 itself has gaps -- c1 carries ~27k
+    more items than v1 for April 2025 (+6%), and ~11k fewer for April 2026.
+    The shortfall this guards against is an order of magnitude larger than
+    that jitter, so 95% discriminates a real backfill gap without turning
+    month-to-month noise into a red build.
+    """
+
+    REFERENCE_COLLECTION = "sentinel-2-l2a"
+    GRID_ID = "50HMH"
+    # Two independent trip-wires so a partial backfill cannot quietly
+    # silence this: 2018 for the early archive, 2022 for the hole between
+    # two otherwise-complete years. 2024 is a control that must keep passing.
+    YEARS = [2018, 2022, 2024]
+
+    def _count(self, source, year):
+        return len(
+            search_for_items(
+                grid_id=self.GRID_ID,
+                start_date=date(year, 6, 1),
+                end_date=date(year, 9, 1),
+                additional_query={},
+                source=source,
+            )
+        )
+
+    @pytest.mark.parametrize("year", YEARS)
+    def test_configured_collection_matches_the_reference_archive(self, year):
+        reference_source = dataclasses.replace(
+            AWS, collection_id=self.REFERENCE_COLLECTION
+        )
+        reference = self._count(reference_source, year)
+        if reference == 0:
+            pytest.skip(f"reference collection has no {year} scenes for this tile")
+        configured = self._count(AWS, year)
+        coverage = configured / reference
+        assert coverage >= 0.95, (
+            f"{AWS.collection_id} has {configured}/{reference} "
+            f"({coverage:.1%}) of the {self.REFERENCE_COLLECTION} scenes for "
+            f"{self.GRID_ID} in {year}. Scenes missing from the collection are "
+            "dropped silently, so a mosaic over this period would be thinner "
+            "with no error raised. See issue #5."
+        )
