@@ -375,10 +375,14 @@ class TestAcquisitionKeyGroupsOneCapture:
     NODATA_TOLERANCE_PP = 1.0
 
     @pytest.mark.parametrize("source_name", ["MPC", "AWS"])
-    # 2017-2019 is where duplicates concentrate: the Collection-1
-    # reprocessing restamped sensing times there, and both providers still
-    # carry the superseded baselines alongside 05.00.
-    @pytest.mark.parametrize("year", [2017, 2019])
+    # The two providers' duplicate eras barely overlap, so a year has to be
+    # chosen for both rather than for one. On 50HMH, Element 84's cluster in
+    # 2018-21 (Collection-1 restamping sensing times) and Microsoft's in
+    # 2022-23 (the 04.00 to 05.10 reprocessing): 2017 has 4 duplicate groups
+    # on AWS and none at all on MPC, and 2023 has 100 on MPC and none on AWS.
+    # 2021 and 2022 are the years both providers carry superseded baselines,
+    # so every case here exercises something.
+    @pytest.mark.parametrize("year", [2021, 2022])
     def test_every_group_holds_a_single_datatake_and_orbit(self, source_name, year):
         items = search_for_items(
             grid_id="50HMH",
