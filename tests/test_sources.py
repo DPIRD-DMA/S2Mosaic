@@ -668,10 +668,16 @@ class TestAwsCollectionArchiveCoverage:
     surface, it is that the backfill is unfinished, and a short collection
     fails silently: fewer scenes, thinner mosaics, no error.
 
-    Measured 2026-09-23 over 36 tiles worldwide, counting unique
-    acquisitions: 2016 0%, 2017 2.6%, 2018 29%, 2019 71%, 2020 99.6%,
-    2021 99.6%, 2022 7.8%, 2023 onwards ~100%. 2022 is a hole between two
+    Measured 2026-09-23 over 36 tiles worldwide as a share of the parent
+    L1C product: 2016 0%, 2017 2.7%, 2018 39%, 2019 78%, 2020 99.9%,
+    2021 99.9%, 2022 7.8%, 2023 onwards ~100%. 2022 is a hole between two
     complete years, not a backfill frontier.
+
+    Those counts key on the datatake id in ``s2:product_uri``, not on
+    sensing time. The Collection-1 reprocessing restamps an acquisition's
+    sensing time by minutes, so a sensing-time key counts one overpass
+    twice -- enough to push L2A above its own parent product and to
+    understate c1's 2018 coverage by ten points.
 
     Cross-checked against ``sentinel-2-l1c``, the parent product, which is
     independent of either L2A collection's ingestion: on 50HMH, v1 tracks
