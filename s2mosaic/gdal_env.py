@@ -15,11 +15,17 @@ when a process wants these global GDAL defaults.
 
 from __future__ import annotations
 
+import functools
 import os
 from contextlib import contextmanager
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional, TypeVar
 
 import rasterio as rio
+from rasterio.env import get_gdal_config
+
+T = TypeVar("T")
+
+_NON_CACHED_KEY = "CPL_VSIL_CURL_NON_CACHED"
 
 
 # Defaults below were picked from titiler/gdalcubes guidance for remote COG
@@ -108,8 +114,36 @@ def fresh_remote_reads() -> Iterator[None]:
     handle opened here stays uncached after the context exits, and the stale
     blocks are dropped for later opens too. GDAL splits the option on ``:``,
     which rules out naming a single ``https://`` URL; the ``/vsicurl/`` prefix
-    covers every HTTP(S) COG. ``rasterio.Env`` is thread-local, so only opens
-    in the retrying thread are affected, and only while they are retries.
+    covers every HTTP(S) COG.
+
+    Where the setting applies depends on the thread that enters the context.
+    ``rasterio.Env`` sets GDAL config options process-wide from the main
+    thread, so a retry there (``n_workers=1``) turns the cache off for every
+    thread's opens until it exits; that costs speed, not correctness. From any
+    other thread the options are thread-local, so a retry on a streaming
+    worker does not reach a thread pool it starts itself. Wrap the pool's
+    function in ``propagate_remote_read_env`` so its opens skip the cache too.
     """
-    with rio.Env(CPL_VSIL_CURL_NON_CACHED="/vsicurl/"):
+    with rio.Env(**{_NON_CACHED_KEY: "/vsicurl/"}):
         yield
+
+
+def propagate_remote_read_env(fn: Callable[..., T]) -> Callable[..., T]:
+    """Carry the calling thread's ``fresh_remote_reads`` into pool workers.
+
+    Call it on the thread that submits the work, then submit the result.
+    ``_fetch_one_ocm`` needs this: it retries on a streaming worker and opens
+    its bands on a sub-pool. Without it, the sub-pool opens use the cache and
+    every retry replays the truncated block. Returns ``fn`` unchanged when no
+    uncached context is active, so first attempts add no overhead.
+    """
+    value = get_gdal_config(_NON_CACHED_KEY)
+    if not value:
+        return fn
+
+    @functools.wraps(fn)
+    def wrapped(*args: object, **kwargs: object) -> T:
+        with rio.Env(**{_NON_CACHED_KEY: value}):
+            return fn(*args, **kwargs)
+
+    return wrapped

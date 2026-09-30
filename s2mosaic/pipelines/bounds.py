@@ -32,6 +32,7 @@ from rasterio.crs import CRS
 from tqdm.auto import tqdm
 
 from ..frequent_coverage import get_frequent_coverage_for_bbox
+from ..gdal_env import propagate_remote_read_env
 from ..config import (
     CLOUD_MASK_OCM,
     CLOUD_MASK_SCL,
@@ -274,8 +275,11 @@ def _fetch_one_ocm(
                 f"OCM band {band_name} read failed for scene {item.id}"
             ) from exc
 
+    # On a retry, carry the uncached opens into the band threads; see
+    # gdal_env.propagate_remote_read_env.
+    read_band = propagate_remote_read_env(_read_band)
     with ThreadPoolExecutor(max_workers=len(_OCM_BANDS)) as executor:
-        bands = list(executor.map(_read_band, _OCM_BANDS))
+        bands = list(executor.map(read_band, _OCM_BANDS))
     arr = np.stack(bands, axis=0).astype(np.uint16)
     return MaskFetch(arr=arr, target_window=scene_window, crop=crop)
 
