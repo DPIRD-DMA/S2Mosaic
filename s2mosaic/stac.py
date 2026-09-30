@@ -11,7 +11,9 @@ from pystac_client.stac_api_io import StacApiIO
 from urllib3 import Retry
 
 from .config import (
+    CLOUD_MASK_OCM,
     CLOUD_MASK_SCL,
+    DEFAULT_BANDS,
     SCENE_ORDER_NEWEST,
     SCENE_ORDER_OLDEST,
     SCENE_ORDER_VALID_DATA,
@@ -106,22 +108,34 @@ def drop_unreadable_items(
     Runs before ``filter_latest_processing_baselines``: an unreadable 05.00
     item would otherwise shadow the readable 02.xx processing of the same
     acquisition, and the scene would be lost at read time. ``assets`` are
-    canonical band names; ``None`` checks every band asset the item has.
+    canonical band names; ``None`` checks what a default ``mosaic()`` call
+    reads (``DEFAULT_BANDS`` plus the OCM inputs). It never checks every
+    asset on the item: Earth Search items also carry ``*-jp2`` data assets
+    that always point at the requester-pays archive, and nothing reads them.
     """
     # getattr: duck-typed sources (and test fakes) may not declare the field.
     prefixes = getattr(source, "readable_href_prefixes", None)
     if prefixes is None or len(items) == 0:
         return items
 
+    needed = (
+        list(assets)
+        if assets is not None
+        else assets_read(DEFAULT_BANDS, CLOUD_MASK_OCM)
+    )
+    keys = [source.asset_name(a) for a in needed]
+
+    # With explicit assets a missing one will be read, so it is unreadable.
+    # The default is only a guess at what will be read, so absent is not bad.
+    strict = assets is not None
+
     def readable(item: Item) -> bool:
-        keys = (
-            [source.asset_name(a) for a in assets]
-            if assets is not None
-            else [k for k, a in item.assets.items() if "data" in (a.roles or [])]
-        )
         for key in keys:
             asset = item.assets.get(key)
-            if asset is None or not asset.href.startswith(prefixes):
+            if asset is None:
+                if strict:
+                    return False
+            elif not asset.href.startswith(prefixes):
                 return False
         return True
 

@@ -677,7 +677,7 @@ class TestUnreadableItems:
         source = self.FakeAWSSource(ItemCollection([item]))
         assert len(drop_unreadable_items(ItemCollection([item]), source, ["B8A"])) == 0
 
-    def test_default_checks_every_data_asset(self):
+    def test_default_checks_what_a_default_mosaic_reads(self):
         item = self._item(
             "scene",
             "05.00",
@@ -686,6 +686,24 @@ class TestUnreadableItems:
         )
         source = self.FakeAWSSource(ItemCollection([item]))
         assert len(drop_unreadable_items(ItemCollection([item]), source)) == 0
+
+    def test_default_ignores_the_jp2_twin_assets(self):
+        """Every real Earth Search item has ``*-jp2`` data assets on s3://.
+
+        A default that checked every data asset would drop every AWS item.
+        """
+        from pystac import Asset
+
+        item = self._original_with_cogs()
+        for key in self.BANDS:
+            item.add_asset(
+                f"{key}-jp2",
+                Asset(href=f"s3://sentinel-s2-l2a/x/{key}.jp2", roles=["data"]),
+            )
+        source = self.FakeAWSSource(ItemCollection([item]))
+        assert [
+            it.id for it in drop_unreadable_items(ItemCollection([item]), source)
+        ] == [item.id]
 
     def test_dropping_is_logged_with_item_ids(self, caplog):
         items = ItemCollection([self._reprocessed_without_cogs()])
@@ -756,3 +774,14 @@ class TestUnreadableItemsLive:
         ids = [it.id for it in items]
         assert "S2B_35UNT_20190914_1_L2A" not in ids
         assert "S2B_35UNT_20190914_0_L2A" in ids
+
+    def test_default_assets_keep_real_items(self):
+        """Real items carry s3:// ``*-jp2`` twins; the default must not drop them."""
+        items = search_for_items(
+            grid_id="35UNT",
+            start_date=date(2019, 9, 1),
+            end_date=date(2019, 9, 22),
+            additional_query={"eo:cloud_cover": {"lt": 100}},
+            source=get_source("AWS"),
+        )
+        assert len(items) >= 10
