@@ -20,6 +20,8 @@ from dateutil.relativedelta import relativedelta
 from rasterio.errors import RasterioIOError
 from urllib3.exceptions import HTTPError
 
+from .gdal_env import fresh_remote_reads
+
 if TYPE_CHECKING:
     from rasterio.enums import Resampling
 
@@ -147,7 +149,12 @@ def with_scene_retry(
             last_exc: Optional[BaseException] = None
             for attempt in range(attempts):
                 try:
-                    return fn(*args, **kwargs)
+                    if attempt == 0:
+                        return fn(*args, **kwargs)
+                    # A failed read may have left a truncated block in GDAL's
+                    # HTTP cache; retry without it (see fresh_remote_reads).
+                    with fresh_remote_reads():
+                        return fn(*args, **kwargs)
                 except Exception as e:
                     if not _is_retryable_exception(e, retry_exceptions):
                         raise
