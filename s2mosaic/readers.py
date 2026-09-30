@@ -21,7 +21,7 @@ from .gdal_env import fresh_remote_reads
 from .geometry import Bbox
 from .helpers import backoff_delay, get_rasterio_resampling
 from .masking import get_masks, get_scl_masks
-from .sources import Source
+from .sources import Source, apply_boa_offset, boa_add_offset
 from ._types import BoundsItemLike
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,23 @@ MAX_PREWARM_WORKERS = 16
 GridSourceResolver = Callable[[bool], str]
 BoundsSourceResolver = Callable[[bool], str]
 RasterOpener = Callable[[bool], rio.DatasetReader]
+
+
+def _boa_offsets(
+    items: List[Any], href_template: List[Tuple[str, int]]
+) -> List[List[int]]:
+    """Per (scene, asset) DN offset that puts every read on one scale.
+
+    See ``sources.boa_add_offset``. ``getattr``: duck-typed test items may
+    carry no properties, and then get no offset.
+    """
+    return [
+        [
+            boa_add_offset(getattr(item, "properties", None) or {}, asset)
+            for asset, _ in href_template
+        ]
+        for item in items
+    ]
 
 
 def _lazy_signed_url(
@@ -216,11 +233,13 @@ class GridTileReader:
         href_band_indices: List[int],
         s2_scene_size: int,
         rio_resampling: Resampling,
+        offsets: Optional[List[List[int]]] = None,
     ):
         self._cache = cache
         self._href_band_indices = href_band_indices
         self._s2_scene_size = s2_scene_size
         self._rio_resampling = rio_resampling
+        self._offsets = offsets
 
     def __call__(
         self, scene_idx: int, band_idx: int, spec: Tuple[int, int, int, int]
@@ -233,7 +252,7 @@ class GridTileReader:
                 else self._cache.reopen(scene_idx, band_idx)
             )
             try:
-                return _read_tile_window(
+                arr = _read_tile_window(
                     src,
                     self._href_band_indices[band_idx],
                     spec,
@@ -244,6 +263,10 @@ class GridTileReader:
                 last_error = exc
                 if attempt < REMOTE_RASTER_ATTEMPTS - 1:
                     time.sleep(backoff_delay(attempt))
+                continue
+            if self._offsets is None:
+                return arr
+            return apply_boa_offset(arr, self._offsets[scene_idx][band_idx])
         if last_error is None:
             raise RasterioIOError("Remote raster read failed")
         raise last_error
@@ -321,7 +344,13 @@ def make_grid_tile_reader(
     if prewarm:
         _prewarm_sources(sources)
 
-    return GridTileReader(cache, href_band_indices, s2_scene_size, rio_resampling)
+    return GridTileReader(
+        cache,
+        href_band_indices,
+        s2_scene_size,
+        rio_resampling,
+        offsets=_boa_offsets(items, href_template),
+    )
 
 
 def _prewarm_sources(sources: List[List[Callable[..., Any]]]) -> None:
@@ -414,6 +443,7 @@ def make_bounds_tile_reader(
         width=width,
         height=height,
         rio_resampling=rio_resampling,
+        offsets=_boa_offsets(items, href_template),
     )
 
 
@@ -429,8 +459,10 @@ class BoundsTileReader:
         width: int,
         height: int,
         rio_resampling: Any,
+        offsets: Optional[List[List[int]]] = None,
     ):
         self._sources = sources
+        self._offsets = offsets
         self._href_band_indices = href_band_indices
         self._target_crs_obj = target_crs_obj
         self._user_transform = user_transform
@@ -514,7 +546,7 @@ class BoundsTileReader:
                 else self._reopen_source(scene_idx, band_idx)
             )
             try:
-                return src.read(  # type: ignore[no-any-return, unused-ignore]
+                arr: npt.NDArray[Any] = src.read(
                     self._href_band_indices[band_idx],
                     window=window,
                 )
@@ -522,6 +554,10 @@ class BoundsTileReader:
                 last_error = exc
                 if attempt < REMOTE_RASTER_ATTEMPTS - 1:
                     time.sleep(backoff_delay(attempt))
+                continue
+            if self._offsets is None:
+                return arr
+            return apply_boa_offset(arr, self._offsets[scene_idx][band_idx])
         if last_error is None:
             raise RasterioIOError("Remote raster read failed")
         raise last_error
