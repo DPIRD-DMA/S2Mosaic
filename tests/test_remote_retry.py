@@ -13,7 +13,9 @@ import http.server
 import re
 import socketserver
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Iterator, Tuple
 
 import numpy as np
@@ -26,9 +28,12 @@ from rasterio.transform import from_origin
 from s2mosaic.gdal_env import (
     apply_gdal_network_defaults,
     fresh_remote_reads,
+    propagate_remote_read_env,
     restore_gdal_network_env,
 )
+from s2mosaic.geometry import _OCM_BANDS
 from s2mosaic.helpers import SceneFetchError, with_scene_retry
+from s2mosaic.pipelines.bounds import _fetch_one_ocm
 from s2mosaic.readers import GridTileReader, _HandleCache, _retry_open_raster
 
 SIZE = 1024
@@ -257,6 +262,57 @@ class TestSceneRetryRecovers:
                 self._fetcher(server.url(cog[0].name))()
             # every attempt reached the server rather than the cache
             assert server.truncated == 3
+        finally:
+            server.close()
+
+
+@pytest.mark.usefixtures("gdal_defaults")
+class TestSceneRetryFromWorkerThread:
+    """Scene fetches run on streaming workers and read bands on a sub-pool.
+
+    ``rasterio.Env`` entered off the main thread applies to that thread only,
+    so a retry there must carry the uncached setting into its sub-pool
+    workers, or their opens replay the truncated block. The tests above all
+    retry on the main thread, where the setting happens to be process-wide.
+    """
+
+    def test_sub_pool_reads_refetch(self, cog):
+        server = _serve(cog, truncate_first=1)
+        url = server.url(cog[0].name)
+
+        def read(u: str) -> np.ndarray:
+            with rio.open(u) as src:
+                return src.read(1)
+
+        @with_scene_retry(attempts=3, base_delay=0.01)
+        def fetch() -> np.ndarray:
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                return list(pool.map(propagate_remote_read_env(read), [url]))[0]
+
+        try:
+            with ThreadPoolExecutor(max_workers=1) as worker:
+                got = worker.submit(fetch).result()
+            np.testing.assert_array_equal(got, cog[1])
+        finally:
+            server.close()
+
+    def test_bounds_ocm_fetch_recovers(self, cog, monkeypatch):
+        monkeypatch.setattr("s2mosaic.helpers.backoff_delay", lambda *a, **k: 0.0)
+        server = _serve(cog, truncate_first=1)
+        url = server.url(cog[0].name)
+        item = SimpleNamespace(
+            id="scene",
+            assets={b: SimpleNamespace(href=url) for b in _OCM_BANDS},
+        )
+        source = SimpleNamespace(asset_name=lambda b: b, sign=lambda h: h)
+        bounds = (500000.0, 7000000.0 - SIZE * 10, 500000.0 + SIZE * 10, 7000000.0)
+        try:
+            with ThreadPoolExecutor(max_workers=1) as worker:
+                fetched = worker.submit(
+                    _fetch_one_ocm, item, source, bounds, 32650, 10, (0, 0, SIZE, SIZE)
+                ).result()
+            for band in fetched.arr[:, fetched.crop[0], fetched.crop[1]]:
+                np.testing.assert_array_equal(band, cog[1])
         finally:
             server.close()
 
