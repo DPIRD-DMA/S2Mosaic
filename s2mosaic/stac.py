@@ -1,7 +1,7 @@
 import logging
 import re
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import pandas as pd
 from pandas import DataFrame
@@ -10,7 +10,13 @@ from pystac.item_collection import ItemCollection
 from pystac_client.stac_api_io import StacApiIO
 from urllib3 import Retry
 
-from .config import SCENE_ORDER_NEWEST, SCENE_ORDER_OLDEST, SCENE_ORDER_VALID_DATA
+from .config import (
+    CLOUD_MASK_SCL,
+    SCENE_ORDER_NEWEST,
+    SCENE_ORDER_OLDEST,
+    SCENE_ORDER_VALID_DATA,
+)
+from .geometry import _OCM_BANDS
 from .sources import Source
 
 logger = logging.getLogger(__name__)
@@ -84,6 +90,53 @@ def add_item_info(items: ItemCollection) -> DataFrame:
     return items_df
 
 
+def assets_read(bands: Iterable[str], cloud_mask: str) -> List[str]:
+    """Canonical band/asset names a mosaic reads from each scene."""
+    mask = [CLOUD_MASK_SCL] if cloud_mask == CLOUD_MASK_SCL else list(_OCM_BANDS)
+    return list(dict.fromkeys([*bands, *mask]))
+
+
+def drop_unreadable_items(
+    items: ItemCollection,
+    source: Source,
+    assets: Optional[Iterable[str]] = None,
+) -> ItemCollection:
+    """Drop items whose needed assets this source cannot read.
+
+    Runs before ``filter_latest_processing_baselines``: an unreadable 05.00
+    item would otherwise shadow the readable 02.xx processing of the same
+    acquisition, and the scene would be lost at read time. ``assets`` are
+    canonical band names; ``None`` checks every band asset the item has.
+    """
+    # getattr: duck-typed sources (and test fakes) may not declare the field.
+    prefixes = getattr(source, "readable_href_prefixes", None)
+    if prefixes is None or len(items) == 0:
+        return items
+
+    def readable(item: Item) -> bool:
+        keys = (
+            [source.asset_name(a) for a in assets]
+            if assets is not None
+            else [k for k, a in item.assets.items() if "data" in (a.roles or [])]
+        )
+        for key in keys:
+            asset = item.assets.get(key)
+            if asset is None or not asset.href.startswith(prefixes):
+                return False
+        return True
+
+    kept = [it for it in items if readable(it)]
+    if len(kept) != len(items):
+        dropped = [it.id for it in items if not readable(it)]
+        logger.warning(
+            "Dropped %d item(s) whose assets %s cannot read without credentials: %s",
+            len(dropped),
+            source.name,
+            dropped,
+        )
+    return ItemCollection(kept)
+
+
 def search_for_items(
     grid_id: str,
     start_date: date,
@@ -91,6 +144,7 @@ def search_for_items(
     additional_query: Dict[str, Any],
     source: Source,
     ignore_duplicate_items: bool = True,
+    assets: Optional[Iterable[str]] = None,
 ) -> ItemCollection:
     base_query: Dict[str, Any] = {}
     mgrs_filter = source.mgrs_query(grid_id)
@@ -148,6 +202,7 @@ def search_for_items(
             len(items),
             grid_id,
         )
+    items = drop_unreadable_items(items, source, assets)
     if ignore_duplicate_items:
         items = filter_latest_processing_baselines(items)
         logger.info(f"After filtering, {len(items)} items remain")

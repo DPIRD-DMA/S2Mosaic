@@ -36,7 +36,7 @@ from ..readers import (
     should_prewarm_sources,
 )
 from ..sources import Source
-from ..stac import ITEM_COL, add_item_info, search_for_items, sort_items
+from ..stac import ITEM_COL, add_item_info, assets_read, search_for_items, sort_items
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +114,7 @@ def run_grid_pipeline(
         additional_query=additional_query,
         source=source,
         ignore_duplicate_items=request.ignore_duplicate_items,
+        assets=assets_read(bands, request.cloud_mask),
     )
     logger.info(f"Found {len(items)} scenes for grid {request.grid_id}.")
     if len(items) == 0:

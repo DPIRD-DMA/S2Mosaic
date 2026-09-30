@@ -18,6 +18,8 @@ from s2mosaic.stac import (
     ITEM_COL,
     ORBIT_COL,
     _extract_mgrs_tile,
+    assets_read,
+    drop_unreadable_items,
     filter_latest_processing_baselines,
     search_for_items,
     sort_items,
@@ -519,3 +521,238 @@ class TestServerSideQueryFiltering:
             )
         conformance = [w for w in caught if "conform" in str(w.message).lower()]
         assert not conformance, [str(w.message) for w in conformance]
+
+
+class TestUnreadableItems:
+    """Items a source cannot read must not shadow a readable duplicate.
+
+    The real case: Element 84 publishes S2B_35UNT_20190914_1_L2A (baseline
+    05.00) with band assets still pointing at the requester-pays JP2 archive
+    (``s3://sentinel-s2-l2a/...``), while S2B_35UNT_20190914_0_L2A (02.13)
+    has public COGs. Baseline de-duplication used to keep the 05.00 item,
+    every read of it failed without AWS credentials, and the acquisition was
+    lost from the mosaic.
+    """
+
+    SENSING = "20190914T092029"
+    BANDS = ("red", "green", "nir08", "blue", "scl")
+
+    class FakeSearch:
+        def __init__(self, items):
+            self._items = items
+
+        def item_collection(self):
+            return self._items
+
+    class FakeCatalog:
+        def __init__(self, items):
+            self._items = items
+
+        def search(self, **query):
+            return TestUnreadableItems.FakeSearch(self._items)
+
+    class FakeAWSSource:
+        """The AWS asset mapping and readability rule, with a canned catalog."""
+
+        name = "AWS"
+        collection_id = "sentinel-2-l2a"
+
+        def __init__(self, items, prefixes=("https://",)):
+            self._catalog = TestUnreadableItems.FakeCatalog(items)
+            self.readable_href_prefixes = prefixes
+
+        def asset_name(self, canonical):
+            return get_source("AWS").asset_name(canonical)
+
+        def mgrs_query(self, grid_id):
+            return {"grid:code": {"eq": f"MGRS-{grid_id}"}}
+
+        def open_catalog(self, *, stac_io):
+            return self._catalog
+
+    def _item(self, item_id, baseline, href_base, overrides=None):
+        from pystac import Asset
+
+        item = Item(
+            id=item_id,
+            geometry=None,
+            bbox=None,
+            datetime=datetime(2019, 9, 14, 9, 20, 29, tzinfo=timezone.utc),
+            properties={
+                "grid:code": "MGRS-35UNT",
+                "s2:processing_baseline": baseline,
+                "s2:datastrip_id": (
+                    f"S2B_OPER_MSI_L2A_DS_S2RP_20230101T000000_"
+                    f"S{self.SENSING}_N{baseline}"
+                ),
+            },
+        )
+        for key in self.BANDS:
+            href = (overrides or {}).get(key, f"{href_base}/{key}.tif")
+            item.add_asset(key, Asset(href=href, roles=["data"]))
+        return item
+
+    def _reprocessed_without_cogs(self):
+        return self._item(
+            "S2B_35UNT_20190914_1_L2A",
+            "05.00",
+            "s3://sentinel-s2-l2a/tiles/35/U/NT/2019/9/14/1",
+        )
+
+    def _original_with_cogs(self):
+        return self._item(
+            "S2B_35UNT_20190914_0_L2A",
+            "02.13",
+            "https://sentinel-cogs.s3.us-west-2.amazonaws.com/x/S2B_35UNT_20190914_0_L2A",
+        )
+
+    def _search(self, source, assets=("B04", "B03", "B8A")):
+        return search_for_items(
+            grid_id="35UNT",
+            start_date=date(2019, 9, 14),
+            end_date=date(2019, 9, 15),
+            additional_query={},
+            source=source,
+            assets=assets,
+        )
+
+    def test_readable_original_wins_over_unreadable_reprocessing(self):
+        items = ItemCollection(
+            [self._reprocessed_without_cogs(), self._original_with_cogs()]
+        )
+        result = self._search(self.FakeAWSSource(items))
+        assert [it.id for it in result] == ["S2B_35UNT_20190914_0_L2A"]
+
+    def test_without_the_check_dedupe_keeps_the_higher_baseline(self):
+        """Documents the old behaviour the check exists to prevent."""
+        items = ItemCollection(
+            [self._reprocessed_without_cogs(), self._original_with_cogs()]
+        )
+        result = self._search(self.FakeAWSSource(items, prefixes=None))
+        assert [it.id for it in result] == ["S2B_35UNT_20190914_1_L2A"]
+
+    def test_readable_reprocessing_still_wins(self):
+        reprocessed = self._item(
+            "S2B_35UNT_20190914_1_L2A",
+            "05.00",
+            "https://sentinel-cogs.s3.us-west-2.amazonaws.com/x/_1",
+        )
+        items = ItemCollection([self._original_with_cogs(), reprocessed])
+        result = self._search(self.FakeAWSSource(items))
+        assert [it.id for it in result] == ["S2B_35UNT_20190914_1_L2A"]
+
+    def test_unreadable_item_is_dropped_without_dedupe_too(self):
+        items = ItemCollection(
+            [self._reprocessed_without_cogs(), self._original_with_cogs()]
+        )
+        result = search_for_items(
+            grid_id="35UNT",
+            start_date=date(2019, 9, 14),
+            end_date=date(2019, 9, 15),
+            additional_query={},
+            source=self.FakeAWSSource(items),
+            ignore_duplicate_items=False,
+        )
+        assert [it.id for it in result] == ["S2B_35UNT_20190914_0_L2A"]
+
+    def test_only_the_assets_actually_read_are_checked(self):
+        # Only SCL is unreadable: fine for an OCM mosaic, fatal for SCL masking.
+        item = self._item(
+            "scene",
+            "05.00",
+            "https://example.com/scene",
+            overrides={"scl": "s3://sentinel-s2-l2a/scene/SCL.jp2"},
+        )
+        source = self.FakeAWSSource(ItemCollection([item]))
+        ocm = drop_unreadable_items(
+            ItemCollection([item]), source, ["B04", "B03", "B8A"]
+        )
+        scl = drop_unreadable_items(ItemCollection([item]), source, ["B04", "SCL"])
+        assert [it.id for it in ocm] == ["scene"]
+        assert len(scl) == 0
+
+    def test_missing_asset_counts_as_unreadable(self):
+        item = self._original_with_cogs()
+        del item.assets["nir08"]
+        source = self.FakeAWSSource(ItemCollection([item]))
+        assert len(drop_unreadable_items(ItemCollection([item]), source, ["B8A"])) == 0
+
+    def test_default_checks_every_data_asset(self):
+        item = self._item(
+            "scene",
+            "05.00",
+            "https://example.com/scene",
+            overrides={"blue": "s3://sentinel-s2-l2a/scene/B02.jp2"},
+        )
+        source = self.FakeAWSSource(ItemCollection([item]))
+        assert len(drop_unreadable_items(ItemCollection([item]), source)) == 0
+
+    def test_dropping_is_logged_with_item_ids(self, caplog):
+        items = ItemCollection([self._reprocessed_without_cogs()])
+        with caplog.at_level(logging.WARNING, logger="s2mosaic.stac"):
+            drop_unreadable_items(items, self.FakeAWSSource(items), ["B04"])
+        assert "S2B_35UNT_20190914_1_L2A" in caplog.text
+
+    def test_sources_without_the_field_are_unchanged(self):
+        items = ItemCollection([self._reprocessed_without_cogs()])
+
+        class Bare:
+            name = "bare"
+
+        assert drop_unreadable_items(items, Bare(), ["B04"]) is items
+
+    def test_bounds_search_drops_unreadable_items_before_dedupe(self):
+        import s2mosaic.stac_bounds as stac_bounds
+
+        items = ItemCollection(
+            [self._reprocessed_without_cogs(), self._original_with_cogs()]
+        )
+        result = stac_bounds._search_for_items_by_bbox(
+            bbox_4326=(27.0, 50.0, 28.0, 51.0),
+            start_date=date(2019, 9, 14),
+            end_date=date(2019, 9, 15),
+            source=self.FakeAWSSource(items),
+            assets=["B04", "B03", "B8A"],
+        )
+        assert [it.id for it in result] == ["S2B_35UNT_20190914_0_L2A"]
+
+
+class TestSourceReadability:
+    def test_aws_requires_public_https_assets(self):
+        assert get_source("AWS").readable_href_prefixes == ("https://",)
+
+    def test_mpc_is_unchecked(self):
+        # MPC hrefs are https and SAS-signed at read time; nothing to filter.
+        assert get_source("MPC").readable_href_prefixes is None
+
+
+class TestAssetsRead:
+    def test_ocm_adds_its_mask_bands_once(self):
+        assert assets_read(["B04", "B03", "B02", "B08"], "OCM") == [
+            "B04",
+            "B03",
+            "B02",
+            "B08",
+            "B8A",
+        ]
+
+    def test_scl_adds_the_scl_asset(self):
+        assert assets_read(["visual"], "SCL") == ["visual", "SCL"]
+
+
+@pytest.mark.slow
+class TestUnreadableItemsLive:
+    """Pins the real Element 84 item that motivated drop_unreadable_items."""
+
+    def test_35unt_2019_09_14_resolves_to_the_readable_processing(self):
+        items = search_for_items(
+            grid_id="35UNT",
+            start_date=date(2019, 9, 14),
+            end_date=date(2019, 9, 15),
+            additional_query={"eo:cloud_cover": {"lt": 100}},
+            source=get_source("AWS"),
+            assets=assets_read(["B04", "B03", "B02", "B08"], "OCM"),
+        )
+        ids = [it.id for it in items]
+        assert "S2B_35UNT_20190914_1_L2A" not in ids
+        assert "S2B_35UNT_20190914_0_L2A" in ids

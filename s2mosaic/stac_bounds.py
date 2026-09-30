@@ -2,7 +2,7 @@
 
 import logging
 from datetime import date
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Iterable, Optional, Union
 
 from pystac.item_collection import ItemCollection
 from pystac_client.stac_api_io import StacApiIO
@@ -14,6 +14,7 @@ from .sources import Source
 from .stac import (
     STAC_READ_TIMEOUT_SECONDS,
     STAC_RETRY_STATUS_CODES,
+    drop_unreadable_items,
     filter_latest_processing_baselines,
 )
 
@@ -27,6 +28,7 @@ def _search_for_items_by_bbox(
     source: Source,
     additional_query: Optional[Dict[str, Any]] = None,
     ignore_duplicate_items: bool = True,
+    assets: Optional[Iterable[str]] = None,
 ) -> ItemCollection:
     """Search Sentinel-2 L2A items intersecting bbox in EPSG:4326."""
     return _search_for_items_by_geometry(
@@ -36,6 +38,7 @@ def _search_for_items_by_bbox(
         source=source,
         additional_query=additional_query,
         ignore_duplicate_items=ignore_duplicate_items,
+        assets=assets,
     )
 
 
@@ -46,6 +49,7 @@ def _search_for_items_by_aoi(
     source: Source,
     additional_query: Optional[Dict[str, Any]] = None,
     ignore_duplicate_items: bool = True,
+    assets: Optional[Iterable[str]] = None,
 ) -> ItemCollection:
     """Search Sentinel-2 L2A items intersecting a polygon in EPSG:4326."""
     return _search_for_items_by_geometry(
@@ -55,6 +59,7 @@ def _search_for_items_by_aoi(
         source=source,
         additional_query=additional_query,
         ignore_duplicate_items=ignore_duplicate_items,
+        assets=assets,
     )
 
 
@@ -65,6 +70,7 @@ def _search_for_items_by_geometry(
     source: Source,
     additional_query: Optional[Dict[str, Any]] = None,
     ignore_duplicate_items: bool = True,
+    assets: Optional[Iterable[str]] = None,
 ) -> ItemCollection:
     """Search Sentinel-2 L2A items intersecting a bbox or polygon in EPSG:4326."""
     query: Dict[str, Any] = {
@@ -98,6 +104,7 @@ def _search_for_items_by_geometry(
     items = catalog.search(**query).item_collection()
     logger.info(f"Found {len(items)} items for {search_label}")
 
+    items = drop_unreadable_items(items, source, assets)
     if ignore_duplicate_items:
         items = filter_latest_processing_baselines(items)
         logger.info(f"After dedupe, {len(items)} items remain")

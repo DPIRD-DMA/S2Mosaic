@@ -72,6 +72,7 @@ from ..sources import Source
 from ..stac import (
     ITEM_COL,
     add_item_info,
+    assets_read,
     sort_items,
 )
 from ..geometry import (
@@ -291,6 +292,7 @@ def _search_and_sort_bounds_items(
     ignore_duplicate_items: bool,
     scene_order: str,
     scene_sort_fn: Optional[Callable[..., Any]],
+    assets: Optional[List[str]] = None,
 ) -> Tuple[ItemCollection, Any, List[BoundsItemLike]]:
     """Search bounds/AOI scenes and return sorted STAC items."""
     if aoi_4326 is not None:
@@ -301,6 +303,7 @@ def _search_and_sort_bounds_items(
             source=source,
             additional_query=additional_query,
             ignore_duplicate_items=ignore_duplicate_items,
+            assets=assets,
         )
     else:
         items = _search_for_items_by_bbox(
@@ -310,6 +313,7 @@ def _search_and_sort_bounds_items(
             source=source,
             additional_query=additional_query,
             ignore_duplicate_items=ignore_duplicate_items,
+            assets=assets,
         )
     if len(items) == 0:
         raise ValueError(
@@ -738,6 +742,7 @@ def run_bounds_pipeline(
         ignore_duplicate_items=request.ignore_duplicate_items,
         scene_order=request.scene_order,
         scene_sort_fn=request.scene_sort_fn,
+        assets=assets_read(bands, request.cloud_mask),
     )
 
     # Mask resolution depends on provider. OCM is fastest at coarser

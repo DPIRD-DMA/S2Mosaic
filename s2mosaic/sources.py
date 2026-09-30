@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, Optional
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 import pystac_client
 from pystac_client.stac_api_io import StacApiIO
@@ -61,6 +61,11 @@ class Source:
     # Returns ``None`` for providers that don't expose a single-field MGRS
     # property (callers then rely on the ``intersects`` geometry filter alone).
     _mgrs_query: Optional[Callable[[str], Dict[str, Any]]] = None
+    # Asset href prefixes this source can read without credentials. Items
+    # whose needed assets fall outside them are dropped before de-duplication
+    # (see ``stac.drop_unreadable_items``), so a readable processing of the
+    # same acquisition wins instead. ``None`` disables the check.
+    readable_href_prefixes: Optional[Tuple[str, ...]] = None
 
     def asset_name(self, canonical: str) -> str:
         return self.band_assets.get(canonical, canonical)
@@ -192,6 +197,12 @@ AWS = Source(
     },
     default_block_size=512,
     _mgrs_query=_aws_mgrs_query,
+    # Element 84 occasionally publishes an item before its COG conversion.
+    # Its assets then point at the requester-pays JP2 archive
+    # (``s3://sentinel-s2-l2a/...``), and every read fails without AWS
+    # credentials. Seen on S2B_35UNT_20190914_1_L2A (baseline 05.00), whose
+    # 02.13 processing has normal public COGs.
+    readable_href_prefixes=("https://",),
 )
 
 
