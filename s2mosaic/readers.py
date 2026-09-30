@@ -17,6 +17,7 @@ from rasterio.vrt import WarpedVRT
 from rasterio.windows import Window
 
 from .config import CLOUD_MASK_SCL, MOSAIC_FIRST
+from .gdal_env import fresh_remote_reads
 from .geometry import Bbox
 from .helpers import backoff_delay, get_rasterio_resampling
 from .masking import get_masks, get_scl_masks
@@ -66,8 +67,15 @@ def _retry_open_raster(
     """Open a remote raster with retry/backoff and optional source refresh."""
     last_error: Optional[RasterioIOError] = None
     for attempt in range(REMOTE_RASTER_ATTEMPTS):
+        fresh = refresh or attempt > 0
         try:
-            return open_source(refresh or attempt > 0)
+            if not fresh:
+                return open_source(False)
+            # Refreshes follow a failed read or open, which may have left a
+            # truncated block in GDAL's HTTP cache; open without it. The
+            # handle stays uncached after the context exits.
+            with fresh_remote_reads():
+                return open_source(True)
         except RasterioIOError as exc:
             last_error = exc
             if attempt < REMOTE_RASTER_ATTEMPTS - 1:

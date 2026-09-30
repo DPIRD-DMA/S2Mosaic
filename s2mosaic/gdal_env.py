@@ -16,7 +16,10 @@ when a process wants these global GDAL defaults.
 from __future__ import annotations
 
 import os
-from typing import Optional
+from contextlib import contextmanager
+from typing import Iterator, Optional
+
+import rasterio as rio
 
 
 # Defaults below were picked from titiler/gdalcubes guidance for remote COG
@@ -85,3 +88,28 @@ def restore_gdal_network_env(snapshot: GdalEnvSnapshot) -> None:
             os.environ.pop(key, None)
         else:
             os.environ[key] = value
+
+
+@contextmanager
+def fresh_remote_reads() -> Iterator[None]:
+    """Open remote rasters without GDAL's ``/vsicurl/`` region cache.
+
+    Use around a retry. When a range response is cut short (a flaky network
+    closing the connection mid-body), GDAL keeps the short block in its
+    process-wide ``/vsicurl/`` cache, and every later open of the same URL is
+    served that block without a new request. A plain reopen therefore fails
+    identically however many times it is retried -- libtiff reports the same
+    ``got N bytes, expected M`` on each attempt. Reproduced against a local
+    server that truncates responses: with stock GDAL settings and with
+    ``GDAL_NETWORK_DEFAULTS``, retries issue no requests and never recover;
+    under this context a retry refetches and returns identical pixels.
+
+    ``CPL_VSIL_CURL_NON_CACHED`` is consulted when a file is opened, so a
+    handle opened here stays uncached after the context exits, and the stale
+    blocks are dropped for later opens too. GDAL splits the option on ``:``,
+    which rules out naming a single ``https://`` URL; the ``/vsicurl/`` prefix
+    covers every HTTP(S) COG. ``rasterio.Env`` is thread-local, so only opens
+    in the retrying thread are affected, and only while they are retries.
+    """
+    with rio.Env(CPL_VSIL_CURL_NON_CACHED="/vsicurl/"):
+        yield

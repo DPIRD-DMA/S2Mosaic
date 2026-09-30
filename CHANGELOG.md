@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 
 
+## [Unreleased]
+
+### Fixed
+- **Retries now refetch after a truncated read instead of replaying GDAL's cache.** When a range response was cut short mid-body, GDAL kept the short block in its process-wide `/vsicurl/` cache, and every reopen of the same URL was served that block without a new request. `with_scene_retry` and the tile readers' reopen path therefore failed identically however many attempts they made; on a congested network this showed up as scenes dropped with libtiff reporting the same `got N bytes, expected M` on every attempt, while the same file downloaded fine with curl. A local server that truncates range responses reproduces it with stock GDAL settings as well as `GDAL_NETWORK_DEFAULTS`: the retries send no requests at all. Retries now open under the new `gdal_env.fresh_remote_reads()`, which sets `CPL_VSIL_CURL_NON_CACHED` for the retrying thread, so they refetch. The setting is read at open, so a tile-reader handle reopened under it stays uncached after the context exits, and later ordinary opens see clean data. `tests/test_remote_retry.py` covers the scene retry, the refresh open and `GridTileReader`; without the fix its recovery tests fail with the same repeated byte count seen in the field.
+
+
 ## [2.0.0b4] - 2026-09-29
 
 ### Changed
