@@ -1,17 +1,20 @@
 """Imagery provider abstraction.
 
-s2mosaic supports multiple STAC sources for Sentinel-2 L2A. Each ``Source``
-captures the per-provider knowledge needed to search, sign, and read assets:
+s2mosaic supports multiple STAC sources for Sentinel-2 surface reflectance.
+Each ``Source`` captures the per-provider knowledge needed to search, sign,
+and read assets:
 
 - ``stac_url``: STAC API root
-- ``collection_id``: L2A collection name on this provider
+- ``collection_id``: L2A collection name on this provider, plus
+  ``extra_collection_ids`` for providers that split it (DEA: one per
+  satellite)
 - ``sign(href)``: return a usable HTTPS URL (SAS-signed for MPC, identity
-  for AWS public buckets)
+  for AWS public buckets, ``s3://`` rewritten to HTTPS for DEA)
 - ``asset_name(canonical)``: map s2mosaic's canonical band names
   (``B04``, ``SCL`` ...) to the provider's STAC asset key
-- ``mgrs_query(grid_id)``: build a STAC ``query`` clause that filters to a
-  single MGRS tile, or ``None`` if the provider doesn't expose one (callers
-  then rely on ``intersects`` alone)
+- ``mgrs_query(grid_id)``: build a search clause that filters to a single
+  MGRS tile, in the source's ``search_extension`` dialect, or ``None`` if the
+  provider doesn't expose one (callers then rely on ``intersects`` alone)
 - ``open_catalog(stac_io)``: open the STAC client; provider-specific options
   (e.g. MPC's ``sign_inplace`` modifier) live here
 """
@@ -21,7 +24,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Iterable, Optional, Tuple
 
 import numpy as np
 import numpy.typing as npt
@@ -32,6 +35,13 @@ logger = logging.getLogger(__name__)
 
 SOURCE_MPC = "MPC"
 SOURCE_AWS = "AWS"
+SOURCE_DEA = "DEA"
+
+# How a source's STAC API takes property filters: the Query extension
+# (``query={"eo:cloud_cover": {"lt": 50}}``) or the Filter extension with
+# CQL2 JSON. MPC and Element 84 implement only the first, DEA only the second.
+SEARCH_QUERY = "query"
+SEARCH_CQL2 = "cql2-json"
 
 
 def _identity_sign(href: str) -> str:
@@ -106,6 +116,25 @@ def apply_boa_offset(arr: npt.NDArray[Any], offset: int) -> npt.NDArray[Any]:
     return out.astype(arr.dtype)
 
 
+def normalise_signed_dn(
+    arr: npt.NDArray[Any], nodata: Optional[float]
+) -> npt.NDArray[Any]:
+    """Put a signed-integer read on the package's uint16, 0-is-nodata scale.
+
+    DEA stores reflectance as int16 with nodata -999; the rest of the
+    pipeline assumes uint16 with 0 as nodata, and a bare ``astype(uint16)``
+    would wrap -999 to 64537. The raster's ``nodata`` value maps to 0; any
+    other value <= 0 is a real observation of reflectance <= 0 and becomes 1,
+    as ``apply_boa_offset`` does for the same case. Unsigned arrays (every
+    MPC and Element 84 asset) are returned unchanged.
+    """
+    if arr.dtype.kind != "i":
+        return arr
+    valid = arr != nodata if nodata is not None else np.ones(arr.shape, dtype=bool)
+    out = np.where(valid, np.maximum(arr, 1), 0)
+    return out.astype(np.uint16)
+
+
 @dataclass(frozen=True)
 class Source:
     name: str
@@ -130,9 +159,33 @@ class Source:
     # (see ``stac.drop_unreadable_items``), so a readable processing of the
     # same acquisition wins instead. ``None`` disables the check.
     readable_href_prefixes: Optional[Tuple[str, ...]] = None
+    # Further collections searched alongside ``collection_id``.
+    extra_collection_ids: Tuple[str, ...] = ()
+    # ``SEARCH_QUERY`` or ``SEARCH_CQL2``; see ``stac.search_params``.
+    search_extension: str = SEARCH_QUERY
+    # CQL2 clauses AND-ed into every search (``SEARCH_CQL2`` sources only).
+    base_filters: Tuple[Dict[str, Any], ...] = ()
+    # Lookup table translating the asset read for ``cloud_mask="SCL"`` into
+    # Sentinel-2 SCL class codes, for providers whose own classification
+    # layer uses different codes. ``None`` means the asset already is SCL.
+    scl_lut: Optional[Tuple[int, ...]] = None
+    # Canonical bands this source cannot serve; rejected at validation.
+    unsupported_bands: FrozenSet[str] = frozenset()
+
+    @property
+    def collections(self) -> Tuple[str, ...]:
+        return (self.collection_id, *self.extra_collection_ids)
 
     def asset_name(self, canonical: str) -> str:
         return self.band_assets.get(canonical, canonical)
+
+    def to_scl(self, arr: npt.NDArray[Any]) -> npt.NDArray[Any]:
+        """Translate a ``cloud_mask="SCL"`` read into SCL class codes."""
+        if self.scl_lut is None:
+            return arr
+        lut = np.asarray(self.scl_lut, dtype=np.uint8)
+        scl: npt.NDArray[np.uint8] = lut[np.clip(arr, 0, len(lut) - 1)]
+        return scl
 
     def block_size(self, canonical: str) -> int:
         """Internal COG block size for ``canonical`` band on this source."""
@@ -158,6 +211,10 @@ class Source:
 
     def open_catalog(self, stac_io: StacApiIO) -> pystac_client.Client:
         client = pystac_client.Client.open(self.stac_url, stac_io=stac_io)
+        if self.search_extension != SEARCH_QUERY:
+            # DEA declares ``item-search#filter`` itself and rejects ``query``
+            # outright, so there is nothing to assert.
+            return client
         # Every search this package issues carries ``query`` -- the MGRS tile
         # filter in grid mode, and ``eo:cloud_cover`` everywhere. MPC's
         # landing page declares only four conformance classes and omits
@@ -270,7 +327,75 @@ AWS = Source(
 )
 
 
-_SOURCES: Dict[str, Source] = {SOURCE_MPC: MPC, SOURCE_AWS: AWS}
+DEA_BUCKET_S3 = "s3://dea-public-data/"
+DEA_BUCKET_HTTPS = "https://dea-public-data.s3.ap-southeast-2.amazonaws.com/"
+
+
+def _dea_sign(href: str) -> str:
+    # DEA's STAC lists assets by S3 URI. The bucket is public, so its HTTPS
+    # endpoint reads anonymously with no GDAL AWS configuration.
+    if href.startswith(DEA_BUCKET_S3):
+        return DEA_BUCKET_HTTPS + href[len(DEA_BUCKET_S3) :]
+    return href
+
+
+def _dea_mgrs_filter(grid_id: str) -> Dict[str, Any]:
+    return {"op": "=", "args": [{"property": "odc:region_code"}, grid_id]}
+
+
+# DEA's fmask classes as SCL codes, so ``cloud_mask="SCL"`` reuses the SCL
+# masking unchanged. fmask: 0 nodata, 1 clear, 2 cloud, 3 cloud shadow,
+# 4 snow, 5 water. Clear maps to 4 (vegetation), one of SCL's clear classes;
+# SCL masks snow and water as clear too. Codes fmask doesn't define map to
+# 7 (unclassified), which the SCL mask excludes, rather than to nodata.
+_FMASK_TO_SCL: Tuple[int, ...] = (0, 4, 9, 3, 11, 6) + (7,) * 250
+
+# Geoscience Australia's Digital Earth Australia Sentinel-2 ARD, collection 3.
+# GA processes ESA's L1C with its own atmospheric, BRDF and terrain
+# correction, so there is no Sen2Cor L2A product behind it and no SCL, TCI,
+# AOT, WVP or B09 asset. Bands are NBART (BRDF + terrain corrected)
+# reflectance * 10000, int16 with nodata -999 and no baseline offset.
+# Coverage is Australia only. Each satellite is its own collection, and each
+# acquisition is published as ``nrt``, then ``interim``, then ``final`` until
+# the last replaces them. Only ``final`` is searched.
+DEA = Source(
+    name=SOURCE_DEA,
+    stac_url="https://explorer.dea.ga.gov.au/stac",
+    collection_id="ga_s2am_ard_3",
+    extra_collection_ids=("ga_s2bm_ard_3", "ga_s2cm_ard_3"),
+    sign=_dea_sign,
+    band_assets={
+        "B01": "nbart_coastal_aerosol",
+        "B02": "nbart_blue",
+        "B03": "nbart_green",
+        "B04": "nbart_red",
+        "B05": "nbart_red_edge_1",
+        "B06": "nbart_red_edge_2",
+        "B07": "nbart_red_edge_3",
+        "B08": "nbart_nir_1",
+        "B8A": "nbart_nir_2",
+        "B11": "nbart_swir_2",
+        "B12": "nbart_swir_3",
+        # Read for cloud_mask="SCL"; translated through ``scl_lut``.
+        "SCL": "oa_fmask",
+    },
+    # Every DEA asset uses 512-pixel blocks, the default.
+    default_block_size=512,
+    _mgrs_query=_dea_mgrs_filter,
+    readable_href_prefixes=(DEA_BUCKET_S3,),
+    search_extension=SEARCH_CQL2,
+    base_filters=(
+        {"op": "=", "args": [{"property": "dea:dataset_maturity"}, "final"]},
+    ),
+    scl_lut=_FMASK_TO_SCL,
+    # SCL is readable as a cloud mask but not as an output band: the asset
+    # behind it is fmask, and returning translated fmask labelled SCL would
+    # misdescribe it.
+    unsupported_bands=frozenset({"visual", "SCL", "AOT", "WVP", "B09"}),
+)
+
+
+_SOURCES: Dict[str, Source] = {SOURCE_MPC: MPC, SOURCE_AWS: AWS, SOURCE_DEA: DEA}
 VALID_SOURCES = frozenset(_SOURCES)
 
 

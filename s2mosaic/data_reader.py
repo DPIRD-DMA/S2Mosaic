@@ -6,7 +6,7 @@ import rasterio as rio
 from rasterio.windows import Window
 
 from .helpers import with_scene_retry
-from .sources import Source
+from .sources import Source, normalise_signed_dn
 
 
 @with_scene_retry()
@@ -26,15 +26,21 @@ def get_full_band(
         window_cls: Any = Window
         full_window = window_cls(0, 0, src.width, src.height)
         if is_tci:
-            array = src.read(
-                [1, 2, 3],
-                window=full_window,
-                out_shape=(3, target_side, target_side),
+            array = normalise_signed_dn(
+                src.read(
+                    [1, 2, 3],
+                    window=full_window,
+                    out_shape=(3, target_side, target_side),
+                ),
+                src.nodata,
             ).astype(np.uint16)
         else:
-            array = src.read(
-                1,
-                window=full_window,
-                out_shape=(target_side, target_side),
+            array = normalise_signed_dn(
+                src.read(
+                    1,
+                    window=full_window,
+                    out_shape=(target_side, target_side),
+                ),
+                src.nodata,
             ).astype(np.uint16)[None, :, :]
         return array, src.profile.copy()

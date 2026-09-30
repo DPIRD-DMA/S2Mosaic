@@ -11,7 +11,7 @@ except ImportError:
 from .coordinator import mosaic
 from .geometry import Aoi, Bbox
 from .helpers import SceneFetchError
-from .sources import SOURCE_AWS, SOURCE_MPC
+from .sources import SOURCE_AWS, SOURCE_DEA, SOURCE_MPC
 
 
 def set_log_level(level: Union[int, str] = _logging.INFO) -> None:
@@ -45,6 +45,7 @@ __all__ = [
     "set_log_level",
     "SceneFetchError",
     "SOURCE_AWS",
+    "SOURCE_DEA",
     "SOURCE_MPC",
     "__version__",
 ]

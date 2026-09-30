@@ -114,7 +114,7 @@ def get_scl_masks(
     arr, _ = get_full_band(
         href=href, source=source, res=user_resolution, asset_name="SCL"
     )
-    return compute_masks_from_scl(arr)
+    return compute_masks_from_scl(source.to_scl(arr))
 
 
 def get_masks(

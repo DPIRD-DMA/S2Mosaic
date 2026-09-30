@@ -17,7 +17,7 @@ S2Mosaic is a Python package for creating cloud-free mosaics from Sentinel-2 sat
 - Multiple mosaic creation methods: mean, arbitrary percentile, median, medoid (per pixel, the scene closest to the per-band median, which preserves real observed spectra), or first valid pixel.
 - Support for different spectral bands, including visual (RGB) composites.
 - Cloud masking with OmniCloudMask, plus an SCL option that skips inference for cheaper bulk processing.
-- STAC source selection: Microsoft Planetary Computer by default, or Element 84 Earth Search on AWS Open Data.
+- STAC source selection: Microsoft Planetary Computer by default, Element 84 Earth Search on AWS Open Data, or Digital Earth Australia's Sentinel-2 NBART for Australia.
 - Tile-streaming pipeline keeps peak memory low even for full-MGRS percentile mosaics over many scenes. The aggregation is parallelised across ~2048-pixel tiles, so only a handful of tile-sized buffers live in RAM at a time.
 - Resilient to transient COG read failures. Per-scene fetches retry with exponential backoff, and a scene that still fails is logged and skipped so one bad asset doesn't abort the whole mosaic.
 - Export mosaics as GeoTIFF files or return as NumPy arrays.
@@ -29,6 +29,28 @@ See [CHANGELOG.md](https://github.com/DPIRD-DMA/S2Mosaic/blob/main/CHANGELOG.md)
 ## Choosing a cloud mask
 
 S2Mosaic uses OmniCloudMask (OCM) by default for cloud and cloud-shadow masking. OCM runs much faster when an NVIDIA GPU or MPS accelerator is available. When compute is limited or throughput matters more than mask quality, pass `cloud_mask="SCL"` to skip the deep-learning model and use the Sentinel-2 L2A Scene Classification Layer instead.
+
+## Choosing a source
+
+`source` selects where scenes come from. All three return spectral bands on the same `reflectance * 10000` scale, so switching source doesn't change what the numbers mean.
+
+| `source` | Provider | Coverage | Product | Notes |
+|---|---|---|---|---|
+| `"MPC"` (default) | Microsoft Planetary Computer | Global | ESA L2A (Sen2Cor) | SAS-signed URLs |
+| `"AWS"` | Element 84 Earth Search | Global | ESA L2A (Sen2Cor) | Public COGs, no auth |
+| `"DEA"` | Digital Earth Australia (Geoscience Australia) | Australia only | NBART: BRDF- and terrain-corrected surface reflectance | Public COGs, no auth, `final` datasets only |
+
+DEA builds its product from ESA's L1C with its own atmospheric, BRDF and terrain correction, so NBART values sit close to, but not exactly on, the L2A values for the same acquisition, and it has no Sen2Cor outputs. On DEA, `cloud_mask="SCL"` reads DEA's fmask layer instead (same 20 m grid, classes translated to their SCL equivalents), and the `visual`, `SCL`, `AOT`, `WVP` and `B09` bands are unavailable.
+
+```python
+array, profile = mosaic(
+    grid_id="50HMH",
+    start_year=2023,
+    duration_months=2,
+    source="DEA",
+    cloud_mask="SCL",  # fmask on DEA
+)
+```
 
 ## Try in Colab
 
@@ -166,8 +188,8 @@ Every `mosaic()` parameter, with defaults shown in parentheses.
 
 ### Scene selection
 
-- `source` (`"MPC"`): STAC provider. `"MPC"` (default) uses Microsoft Planetary Computer with SAS-signed URLs. `"AWS"` uses Element 84's Earth Search on AWS Open Data: Sentinel-2 L2A scenes, public COGs, no auth, no SAS rotation. Both return spectral bands on one scale, `reflectance * 10000`: from processing baseline 04.00 (January 2022) ESA adds 1000 to every spectral DN, Element 84 removes it before publishing, and S2Mosaic removes it from MPC scenes at read time. A 04.00+ DN at or below 1000 (reflectance <= 0, e.g. dark water) reads as 1, not 0, so it stays a valid observation; 0 is always nodata.
-- `additional_query` (`{"eo:cloud_cover": {"lt": 100}}`): extra STAC query filters, e.g. `{"eo:cloud_cover": {"lt": 80}}`.
+- `source` (`"MPC"`): STAC provider. `"MPC"` (default) uses Microsoft Planetary Computer with SAS-signed URLs. `"AWS"` uses Element 84's Earth Search on AWS Open Data: Sentinel-2 L2A scenes, public COGs, no auth, no SAS rotation. `"DEA"` uses Digital Earth Australia's Sentinel-2 NBART (Australia only; see [Choosing a source](#choosing-a-source)). All return spectral bands on one scale, `reflectance * 10000`: from processing baseline 04.00 (January 2022) ESA adds 1000 to every spectral DN, Element 84 removes it before publishing, and S2Mosaic removes it from MPC scenes at read time. A 04.00+ DN at or below 1000 (reflectance <= 0, e.g. dark water) reads as 1, not 0, so it stays a valid observation; 0 is always nodata.
+- `additional_query` (`{"eo:cloud_cover": {"lt": 100}}`): extra STAC query filters in the Query extension's form, e.g. `{"eo:cloud_cover": {"lt": 80}}`. DEA's API only accepts CQL2, so for `source="DEA"` the filter is translated; the operators `eq`, `neq`, `lt`, `lte`, `gt`, `gte` and `in` are supported, and any other raises instead of being dropped. Property names are the provider's own (DEA's cloud cover is fmask's, as `eo:cloud_cover`).
 - `min_coverage_fraction` (`None`): optional scene-edge trimming. When set, drops pixels covered by fewer than this fraction of the maximum scene-overlap count in the requested area. The default keeps the full requested coverage.
 - `ignore_duplicate_items` (`True`): drop duplicate acquisitions, keeping the latest processing baseline.
 
@@ -178,7 +200,7 @@ Every `mosaic()` parameter, with defaults shown in parentheses.
 
 ### Cloud masking
 
-- `cloud_mask` (`"OCM"`): mask provider. `"OCM"` runs the OmniCloudMask deep-learning model on R+G+NIR bands (most accurate); `"SCL"` reads the L2A Scene Classification Layer (much cheaper, lower accuracy).
+- `cloud_mask` (`"OCM"`): mask provider. `"OCM"` runs the OmniCloudMask deep-learning model on R+G+NIR bands (most accurate); `"SCL"` reads the L2A Scene Classification Layer (much cheaper, lower accuracy). On `source="DEA"`, which has no SCL, `"SCL"` reads DEA's fmask layer.
 - `ocm_batch_size` (`1`): OCM inference batch size. Only used with `cloud_mask="OCM"`.
 - `ocm_inference_dtype` (`"fp32"`): OCM inference dtype. Defaults to `"fp32"`, which runs everywhere and is the fastest option on CPU. On GPU, use `"fp16"` for ~2× speedup and lower VRAM, or `"bf16"` on hardware that supports it. Only used with `cloud_mask="OCM"`.
 
@@ -281,6 +303,7 @@ S2Mosaic is built on top of:
 - [Sentinel-2](https://sentiwiki.copernicus.eu/web/s2-products): ESA's Copernicus Earth-observation mission, the imagery source.
 - [Element 84 Earth Search](https://earth-search.aws.element84.com/): optional public AWS Open Data access to Sentinel-2 L2A COGs.
 - [Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/): the default STAC catalog and signed access to the Sentinel-2 L2A archive.
+- [Digital Earth Australia](https://www.dea.ga.gov.au/): Geoscience Australia's Sentinel-2 NBART analysis-ready data and fmask, used by `source="DEA"`.
 - [OmniCloudMask](https://github.com/DPIRD-DMA/OmniCloudMask): the deep-learning cloud and cloud-shadow mask used by the default `cloud_mask="OCM"` provider.
 - L2A Scene Classification Layer (SCL): the published per-scene classification used by the optional `cloud_mask="SCL"` provider.
 - [rasterio](https://rasterio.readthedocs.io/), [GeoPandas](https://geopandas.org/), [pystac-client](https://pystac-client.readthedocs.io/), [OpenCV](https://opencv.org/), [Numba](https://numba.pydata.org/), and [multiclean](https://github.com/DPIRD-DMA/multiclean): supporting libraries for I/O (including per-scene `WarpedVRT` reprojection), geometry, search, image ops, percentile aggregation, and mask post-processing.

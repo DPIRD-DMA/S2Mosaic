@@ -20,7 +20,7 @@ from ..geometry import (
 )
 from .._types import BoundsItemLike, MaskFetch, SceneWindow
 from ..helpers import get_rasterio_resampling, with_scene_retry
-from ..sources import Source
+from ..sources import Source, normalise_signed_dn
 
 
 def _read_band_at_target_window(
@@ -60,7 +60,7 @@ def _read_band_at_target_window(
             height=target_height,
             resampling=rio_resampling,
         ) as vrt:
-            return vrt.read(band_idx)  # type: ignore[no-any-return]
+            return normalise_signed_dn(vrt.read(band_idx), vrt.nodata)
 
 
 @with_scene_retry()

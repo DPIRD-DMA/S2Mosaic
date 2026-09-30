@@ -240,7 +240,7 @@ def validate_inputs(
 ) -> None:
     from pyproj import CRS as PyprojCRS
 
-    from .sources import VALID_SOURCES
+    from .sources import VALID_SOURCES, get_source
 
     if source not in VALID_SOURCES:
         raise ValueError(
@@ -343,6 +343,13 @@ def validate_inputs(
         if band not in VALID_BANDS:
             raise ValueError(
                 f"Invalid band: {band}, must be one of {sorted(VALID_BANDS)}"
+            )
+    unsupported = get_source(source).unsupported_bands
+    for band in bands:
+        if band in unsupported:
+            raise ValueError(
+                f"Band {band} is not available from source {source!r}; "
+                f"it serves {sorted(VALID_BANDS - unsupported)}"
             )
     if "visual" in bands and len(bands) > 1:
         raise ValueError("Cannot use visual band with other bands, must be used alone")
