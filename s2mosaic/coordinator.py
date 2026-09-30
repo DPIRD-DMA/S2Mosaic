@@ -242,6 +242,8 @@ def mosaic(
         source (str, optional): STAC imagery source. ``"MPC"`` (default) uses
             Microsoft Planetary Computer (SAS-signed URLs); ``"AWS"`` uses
             Element 84 Earth Search on AWS Open Data (public S3, no auth).
+            Both return spectral bands as ``reflectance * 10000``; the +1000
+            offset of processing baseline 04.00+ is removed at read time.
             Defaults to "MPC".
         additional_query (Dict[str, Any], optional): Additional query parameters for STAC API.
             Defaults to {"eo:cloud_cover": {"lt": 100}}.

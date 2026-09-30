@@ -23,6 +23,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
+import numpy as np
+import numpy.typing as npt
 import pystac_client
 from pystac_client.stac_api_io import StacApiIO
 
@@ -40,6 +42,68 @@ def _mpc_sign(href: str) -> str:
     import planetary_computer
 
     return planetary_computer.sign(href)  # type: ignore[no-any-return, unused-ignore]
+
+
+# From processing baseline 04.00 (25 Jan 2022) ESA encodes L2A reflectance as
+# ``DN = reflectance * 10000 - BOA_ADD_OFFSET`` with an offset of -1000, so
+# zero reflectance reads DN 1000; earlier baselines have no offset. Only the
+# spectral bands carry it: SCL, AOT, WVP and the 8-bit TCI are unaffected.
+#
+# Microsoft serves those DNs as-is and publishes no offset metadata, so the
+# baseline is the only signal. Element 84 removes the offset itself and flags
+# the item ``earthsearch:boa_offset_applied``; its ``raster:bands`` still say
+# ``offset: -0.1``, which describes the original product, not its pixels.
+BOA_OFFSET_MIN_BASELINE = 4.0
+BOA_ADD_OFFSET = -1000
+BOA_OFFSET_BANDS = frozenset(
+    {
+        "B01",
+        "B02",
+        "B03",
+        "B04",
+        "B05",
+        "B06",
+        "B07",
+        "B08",
+        "B8A",
+        "B09",
+        "B11",
+        "B12",
+    }
+)
+
+
+def boa_add_offset(properties: Dict[str, Any], canonical: str) -> int:
+    """DN offset to add to ``canonical`` so it reads on the pre-04.00 scale.
+
+    Returns ``BOA_ADD_OFFSET`` for a spectral band still carrying the offset,
+    else 0. An item with no parseable baseline is treated as unshifted.
+    """
+    if canonical not in BOA_OFFSET_BANDS:
+        return 0
+    if properties.get("earthsearch:boa_offset_applied"):
+        return 0
+    try:
+        baseline = float(properties.get("s2:processing_baseline", ""))
+    except (TypeError, ValueError):
+        return 0
+    return BOA_ADD_OFFSET if baseline >= BOA_OFFSET_MIN_BASELINE else 0
+
+
+def apply_boa_offset(arr: npt.NDArray[Any], offset: int) -> npt.NDArray[Any]:
+    """Add a (negative) ``offset`` to valid DNs, keeping 0 as nodata.
+
+    DN 0 is L2A's NODATA under every baseline and stays 0. DNs at or below
+    ``-offset`` encode reflectance <= 0: real dark-water observations, not
+    missing data. They clip to 1 so they stay valid rather than becoming
+    nodata, or wrapping to ~65000 under unsigned subtraction.
+    """
+    if offset == 0:
+        return arr
+    shift = -offset
+    shifted = arr.astype(np.int32) - shift
+    out = np.where(arr == 0, 0, np.maximum(shifted, 1))
+    return out.astype(arr.dtype)
 
 
 @dataclass(frozen=True)
