@@ -16,6 +16,8 @@ from .stac import (
     STAC_RETRY_STATUS_CODES,
     drop_unreadable_items,
     filter_latest_processing_baselines,
+    search_collections,
+    search_params,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,7 +76,7 @@ def _search_for_items_by_geometry(
 ) -> ItemCollection:
     """Search Sentinel-2 L2A items intersecting a bbox or polygon in EPSG:4326."""
     query: Dict[str, Any] = {
-        "collections": [source.collection_id],
+        "collections": search_collections(source),
         "datetime": (
             f"{start_date.strftime('%Y-%m-%dT00:00:00Z')}/"
             f"{end_date.strftime('%Y-%m-%dT00:00:00Z')}"
@@ -86,8 +88,7 @@ def _search_for_items_by_geometry(
     else:
         query["intersects"] = mapping(geometry)
         search_label = "AOI"
-    if additional_query:
-        query["query"] = additional_query
+    query.update(search_params(source, None, additional_query))
 
     retry = Retry(
         total=5,

@@ -83,7 +83,7 @@ class TestTileReaderHelpers:
             return "lazy-source.tif"
 
         class FakeDataset:
-            pass
+            nodata = None
 
         def fake_open(source):
             calls["open"] += 1
@@ -148,6 +148,7 @@ class TestTileReaderHelpers:
                 return f"signed-{href}"
 
         class FakeDataset:
+            nodata = None
             width = 10
             height = 10
 
@@ -239,6 +240,7 @@ class TestTileReaderHelpers:
             return f"remote-refresh-{refresh}.tif"
 
         class FakeDataset:
+            nodata = None
             width = 10
             height = 10
 
@@ -284,6 +286,7 @@ class TestTileReaderHelpers:
             return f"remote-refresh-{refresh}.tif"
 
         class FakeDataset:
+            nodata = None
             width = 10
             height = 10
 
@@ -329,6 +332,7 @@ class TestTileReaderHelpers:
             return f"remote-refresh-{refresh}.tif"
 
         class FakeDataset:
+            nodata = None
             width = 10
             height = 10
 
@@ -370,6 +374,8 @@ class TestTileReaderHelpers:
             return f"bounds-refresh-{refresh}.tif"
 
         class FakeDataset:
+            nodata = None
+
             def read(self, band_idx, window):
                 return np.full(
                     (int(window.height), int(window.width)),
@@ -420,6 +426,8 @@ class TestTileReaderHelpers:
             return f"bounds-refresh-{refresh}.tif"
 
         class FakeDataset:
+            nodata = None
+
             def __init__(self, source):
                 self.source = source
 
@@ -469,6 +477,8 @@ class TestTileReaderHelpers:
             return f"bounds-refresh-{refresh}.tif"
 
         class FakeDataset:
+            nodata = None
+
             def read(self, band_idx, window):
                 return np.full(
                     (int(window.height), int(window.width)),

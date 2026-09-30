@@ -12,6 +12,7 @@ class TestGetFullBand:
                 return href
 
         class FakeDataset:
+            nodata = None
             width = 10980
             height = 10980
             profile = {"driver": "GTiff"}
@@ -50,6 +51,7 @@ class TestGetFullBand:
                 return href
 
         class FakeDataset:
+            nodata = None
             width = 10980
             height = 10980
             profile = {"driver": "GTiff"}

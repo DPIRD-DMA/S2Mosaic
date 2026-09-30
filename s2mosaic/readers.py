@@ -21,7 +21,12 @@ from .gdal_env import fresh_remote_reads
 from .geometry import Bbox
 from .helpers import backoff_delay, get_rasterio_resampling
 from .masking import get_masks, get_scl_masks
-from .sources import Source, apply_boa_offset, boa_add_offset
+from .sources import (
+    Source,
+    apply_boa_offset,
+    boa_add_offset,
+    normalise_signed_dn,
+)
 from ._types import BoundsItemLike
 
 logger = logging.getLogger(__name__)
@@ -148,6 +153,9 @@ def _build_output_profile(
         profile["transform"] = src.transform * rio.Affine.scale(scale_x, scale_y)
         profile["width"] = s2_scene_size
         profile["height"] = s2_scene_size
+        # Reads are normalised to 0-is-nodata (``normalise_signed_dn``), so
+        # the source's own value (DEA: -999) would misdescribe the output.
+        profile["nodata"] = 0
     return profile  # type: ignore[no-any-return, unused-ignore]
 
 
@@ -293,12 +301,13 @@ def _read_tile_window(
         w * scale_x,
         h * scale_y,
     )
-    return src.read(  # type: ignore[no-any-return, unused-ignore]
+    arr = src.read(
         raster_band_idx,
         window=src_window,
         out_shape=(h, w),
         resampling=rio_resampling,
     )
+    return normalise_signed_dn(arr, src.nodata)
 
 
 def make_grid_tile_reader(
@@ -546,9 +555,9 @@ class BoundsTileReader:
                 else self._reopen_source(scene_idx, band_idx)
             )
             try:
-                arr: npt.NDArray[Any] = src.read(
-                    self._href_band_indices[band_idx],
-                    window=window,
+                arr = normalise_signed_dn(
+                    src.read(self._href_band_indices[band_idx], window=window),
+                    src.nodata,
                 )
             except RasterioIOError as exc:
                 last_error = exc

@@ -241,11 +241,17 @@ def mosaic(
             limited to 255. Defaults to False.
         source (str, optional): STAC imagery source. ``"MPC"`` (default) uses
             Microsoft Planetary Computer (SAS-signed URLs); ``"AWS"`` uses
-            Element 84 Earth Search on AWS Open Data (public S3, no auth).
-            Both return spectral bands as ``reflectance * 10000``; the +1000
-            offset of processing baseline 04.00+ is removed at read time.
-            Defaults to "MPC".
+            Element 84 Earth Search on AWS Open Data (public S3, no auth);
+            ``"DEA"`` uses Digital Earth Australia's Sentinel-2 NBART
+            (Australia only, ``final`` datasets only, no ``visual``, ``SCL``,
+            ``AOT``, ``WVP`` or ``B09`` bands; ``cloud_mask="SCL"`` reads its
+            fmask layer). All return spectral bands as
+            ``reflectance * 10000``; the +1000 offset of processing baseline
+            04.00+ is removed at read time. Defaults to "MPC".
         additional_query (Dict[str, Any], optional): Additional query parameters for STAC API.
+            Written in the STAC Query extension's form; for ``"DEA"``, whose
+            API only takes CQL2, it is translated (operators ``eq``, ``neq``,
+            ``lt``, ``lte``, ``gt``, ``gte``, ``in``).
             Defaults to {"eo:cloud_cover": {"lt": 100}}.
         min_coverage_fraction (float, optional): Drop pixels covered by fewer
             than this fraction of the *maximum* scene-overlap count in the
@@ -257,7 +263,8 @@ def mosaic(
         cloud_mask (str, optional): Cloud-mask provider. ``"OCM"`` (default) runs the
             OmniCloudMask deep-learning model on R+G+NIR; ``"SCL"`` reads the L2A
             Scene Classification Layer published with the scene. SCL is much cheaper
-            (one COG read, no inference) but lower accuracy.
+            (one COG read, no inference) but lower accuracy. On ``source="DEA"``,
+            which publishes no SCL, ``"SCL"`` reads DEA's fmask layer.
         ocm_batch_size (int, optional): Batch size for OCM inference. Defaults to 1.
         ocm_inference_dtype (str, optional): Data type for OCM inference.
             Defaults to "fp32", which runs on every CPU/GPU/MPS backend and is

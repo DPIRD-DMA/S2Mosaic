@@ -12,7 +12,7 @@ import pytest
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from s2mosaic import SOURCE_AWS, SOURCE_MPC, mosaic
+from s2mosaic import SOURCE_AWS, SOURCE_DEA, SOURCE_MPC, mosaic
 from s2mosaic.config import VALID_BANDS, validate_inputs
 from s2mosaic.sources import AWS, MPC, VALID_SOURCES, Source, get_source
 from s2mosaic.stac import STAC_RETRY_STATUS_CODES, search_for_items
@@ -23,10 +23,11 @@ class TestSourceConstants:
         assert SOURCE_MPC == "MPC"
         assert SOURCE_AWS == "AWS"
 
-    def test_valid_sources_contains_both(self):
+    def test_valid_sources_contains_all_three(self):
         assert SOURCE_MPC in VALID_SOURCES
         assert SOURCE_AWS in VALID_SOURCES
-        assert len(VALID_SOURCES) == 2
+        assert SOURCE_DEA in VALID_SOURCES
+        assert len(VALID_SOURCES) == 3
 
     def test_get_source_returns_singleton(self):
         assert get_source(SOURCE_MPC) is MPC

@@ -516,7 +516,7 @@ def _stream_bounds_combo_masks(
                 raise mask_result
 
             if cloud_mask == CLOUD_MASK_SCL:
-                clear, valid = compute_masks_from_scl(mask_result.arr)
+                clear, valid = compute_masks_from_scl(source.to_scl(mask_result.arr))
             else:
                 clear, valid = compute_masks_from_array(
                     mask_result.arr,

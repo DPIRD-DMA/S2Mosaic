@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **`source="DEA"`: Digital Earth Australia's Sentinel-2 NBART.** Geoscience Australia's collection 3 analysis-ready data (`ga_s2am_ard_3`, `ga_s2bm_ard_3`, `ga_s2cm_ard_3`) from `explorer.dea.ga.gov.au/stac`, Australia only. It works in grid, bounds and AOI modes with both cloud masks, and returns spectral bands on the same `reflectance * 10000` scale as MPC and AWS. Differences from the L2A sources:
+  - DEA processes ESA's L1C itself, so there is no SCL. `cloud_mask="SCL"` reads DEA's 20 m fmask and translates its classes to SCL codes (clear -> 4, cloud -> 9, shadow -> 3, snow -> 11, water -> 6; undefined codes -> 7, which the mask excludes). OmniCloudMask runs unchanged on the NBART bands.
+  - `visual`, `SCL`, `AOT`, `WVP` and `B09` are not published and are rejected at validation, not left to fail as a missing asset.
+  - Only `dea:dataset_maturity = final` datasets are searched. Recent acquisitions also exist as `nrt` and `interim` copies until the final replaces them, so the newest few weeks may be missing.
+  - The API takes only CQL2 filters and rejects the Query extension. `additional_query` is still written in Query-extension form and translated (`eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `in`); an untranslatable operator raises.
+  - Pixels are int16 with nodata -999. Every raster read now maps a signed source's nodata to 0 and other values <= 0 to 1 before the uint16 cast, so -999 no longer wraps to 64537. The grid-mode profile reports `nodata=0`.
+  - Assets are listed as `s3://dea-public-data/...` and read anonymously over the bucket's HTTPS endpoint.
+  - DEA publishes no `s2:nodata_pixel_percentage`, which `scene_order="valid_data"` ranks on, so it is estimated from the item footprint against its raster grid. On 50HMH that lands within 0.6 points of MPC's figure for the same acquisitions. Cloud and shadow percentages come from `fmask:cloud` and `fmask:cloud_shadow`, and tile and de-duplication keys from `odc:region_code` and `sentinel:datastrip_id`.
+
+  `Source` gains `extra_collection_ids`, `search_extension`, `base_filters`, `scl_lut` and `unsupported_bands`, all defaulting to the previous behaviour.
+
 ### Fixed
 - **MPC spectral bands are now on one scale across the January 2022 baseline change.** From processing baseline 04.00, ESA encodes L2A reflectance as `DN = reflectance * 10000 + 1000`. Microsoft Planetary Computer serves those DNs unchanged and S2Mosaic passed them through, so any `source="MPC"` mosaic whose window spanned 25 January 2022 stacked scenes on two scales: `mean`, `median` and `percentile` were pulled up by up to 1000 DN, and `first` and `medoid` jumped by 1000 between neighbouring pixels. Every MPC mosaic after that date also read ~1000 DN above `source="AWS"`, because Element 84 removes the offset before publishing (`earthsearch:boa_offset_applied`). Over a 2 km AOI near Perth, the per-band median of a January 2023 MPC mosaic now matches AWS to within 18 DN.
 
