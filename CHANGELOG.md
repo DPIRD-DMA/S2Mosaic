@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
   - The API takes only CQL2 filters and rejects the Query extension. `additional_query` is still written in Query-extension form and translated (`eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `in`); an untranslatable operator raises.
   - Pixels are int16 with nodata -999. Every raster read now maps a signed source's nodata to 0 and other values <= 0 to 1 before the uint16 cast, so -999 no longer wraps to 64537. The grid-mode profile reports `nodata=0`.
   - Assets are listed as `s3://dea-public-data/...` and read anonymously over the bucket's HTTPS endpoint.
+  - DEA's COGs only have overviews at 8x, 16x and 32x (MPC and AWS also have 2x and 4x). Between native resolution and 80 m there is no overview to read, so GDAL downloads the full-resolution band. A whole tile at 60 m took 65 s per band per scene against 1.4 s at 80 m. Small bounds and AOIs are barely affected.
   - DEA publishes no `s2:nodata_pixel_percentage`, which `scene_order="valid_data"` ranks on, so it is estimated from the item footprint against its raster grid. On 50HMH that lands within 0.6 points of MPC's figure for the same acquisitions. Cloud and shadow percentages come from `fmask:cloud` and `fmask:cloud_shadow`, and tile and de-duplication keys from `odc:region_code` and `sentinel:datastrip_id`.
 
   `Source` gains `extra_collection_ids`, `search_extension`, `base_filters`, `scl_lut` and `unsupported_bands`, all defaulting to the previous behaviour.
