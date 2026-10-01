@@ -33,7 +33,7 @@ jobs:
           cache-suffix: notebooks
 
       - run: uv sync --all-extras --dev
-        timeout-minutes: 10
+        timeout-minutes: 25  # see ci.yml
 
       - name: Notebook smoke test
         run: uv run pytest --nbmake examples/*.ipynb -q

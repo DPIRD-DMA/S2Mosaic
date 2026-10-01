@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     # Without a limit a hung job runs for GitHub's 6-hour default. Healthy
     # jobs take a few minutes; the notebook smoke test lives in notebooks.yml.
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -40,9 +40,11 @@ jobs:
           cache-suffix: ${{ matrix.python-version }}
 
       - run: uv sync --all-extras --dev
-        # Normally 20-40 s. A stalled wheel download (torch's CUDA wheels run
-        # to gigabytes) once hung here for over 30 minutes.
-        timeout-minutes: 10
+        # Usually 20-40 s, but setup-uv prunes downloaded wheels from its
+        # cache, so every run fetches torch's ~3 GB of CUDA wheels from PyPI.
+        # When PyPI is slow that has taken over 10 minutes (numpy alone took
+        # 7), so leave room for that while still catching a true hang.
+        timeout-minutes: 25
 
       - name: Lint
         run: uv run ruff check .
