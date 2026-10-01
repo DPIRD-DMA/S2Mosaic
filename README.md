@@ -255,6 +255,7 @@ If your application already configures the `logging` module, the package logger 
 - `scene_order`: Using `"valid_data"` tends to work well with early stopping because clear scenes are considered first.
 - `min_observations`: For large `"mean"`, `"percentile"`, or `"medoid"` jobs, set this to the number of observations per pixel you actually need to avoid reading later scenes for already-satisfied tiles.
 - `max_observations`: Caps each pixel at N valid scenes. Combine with `scene_order="oldest"` (or `"newest"`) to bias the mosaic toward early/late dates over a long search window without paying for the extra reads.
+- `resolution`: Data read scales with the source level each read comes from, not just the output size. Resolutions that land on a COG overview (native, or 2x, 4x, 8x... of it; DEA only has 8x and coarser) read the least; ones between levels read the finer level and downsample. S2Mosaic warns when that costs 4x or more.
 - `mosaic_method`: Roughly ordered fastest to slowest, `"first"` < `"mean"` < `"percentile"`/`"median"` ≈ `"medoid"`. `"first"` only reads pixels needed to fill each tile and stops as soon as it can, so cloud-free scenes can finish a tile in one pass. `"mean"` streams every contributing scene but accumulates incrementally, so its memory stays small. `"percentile"`/`"median"` and `"medoid"` both hold each tile's per-scene stack in memory to compute the result, so they use more RAM and, without `min_observations`/`max_observations`, read every contributing scene. Both keep that stack as `uint16` plus a separate validity mask, so it is the same size for either method. `"medoid"` still peaks lower because its kernel returns `uint16` directly and stripe-blocks its scratch arrays, while percentile/median returns `float32` and is clipped back afterwards: on a 12-scene, 4-band, 2048px tile the stack is 403 MB and peak is roughly 690 MB for median against 540 MB for medoid. Peak scales with scene count (the same tile over 34 scenes peaks at about 1.5 GB) and every tile worker pays it, so `tile_workers` multiplies it. Set `min_observations` (and/or `max_observations`) to cap reads once every coverable pixel has enough samples.
 
 ## Known limitations
@@ -265,13 +266,15 @@ If your application already configures the `logging` module, the package logger 
 
 - **`bands=["visual"]` cannot distinguish black water from no data.** TCI is a quantised 8-bit render, so near-zero reflectance rounds to 0, and ESA also reserves 0 for NODATA. A pixel whose three channels all round to 0 is therefore indistinguishable from an unobserved one and is dropped - about 0.23% of valid pixels on a Perth AOI, all inside water that renders near black anyway. Request the spectral bands instead where dark water matters, since there DN 0 really is NODATA.
 
+- **`source="DEA"` lags about two weeks and drops a few scenes.** Only `final` datasets are searched, and a final version usually appears 9-13 days after acquisition (up to ~50), so a window ending in the last couple of weeks has fewer scenes than on MPC or AWS. A small number of acquisitions (1-3 per tile over April-September 2026 on three sampled tiles) are only ever published as provisional `nrt`, and are never included. DEA also publishes no `visual` asset; request `["B04", "B03", "B02"]` and stretch for display.
+
 ## Contributing
 
 Contributions are welcome. Open an issue or a pull request.
 
 ### Running the tests
 
-Tests use `pytest`. The fast suite (unit tests + mocked pipelines) runs in under 15s and is what CI runs by default:
+Tests use `pytest`. The development environment uses the Python pinned in `.python-version` (3.14); CI runs the suite on every supported version, 3.10-3.14. The fast suite (unit tests + mocked pipelines) takes well under a minute and is what CI runs by default:
 
 ```bash
 uv run pytest                       # full fast suite

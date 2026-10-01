@@ -17,6 +17,14 @@ and read assets:
   provider doesn't expose one (callers then rely on ``intersects`` alone)
 - ``open_catalog(stac_io)``: open the STAC client; provider-specific options
   (e.g. MPC's ``sign_inplace`` modifier) live here
+- ``search_extension`` / ``base_filters``: whether searches use the Query
+  extension (MPC, AWS) or CQL2 (DEA), and CQL2 clauses every search carries
+  (DEA: ``final`` datasets only)
+- ``scl_lut`` / ``unsupported_bands``: translate a provider's own
+  classification into SCL codes for ``cloud_mask="SCL"`` (DEA's fmask), and
+  bands the provider doesn't publish, rejected at validation
+- ``asset_overviews``: per-band native resolution and COG overview factors,
+  used to warn when a requested resolution has no matching overview
 """
 
 from __future__ import annotations

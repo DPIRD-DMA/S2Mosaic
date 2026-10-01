@@ -279,7 +279,14 @@ def mosaic(
             grid. If you need a lat/lon raster, reproject the mosaic
             afterwards (e.g. with ``gdalwarp``). In bounds/AOI mode, defaults
             to the UTM zone containing the AOI centroid. Ignored in grid mode.
-        resolution (int, optional): Output pixel size in metres. Defaults to 10.
+        resolution (int, optional): Output pixel size in metres. Coarser
+            resolutions read from the coarsest COG overview no coarser than
+            one output pixel, in every mode. When a request falls well between
+            a source's overview levels (at least 4x the pixels needed, e.g.
+            60 m from DEA's 10 m bands), a warning names the nearest efficient
+            resolutions, once per process. In grid mode, pick a resolution
+            that divides the 109,800 m tile evenly (e.g. 20, 60, 90, 120) or
+            pixels are stretched slightly to fit. Defaults to 10.
         resampling_method (str, optional): Rasterio resampling method used when
             reading source COGs onto the output grid. Options include "nearest",
             "bilinear", "cubic", "average", and "lanczos". Defaults to "nearest".
