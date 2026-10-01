@@ -289,6 +289,12 @@ uv run pytest -m slow               # only slow tests
 uv run pytest -m ""                 # everything, including slow
 ```
 
+The example notebooks run against live STAC sources and take several minutes, so they are not part of the per-push CI. A separate workflow executes them weekly, on pull requests that change `examples/`, and on demand from the Actions tab. To run them locally:
+
+```bash
+uv run pytest --nbmake examples/*.ipynb
+```
+
 Lint with ruff:
 
 ```bash

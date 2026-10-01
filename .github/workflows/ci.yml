@@ -14,9 +14,9 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
-    # Without a limit a hung job runs for GitHub's 6-hour default. The longest
-    # healthy job (3.11, which adds the notebook smoke test) takes ~10 minutes.
-    timeout-minutes: 60
+    # Without a limit a hung job runs for GitHub's 6-hour default. Healthy
+    # jobs take a few minutes; the notebook smoke test lives in notebooks.yml.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -52,7 +52,3 @@ jobs:
 
       - name: Test
         run: uv run pytest tests/ -x -q
-
-      - name: Notebook smoke test
-        if: matrix.python-version == '3.11'
-        run: uv run pytest --nbmake examples/*.ipynb -q
