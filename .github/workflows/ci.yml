@@ -46,17 +46,19 @@ jobs:
       # the pip interface; UV_NO_SYNC stops later `uv run`s re-syncing to the
       # CUDA build. uv.lock is gitignored, so uv sync resolved fresh anyway.
       - name: Install (CPU-only torch)
-        # A healthy install takes ~10 s, but a runner's connections to PyPI
-        # occasionally stall outright (no download completing for 15 min), and
-        # a fresh attempt gets past it. Kill a stalled attempt and retry.
+        # A healthy install takes ~10 s, but on some runners individual PyPI
+        # downloads hang indefinitely (1-2 jobs in 11). Completed downloads
+        # stay in uv's cache, so each fresh attempt resumes and clears more of
+        # them: in one stalled job the third attempt had a single download
+        # left. Many short attempts therefore beat a few long ones.
         run: |
           uv venv
-          for attempt in 1 2 3; do
-            timeout 300 uv pip install --torch-backend cpu -e . --group dev && exit 0
+          for attempt in 1 2 3 4 5 6 7 8; do
+            timeout 90 uv pip install --torch-backend cpu -e . --group dev && exit 0
             echo "::warning::install attempt $attempt failed or stalled; retrying"
           done
           exit 1
-        timeout-minutes: 16
+        timeout-minutes: 14
 
       - name: Lint
         run: uv run ruff check .
