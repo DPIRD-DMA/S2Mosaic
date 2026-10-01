@@ -40,7 +40,7 @@ S2Mosaic uses OmniCloudMask (OCM) by default for cloud and cloud-shadow masking.
 | `"AWS"` | Element 84 Earth Search | Global | ESA L2A (Sen2Cor) | Public COGs, no auth |
 | `"DEA"` | Digital Earth Australia (Geoscience Australia) | Australia only | NBART: BRDF- and terrain-corrected surface reflectance | Public COGs, no auth, `final` datasets only |
 
-DEA builds its product from ESA's L1C with its own atmospheric, BRDF and terrain correction, so NBART values sit close to, but not exactly on, the L2A values for the same acquisition, and it has no Sen2Cor outputs. On DEA, `cloud_mask="SCL"` reads DEA's fmask layer instead (same 20 m grid, classes translated to their SCL equivalents), and the `visual`, `SCL`, `AOT`, `WVP` and `B09` bands are unavailable.
+DEA builds its product from ESA's L1C with its own atmospheric, BRDF and terrain correction, so its values differ from L2A for the same acquisition, and it has no Sen2Cor outputs. NBART's BRDF correction normalises to a fixed sun angle, so the gap is seasonal: over a Perth AOI the visible bands were within 7% of AWS in January but 25-45% brighter in June-July. Don't mix DEA and L2A mosaics in one analysis without accounting for this. On DEA, `cloud_mask="SCL"` reads DEA's fmask layer instead (same 20 m grid, classes translated to their SCL equivalents), and the `visual`, `SCL`, `AOT`, `WVP` and `B09` bands are unavailable. DEA's COGs only have overviews at 8x and coarser, so a whole tile at a resolution between native and 80 m downloads full-resolution data and is slow; for whole tiles use native resolution or 80 m and coarser. Small bounds and AOIs are barely affected.
 
 ```python
 array, profile = mosaic(
@@ -51,6 +51,8 @@ array, profile = mosaic(
     cloud_mask="SCL",  # fmask on DEA
 )
 ```
+
+See [Example use - DEA.ipynb](https://github.com/DPIRD-DMA/S2Mosaic/blob/main/examples/Example%20use%20-%20DEA.ipynb) for a DEA walkthrough: a first mosaic, a side-by-side with AWS, fmask against OmniCloudMask, and a full tile.
 
 ## Try in Colab
 
