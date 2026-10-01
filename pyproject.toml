@@ -36,7 +36,14 @@ dependencies = [
     # The one intentional cap: rasterio is the deepest integration (WarpedVRT,
     # windowed reads, profile plumbing) and the place a silent geometry change
     # would hide. It has not bumped major since 2018, so this costs nothing.
-    "rasterio>=1.3,<2",
+    #
+    # 1.4.4 is excluded: its wheels bundle libcurl 8.16.0, whose threaded
+    # resolver can lose a completed lookup, time out, then deadlock in
+    # curl_easy_cleanup. No GDAL timeout or retry can recover it, and repeat
+    # mosaic() calls against DEA hang on the second call. 1.4.3 (curl 8.8.0)
+    # and 1.5.x (curl 8.20.0) are unaffected. On Python 3.10/3.11 this
+    # resolves to 1.4.3, since 1.5 requires 3.12.
+    "rasterio>=1.3,!=1.4.4,<2",
     "shapely>=2.0",
     "tqdm>=4.65",
     "urllib3>=2.0",
