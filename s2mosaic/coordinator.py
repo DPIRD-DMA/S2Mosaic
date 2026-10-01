@@ -4,7 +4,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union, overload
 
 import numpy.typing as npt
 
-from .config import MosaicRequest
+from .config import DEFAULT_BANDS, MosaicRequest, warn_resolution_read_overhead
 from .gdal_env import apply_gdal_network_defaults
 from .geometry import Aoi, Bbox
 from .pipelines.bounds import run_bounds_pipeline
@@ -373,6 +373,9 @@ def mosaic(
     request.validate()
 
     source_obj = get_source(request.source)
+    warn_resolution_read_overhead(
+        source_obj, request.bands or DEFAULT_BANDS, request.resolution
+    )
 
     if request.bounds is not None or request.aoi is not None:
         return run_bounds_pipeline(request, source=source_obj)

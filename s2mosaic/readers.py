@@ -18,7 +18,7 @@ from rasterio.windows import Window
 
 from .config import CLOUD_MASK_SCL, MOSAIC_FIRST
 from .gdal_env import fresh_remote_reads
-from .geometry import Bbox
+from .geometry import Bbox, overview_level_for_target
 from .helpers import backoff_delay, get_rasterio_resampling
 from .masking import get_masks, get_scl_masks
 from .sources import (
@@ -37,6 +37,11 @@ MAX_PREWARM_WORKERS = 16
 GridSourceResolver = Callable[[bool], str]
 BoundsSourceResolver = Callable[[bool], str]
 RasterOpener = Callable[[bool], rio.DatasetReader]
+# Assets whose COG overviews may not be safe to read: averaging class codes
+# invents classes. MPC's SCL overviews hold a value absent from the source
+# pixels they cover in ~1.5% of mixed blocks, so categorical layers always
+# warp from full resolution.
+CATEGORICAL_ASSETS = frozenset({"SCL"})
 
 
 def _boa_offsets(
@@ -453,6 +458,7 @@ def make_bounds_tile_reader(
         height=height,
         rio_resampling=rio_resampling,
         offsets=_boa_offsets(items, href_template),
+        use_overviews=[asset not in CATEGORICAL_ASSETS for asset, _ in href_template],
     )
 
 
@@ -469,9 +475,14 @@ class BoundsTileReader:
         height: int,
         rio_resampling: Any,
         offsets: Optional[List[List[int]]] = None,
+        use_overviews: Optional[List[bool]] = None,
     ):
         self._sources = sources
         self._offsets = offsets
+        # Per asset: warp from the overview matching the target resolution
+        # (see ``geometry.overview_level_for_target``). ``None`` keeps every
+        # read at full resolution.
+        self._use_overviews = use_overviews
         self._href_band_indices = href_band_indices
         self._target_crs_obj = target_crs_obj
         self._user_transform = user_transform
@@ -489,11 +500,29 @@ class BoundsTileReader:
         if self._closed:
             raise RuntimeError("Cannot read from a closed bounds tile reader")
 
-        def open_source(refresh_attempt: bool) -> rio.DatasetReader:
+        def open_source(
+            refresh_attempt: bool, overview_level: Optional[int] = None
+        ) -> rio.DatasetReader:
             href = self._sources[scene_idx][asset_idx](refresh_attempt)
-            return rio.open(href)
+            if overview_level is None:
+                return rio.open(href)
+            return rio.open(href, overview_level=overview_level)
 
         src = _retry_open_raster(open_source, refresh=refresh)
+        if self._use_overviews is not None and self._use_overviews[asset_idx]:
+            level = overview_level_for_target(
+                src,
+                self._target_crs_obj,
+                self._user_transform,
+                self._width,
+                self._height,
+            )
+            if level is not None:
+                src.close()
+                src = _retry_open_raster(
+                    lambda refresh_attempt: open_source(refresh_attempt, level),
+                    refresh=refresh,
+                )
         handle = WarpedVRT(
             src,
             crs=self._target_crs_obj,

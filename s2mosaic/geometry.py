@@ -302,3 +302,51 @@ def _expand_bounds_for_ocm_context(
         maxy + top * resolution,
     )
     return expanded_bounds, (slice(top, top + req_h), slice(left, left + req_w))
+
+
+def overview_level_for_target(
+    src: Any,
+    target_crs: CRS,
+    target_transform: Affine,
+    target_width: int,
+    target_height: int,
+) -> Optional[int]:
+    """Overview index to warp ``src`` from for this target grid, or ``None``.
+
+    GDAL's warper reads full-resolution source pixels whatever the output
+    resolution, so a ``WarpedVRT`` onto a 60 m grid fetches every 10 m pixel
+    under it; direct windowed reads pick an overview, warps don't. Opening the
+    source at the returned level (``rio.open(href, overview_level=...)``)
+    gives warped reads the same saving.
+
+    The rule matches GDAL's for direct reads: the coarsest overview whose
+    decimation factor does not exceed one target pixel's footprint measured
+    in source pixels. The footprint is measured in the source CRS, not
+    compared as raw pixel sizes, so a scene in a neighbouring UTM zone (which
+    is rotated and slightly rescaled relative to the target grid) gets the
+    level that matches its own pixels. Taking the shorter side keeps the
+    choice conservative; ``None`` means read full resolution.
+    """
+    factors = list(src.overviews(1))
+    if not factors:
+        return None
+    # One target pixel at the grid centre, carried into the source CRS.
+    col, row = target_width / 2, target_height / 2
+    corners = [
+        target_transform * (col, row),
+        target_transform * (col + 1, row),
+        target_transform * (col, row + 1),
+    ]
+    xs, ys = zip(*corners, strict=True)
+    src_crs = src.crs
+    if src_crs is not None and CRS.from_user_input(src_crs) != target_crs:
+        to_src = Transformer.from_crs(target_crs, src_crs, always_xy=True)
+        xs, ys = to_src.transform(xs, ys)
+    step_x = float(np.hypot(xs[1] - xs[0], ys[1] - ys[0]))
+    step_y = float(np.hypot(xs[2] - xs[0], ys[2] - ys[0]))
+    footprint_px = min(step_x, step_y) / min(abs(src.res[0]), abs(src.res[1]))
+    level = None
+    for idx, factor in enumerate(factors):
+        if factor <= footprint_px * (1 + 1e-9):
+            level = idx
+    return level

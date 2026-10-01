@@ -267,8 +267,16 @@ def _fetch_one_ocm(
     def _read_band(band_name: str) -> npt.NDArray[Any]:
         href = source.sign(item.assets[source.asset_name(band_name)].href)
         try:
+            # OCM's bands are reflectance, so their overviews are safe.
             return _read_band_at_target_window(
-                href, 1, read_bounds, target_crs_obj, width, height, rio_resampling
+                href,
+                1,
+                read_bounds,
+                target_crs_obj,
+                width,
+                height,
+                rio_resampling,
+                use_overviews=True,
             )
         except RasterioIOError as exc:
             raise RasterioIOError(
