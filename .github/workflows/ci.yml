@@ -4,8 +4,8 @@ on:
   push:
   pull_request:
   # Dependencies are declared without upper bounds (see pyproject.toml), so a
-  # new upstream release can break the build without any commit here. uv sync
-  # resolves fresh on every run, so this weekly job is what surfaces that --
+  # new upstream release can break the build without any commit here. The
+  # install resolves fresh on every run, so this weekly job is what surfaces that --
   # without it, "fix it when it breaks" means waiting for a user to report it.
   schedule:
     - cron: "0 18 * * 0"  # Sundays 18:00 UTC (Monday morning AWST)
@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     # Without a limit a hung job runs for GitHub's 6-hour default. Healthy
     # jobs take a few minutes; the notebook smoke test lives in notebooks.yml.
-    timeout-minutes: 45
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -26,6 +26,7 @@ jobs:
     # until this change; every passing run's jobs logged CPython 3.11.16).
     env:
       UV_PYTHON: ${{ matrix.python-version }}
+      UV_NO_SYNC: "1"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -39,12 +40,16 @@ jobs:
         with:
           cache-suffix: ${{ matrix.python-version }}
 
-      - run: uv sync --all-extras --dev
-        # Usually 20-40 s, but setup-uv prunes downloaded wheels from its
-        # cache, so every run fetches torch's ~3 GB of CUDA wheels from PyPI.
-        # When PyPI is slow that has taken over 10 minutes (numpy alone took
-        # 7), so leave room for that while still catching a true hang.
-        timeout-minutes: 25
+      # CPU-only torch: CI has no GPU, and the default CUDA build pulls ~3 GB
+      # of nvidia-* wheels on every run (setup-uv prunes downloaded wheels
+      # from its cache). --torch-backend is a uv pip option, so install with
+      # the pip interface; UV_NO_SYNC stops later `uv run`s re-syncing to the
+      # CUDA build. uv.lock is gitignored, so uv sync resolved fresh anyway.
+      - name: Install (CPU-only torch)
+        run: |
+          uv venv
+          uv pip install --torch-backend cpu -e . --group dev
+        timeout-minutes: 15
 
       - name: Lint
         run: uv run ruff check .

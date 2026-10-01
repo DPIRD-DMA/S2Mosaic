@@ -19,6 +19,7 @@ jobs:
     timeout-minutes: 60
     env:
       UV_PYTHON: "3.11"
+      UV_NO_SYNC: "1"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -32,8 +33,16 @@ jobs:
         with:
           cache-suffix: notebooks
 
-      - run: uv sync --all-extras --dev
-        timeout-minutes: 25  # see ci.yml
+      # See ci.yml. CPU-only torch: CI has no GPU, and the default CUDA build pulls ~3 GB
+      # of nvidia-* wheels on every run (setup-uv prunes downloaded wheels
+      # from its cache). --torch-backend is a uv pip option, so install with
+      # the pip interface; UV_NO_SYNC stops later `uv run`s re-syncing to the
+      # CUDA build. uv.lock is gitignored, so uv sync resolved fresh anyway.
+      - name: Install (CPU-only torch)
+        run: |
+          uv venv
+          uv pip install --torch-backend cpu -e . --group dev
+        timeout-minutes: 15
 
       - name: Notebook smoke test
         run: uv run pytest --nbmake examples/*.ipynb -q
