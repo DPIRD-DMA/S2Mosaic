@@ -14,6 +14,9 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Without a limit a hung job runs for GitHub's 6-hour default. The longest
+    # healthy job (3.11, which adds the notebook smoke test) takes ~10 minutes.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -37,6 +40,9 @@ jobs:
           cache-suffix: ${{ matrix.python-version }}
 
       - run: uv sync --all-extras --dev
+        # Normally 20-40 s. A stalled wheel download (torch's CUDA wheels run
+        # to gigabytes) once hung here for over 30 minutes.
+        timeout-minutes: 10
 
       - name: Lint
         run: uv run ruff check .
