@@ -40,7 +40,7 @@ S2Mosaic uses OmniCloudMask (OCM) by default for cloud and cloud-shadow masking.
 | `"AWS"` | Element 84 Earth Search | Global | ESA L2A (Sen2Cor) | Public COGs, no auth |
 | `"DEA"` | Digital Earth Australia (Geoscience Australia) | Australia only | NBART: BRDF- and terrain-corrected surface reflectance | Public COGs, no auth, `final` datasets only |
 
-DEA builds its product from ESA's L1C with its own atmospheric, BRDF and terrain correction, so its values differ from L2A for the same acquisition, and it has no Sen2Cor outputs. NBART's BRDF correction normalises to a fixed sun angle, so the gap is seasonal: over a Perth AOI the visible bands were within 7% of AWS in January but 25-45% brighter in June-July. Don't mix DEA and L2A mosaics in one analysis without accounting for this. On DEA, `cloud_mask="SCL"` reads DEA's fmask layer instead (same 20 m grid, classes translated to their SCL equivalents), and the `visual`, `SCL`, `AOT`, `WVP` and `B09` bands are unavailable. DEA's COGs only have overviews at 8x and coarser, so a whole tile at a resolution between native and 80 m downloads full-resolution data and is slow; for whole tiles use native resolution or 80 m and coarser. Small bounds and AOIs are barely affected.
+DEA builds its product from ESA's L1C with its own atmospheric, BRDF and terrain correction, so its values differ from L2A for the same acquisition, and it has no Sen2Cor outputs. NBART's BRDF correction normalises to a fixed sun angle, so the gap is seasonal: over a Perth AOI the visible bands were within 7% of AWS in January but 25-45% brighter in June-July. Don't mix DEA and L2A mosaics in one analysis without accounting for this. On DEA, `cloud_mask="SCL"` reads DEA's fmask layer instead (same 20 m grid, classes translated to their SCL equivalents), and the `visual`, `SCL`, `AOT`, `WVP` and `B09` bands are unavailable. DEA's COGs only have overviews at 8x and coarser, so any request between native resolution and 80 m downloads full-resolution data: slow for whole tiles or large areas (S2Mosaic warns), barely noticeable for small bounds and AOIs. Use native resolution or 80 m and coarser.
 
 ```python
 array, profile = mosaic(
@@ -184,7 +184,7 @@ Every `mosaic()` parameter, with defaults shown in parentheses.
 ### Output grid
 
 - `output_crs` (`None`): EPSG of the output. Must be a projected CRS. Geographic CRSes (e.g. 4326) are rejected at validation, because `resolution` is metres in the target CRS and a geographic output would produce a degenerate grid. If you need a lat/lon raster, reproject the mosaic afterwards with `gdalwarp` / `rio warp`. In bounds/AOI mode, auto-picked as the UTM zone containing the AOI centroid if omitted. For AOIs wider than ~6° of longitude (one UTM zone), pass an explicit equal-area projection instead (e.g. `output_crs=3577` for Australia, `5070` for the contiguous US), because the auto-picked centroid UTM has growing scale distortion and a larger envelope overshoot far from its central meridian. Ignored in grid mode (the tile's native UTM zone is used).
-- `resolution` (`10`): output pixel size in metres. At lower resolutions rasterio reads from COG overviews, so much less data crosses the wire.
+- `resolution` (`10`): output pixel size in metres. Coarser resolutions read from the coarsest COG overview that is no coarser than the output pixel, in every mode, so much less data crosses the wire. Overviews are a fixed set of levels (MPC 2x-32x, AWS 2x-16x, DEA only 8x-32x); when a request falls well between them (at least 4x the pixels needed, e.g. 60 m from DEA's 10 m bands, which has no overview under 80 m), S2Mosaic logs a warning naming the nearest efficient resolutions. Each warning is shown once per session, so a loop of `mosaic()` calls logs it once.
 - `resampling_method` (`"nearest"`): how the source is resampled to the output grid. Also accepts `"bilinear"`, `"cubic"`, `"average"`, `"lanczos"`.
 - `snap_to_source_grid` (`False`): bounds/AOI mode only. When `True`, expand the output extent outward to whole multiples of `resolution` in the target CRS. This makes repeat runs over the same area produce identical grids, and at `resolution=10` aligns the output to the native Sentinel-2 pixel grid, so source COG reads become zero-cost copies rather than sub-pixel resamples. The output may grow by up to one pixel on each side; pixels outside an `aoi` polygon are still written as nodata.
 
@@ -255,6 +255,7 @@ If your application already configures the `logging` module, the package logger 
 - `scene_order`: Using `"valid_data"` tends to work well with early stopping because clear scenes are considered first.
 - `min_observations`: For large `"mean"`, `"percentile"`, or `"medoid"` jobs, set this to the number of observations per pixel you actually need to avoid reading later scenes for already-satisfied tiles.
 - `max_observations`: Caps each pixel at N valid scenes. Combine with `scene_order="oldest"` (or `"newest"`) to bias the mosaic toward early/late dates over a long search window without paying for the extra reads.
+- `resolution`: Data read scales with the source level each read comes from, not just the output size. Resolutions that land on a COG overview (native, or 2x, 4x, 8x... of it; DEA only has 8x and coarser) read the least; ones between levels read the finer level and downsample. S2Mosaic warns when that costs 4x or more.
 - `mosaic_method`: Roughly ordered fastest to slowest, `"first"` < `"mean"` < `"percentile"`/`"median"` ≈ `"medoid"`. `"first"` only reads pixels needed to fill each tile and stops as soon as it can, so cloud-free scenes can finish a tile in one pass. `"mean"` streams every contributing scene but accumulates incrementally, so its memory stays small. `"percentile"`/`"median"` and `"medoid"` both hold each tile's per-scene stack in memory to compute the result, so they use more RAM and, without `min_observations`/`max_observations`, read every contributing scene. Both keep that stack as `uint16` plus a separate validity mask, so it is the same size for either method. `"medoid"` still peaks lower because its kernel returns `uint16` directly and stripe-blocks its scratch arrays, while percentile/median returns `float32` and is clipped back afterwards: on a 12-scene, 4-band, 2048px tile the stack is 403 MB and peak is roughly 690 MB for median against 540 MB for medoid. Peak scales with scene count (the same tile over 34 scenes peaks at about 1.5 GB) and every tile worker pays it, so `tile_workers` multiplies it. Set `min_observations` (and/or `max_observations`) to cap reads once every coverable pixel has enough samples.
 
 ## Known limitations
@@ -265,13 +266,15 @@ If your application already configures the `logging` module, the package logger 
 
 - **`bands=["visual"]` cannot distinguish black water from no data.** TCI is a quantised 8-bit render, so near-zero reflectance rounds to 0, and ESA also reserves 0 for NODATA. A pixel whose three channels all round to 0 is therefore indistinguishable from an unobserved one and is dropped - about 0.23% of valid pixels on a Perth AOI, all inside water that renders near black anyway. Request the spectral bands instead where dark water matters, since there DN 0 really is NODATA.
 
+- **`source="DEA"` lags about two weeks and drops a few scenes.** Only `final` datasets are searched, and a final version usually appears 9-13 days after acquisition (up to ~50), so a window ending in the last couple of weeks has fewer scenes than on MPC or AWS. A small number of acquisitions (1-3 per tile over April-September 2026 on three sampled tiles) are only ever published as provisional `nrt`, and are never included. DEA also publishes no `visual` asset; request `["B04", "B03", "B02"]` and stretch for display.
+
 ## Contributing
 
 Contributions are welcome. Open an issue or a pull request.
 
 ### Running the tests
 
-Tests use `pytest`. The fast suite (unit tests + mocked pipelines) runs in under 15s and is what CI runs by default:
+Tests use `pytest`. The development environment uses the Python pinned in `.python-version` (3.14); CI runs the suite on every supported version, 3.10-3.14. The fast suite (unit tests + mocked pipelines) takes well under a minute and is what CI runs by default:
 
 ```bash
 uv run pytest                       # full fast suite
@@ -284,6 +287,12 @@ End-to-end tests that hit the network and run a real mosaic are marked `slow` an
 ```bash
 uv run pytest -m slow               # only slow tests
 uv run pytest -m ""                 # everything, including slow
+```
+
+The example notebooks run against live STAC sources and take several minutes, so they are not part of the per-push CI. A separate workflow executes them weekly, on pull requests that change `examples/`, and on demand from the Actions tab. To run them locally:
+
+```bash
+uv run pytest --nbmake examples/*.ipynb
 ```
 
 Lint with ruff:

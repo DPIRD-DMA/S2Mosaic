@@ -1,9 +1,10 @@
 """Input normalization and validation for mosaic requests."""
 
 import logging
+import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from shapely.geometry.polygon import Polygon
@@ -11,6 +12,9 @@ from shapely.geometry.polygon import Polygon
 from .geometry import Aoi, Bbox
 from .helpers import normalize_grid_id
 from .sources import SOURCE_MPC
+
+if TYPE_CHECKING:
+    from .sources import Source
 
 logger = logging.getLogger(__name__)
 
@@ -427,3 +431,65 @@ def _validate_bounds(
             width_m / 1000,
             height_m / 1000,
         )
+
+
+# Warn when a request reads at least this many times the pixels its output
+# needs: below it (e.g. 30 m from a 20 m overview, 2.25x) the cost is modest
+# and a warning would just be noise.
+READ_OVERHEAD_WARN_FACTOR = 4.0
+
+_warned_messages: set[str] = set()
+_warned_lock = threading.Lock()
+
+
+def resolution_read_overheads(
+    source: "Source", bands: List[str], resolution: float
+) -> List[Tuple[List[str], float, float, Optional[float]]]:
+    """Bands whose reads fetch far more data than ``resolution`` needs.
+
+    Returns ``(bands, read_resolution, overhead, next_coarser)`` groups, where
+    ``overhead`` is the ratio of pixels fetched to pixels needed and
+    ``next_coarser`` is the nearest resolution above ``resolution`` that
+    reads straight from an overview (``None`` past the coarsest one).
+    Upsampling (``resolution`` finer than native) costs no extra reads and is
+    never reported.
+    """
+    groups: Dict[Tuple[float, float, Optional[float]], List[str]] = {}
+    for band in bands:
+        read_res = source.read_resolution(band, resolution)
+        if read_res is None:
+            continue
+        overhead = (resolution / read_res) ** 2
+        if overhead < READ_OVERHEAD_WARN_FACTOR:
+            continue
+        native, factors = source.asset_overviews[band]
+        coarser = [native * f for f in factors if native * f > resolution]
+        key = (read_res, overhead, float(min(coarser)) if coarser else None)
+        groups.setdefault(key, []).append(band)
+    return [(bands_, *key) for key, bands_ in groups.items()]
+
+
+def warn_resolution_read_overhead(
+    source: "Source", bands: List[str], resolution: float
+) -> None:
+    """Log one warning per distinct inefficient read, once per process.
+
+    Repeat ``mosaic()`` calls with the same request (a loop over dates, say)
+    would otherwise log the same warning every time.
+    """
+    for group_bands, read_res, overhead, coarser in resolution_read_overheads(
+        source, bands, resolution
+    ):
+        options = f"{read_res:g} m" + (f" or {coarser:g} m" if coarser else "")
+        message = (
+            f"Requested {resolution:g} m from source {source.name!r}, but the "
+            f"nearest level of {', '.join(group_bands)} at or below that is "
+            f"{read_res:g} m, so reads fetch about {overhead:.0f}x the data the "
+            f"output needs. {options} would read directly from the source. "
+            "(Shown once per session.)"
+        )
+        with _warned_lock:
+            if message in _warned_messages:
+                continue
+            _warned_messages.add(message)
+        logger.warning(message)

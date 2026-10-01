@@ -4,7 +4,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union, overload
 
 import numpy.typing as npt
 
-from .config import MosaicRequest
+from .config import DEFAULT_BANDS, MosaicRequest, warn_resolution_read_overhead
 from .gdal_env import apply_gdal_network_defaults
 from .geometry import Aoi, Bbox
 from .pipelines.bounds import run_bounds_pipeline
@@ -279,7 +279,14 @@ def mosaic(
             grid. If you need a lat/lon raster, reproject the mosaic
             afterwards (e.g. with ``gdalwarp``). In bounds/AOI mode, defaults
             to the UTM zone containing the AOI centroid. Ignored in grid mode.
-        resolution (int, optional): Output pixel size in metres. Defaults to 10.
+        resolution (int, optional): Output pixel size in metres. Coarser
+            resolutions read from the coarsest COG overview no coarser than
+            one output pixel, in every mode. When a request falls well between
+            a source's overview levels (at least 4x the pixels needed, e.g.
+            60 m from DEA's 10 m bands), a warning names the nearest efficient
+            resolutions, once per process. In grid mode, pick a resolution
+            that divides the 109,800 m tile evenly (e.g. 20, 60, 90, 120) or
+            pixels are stretched slightly to fit. Defaults to 10.
         resampling_method (str, optional): Rasterio resampling method used when
             reading source COGs onto the output grid. Options include "nearest",
             "bilinear", "cubic", "average", and "lanczos". Defaults to "nearest".
@@ -373,6 +380,9 @@ def mosaic(
     request.validate()
 
     source_obj = get_source(request.source)
+    warn_resolution_read_overhead(
+        source_obj, request.bands or DEFAULT_BANDS, request.resolution
+    )
 
     if request.bounds is not None or request.aoi is not None:
         return run_bounds_pipeline(request, source=source_obj)
