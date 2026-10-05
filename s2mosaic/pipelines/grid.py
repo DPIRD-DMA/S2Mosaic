@@ -15,6 +15,7 @@ from ..config import CLOUD_MASK_OCM, MOSAIC_FIRST, MosaicRequest
 from ..frequent_coverage import get_frequent_coverage
 from ..helpers import (
     MGRS_TILE_SIZE_M,
+    NoClearPixelsError,
     SceneFetchError,
     define_dates,
     get_band_template,
@@ -377,9 +378,19 @@ def stream_mosaic_pipeline(
         )
         report_dropped_scenes(dropped_scenes, total=n_scenes)
     if n_succeeded == 0:
-        raise RuntimeError(
-            f"All {n_scenes} scenes failed to fetch masks, no data to mosaic"
-        )
+        # The FIRST early-stop fires before any fetch when the coverage mask
+        # is empty, so no scene was checked for cloud.
+        if not coverage_mask.any():
+            raise RuntimeError(
+                f"Coverage mask is empty for all {n_scenes} scenes, no data to mosaic"
+            )
+        # A scene with no clear pixel is skipped without storing a mask, the
+        # same as a fetch failure, so tell the two apart by dropped_scenes.
+        if len(dropped_scenes) == n_scenes:
+            raise RuntimeError(
+                f"All {n_scenes} scenes failed to fetch masks, no data to mosaic"
+            )
+        raise NoClearPixelsError(n_scenes, n_failed=len(dropped_scenes))
 
     # Pull a sample profile for output georeferencing. Any valid scene's
     # first band will do; they all snap to the same MGRS grid.

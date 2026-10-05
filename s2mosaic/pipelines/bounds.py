@@ -40,6 +40,7 @@ from ..config import (
     MosaicRequest,
 )
 from ..helpers import (
+    NoClearPixelsError,
     SceneFetchError,
     SceneNoOverlap,
     define_dates,
@@ -583,10 +584,25 @@ def _stream_bounds_combo_masks(
         report_dropped_scenes(dropped_scenes, total=n_time)
 
     if not kept_combo_masks:
-        raise RuntimeError(
-            "No usable scenes: every scene was fully cloud-masked, invalid, "
-            "or failed to fetch"
-        )
+        # Scenes with no footprint overlap are neither failures nor masked;
+        # leave them out of the counts.
+        n_overlapping = len(valid_scene_idx)
+        if n_overlapping == 0:
+            raise RuntimeError(
+                f"None of the {n_time} scenes overlap the requested area"
+            )
+        # The FIRST early-stop fires before any fetch when the coverage mask
+        # is empty, so no scene was checked for cloud.
+        if not coverage_mask.any():
+            raise RuntimeError(
+                f"Coverage mask is empty for all {n_overlapping} overlapping "
+                "scenes, no data to mosaic"
+            )
+        if len(dropped_scenes) == n_overlapping:
+            raise RuntimeError(
+                f"All {n_overlapping} scenes failed to fetch masks, no data to mosaic"
+            )
+        raise NoClearPixelsError(n_overlapping, n_failed=len(dropped_scenes))
     return kept_combo_masks, dropped_scenes
 
 
@@ -621,8 +637,11 @@ def run_bounds_pipeline(
 
     Raises:
         ValueError: If no scenes are found for the requested AOI / date window.
-        RuntimeError: If scenes were found but every scene was fully
-            cloud-masked, invalid, or failed to fetch.
+        NoClearPixelsError: If scenes were found but none left a clear
+            pixel (fully cloud-masked or no-data). A ``RuntimeError``
+            subclass.
+        RuntimeError: If every overlapping scene failed to fetch, or no
+            scene overlaps the requested area.
     """
     bands = request.bands
     additional_query = request.additional_query

@@ -1,8 +1,9 @@
 import numpy as np
 import pandas as pd
+import pytest
 from rasterio.transform import from_origin
 
-from s2mosaic.helpers import SceneFetchError
+from s2mosaic.helpers import NoClearPixelsError, SceneFetchError
 from s2mosaic.pipelines.grid import stream_mosaic_pipeline
 from s2mosaic.sources import MPC
 from s2mosaic.stac import ITEM_COL
@@ -122,3 +123,124 @@ class TestGridOrderedMaskStreaming:
         captured = capsys.readouterr()
         assert "1/3 scenes dropped" in captured.err
         assert "scene-1" in captured.err
+
+
+class TestGridNoClearPixels:
+    """Issue #14: fully cloudy is not the same as failed to fetch.
+
+    A scene that downloads fine but has no clear pixel is skipped without a
+    stored mask, the same as a scene whose fetch failed. With nothing kept,
+    the pipeline used to report every such scene as a fetch failure.
+    """
+
+    _io = TestGridOrderedMaskStreaming()
+
+    def _run(self, monkeypatch, scene_masks, mosaic_method="mean"):
+        import s2mosaic.pipelines.grid as core_mod
+
+        self._io._patch_grid_pipeline_io(monkeypatch)
+
+        def fake_compute_one_scene_mask(**kwargs):
+            mask = scene_masks[kwargs["item"].id]
+            if isinstance(mask, Exception):
+                raise mask
+            return mask
+
+        monkeypatch.setattr(
+            core_mod, "_compute_one_scene_mask", fake_compute_one_scene_mask
+        )
+        return stream_mosaic_pipeline(
+            sorted_scenes=self._io._sorted_scenes(len(scene_masks)),
+            bands=["B04"],
+            coverage_mask=np.ones((4, 4), dtype=bool),
+            mosaic_method=mosaic_method,
+            cloud_mask="SCL",
+            source=MPC,
+            s2_scene_size=4,
+            tile_size=4,
+            tile_workers=1,
+        )
+
+    @pytest.mark.parametrize("mosaic_method", ["mean", "first", "percentile"])
+    def test_all_scenes_fully_masked_raises_no_clear_pixels(
+        self, monkeypatch, mosaic_method
+    ):
+        cloudy = np.zeros((4, 4), dtype=bool)
+
+        with pytest.raises(NoClearPixelsError) as exc_info:
+            self._run(
+                monkeypatch,
+                {"scene-0": cloudy, "scene-1": cloudy},
+                mosaic_method=mosaic_method,
+            )
+
+        message = str(exc_info.value)
+        assert "failed to fetch" not in message
+        assert "2 scenes were fully masked" in message
+        assert exc_info.value.n_scenes == 2
+        assert exc_info.value.n_failed == 0
+        # Existing ``except RuntimeError`` handlers keep catching it.
+        assert isinstance(exc_info.value, RuntimeError)
+
+    def test_all_scenes_failed_to_fetch_is_not_no_clear_pixels(self, monkeypatch):
+        failure = SceneFetchError("simulated transient network failure")
+
+        with pytest.raises(RuntimeError, match="failed to fetch") as exc_info:
+            self._run(monkeypatch, {"scene-0": failure, "scene-1": failure})
+
+        assert not isinstance(exc_info.value, NoClearPixelsError)
+
+    def test_mixed_failed_and_fully_masked_reports_both_counts(self, monkeypatch):
+        with pytest.raises(NoClearPixelsError) as exc_info:
+            self._run(
+                monkeypatch,
+                {
+                    "scene-0": np.zeros((4, 4), dtype=bool),
+                    "scene-1": SceneFetchError("simulated failure"),
+                    "scene-2": np.zeros((4, 4), dtype=bool),
+                },
+            )
+
+        message = str(exc_info.value)
+        assert "2 fully masked" in message
+        assert "1 failed to fetch" in message
+        assert exc_info.value.n_scenes == 3
+        assert exc_info.value.n_failed == 1
+
+    def test_no_clear_pixels_error_survives_pickling(self):
+        # Batch callers run mosaic() in worker processes, where the error
+        # crosses a pickle boundary.
+        import pickle
+
+        restored = pickle.loads(pickle.dumps(NoClearPixelsError(5, n_failed=2)))
+
+        assert isinstance(restored, NoClearPixelsError)
+        assert (restored.n_scenes, restored.n_failed) == (5, 2)
+        assert str(restored) == str(NoClearPixelsError(5, n_failed=2))
+
+    def test_first_with_empty_coverage_is_not_no_clear_pixels(self, monkeypatch):
+        # The FIRST early-stop fires before any fetch when nothing is in
+        # coverage, so no scene was checked for cloud.
+        import s2mosaic.pipelines.grid as core_mod
+
+        self._io._patch_grid_pipeline_io(monkeypatch)
+        monkeypatch.setattr(
+            core_mod,
+            "_compute_one_scene_mask",
+            lambda **_: np.ones((4, 4), dtype=bool),
+        )
+
+        with pytest.raises(RuntimeError, match="Coverage mask is empty") as exc_info:
+            stream_mosaic_pipeline(
+                sorted_scenes=self._io._sorted_scenes(2),
+                bands=["B04"],
+                coverage_mask=np.zeros((4, 4), dtype=bool),
+                mosaic_method="first",
+                cloud_mask="SCL",
+                source=MPC,
+                s2_scene_size=4,
+                tile_size=4,
+                tile_workers=1,
+            )
+
+        assert not isinstance(exc_info.value, NoClearPixelsError)

@@ -330,8 +330,10 @@ def mosaic(
     Raises:
         ValueError: If inputs fail validation, or if no scenes are found for the
             specified grid_id / bounds and time range.
-        RuntimeError: If scenes were found but all were fully cloud-masked or
-            invalid, or if every scene failed to fetch after retries.
+        NoClearPixelsError: If scenes were found but none left a clear pixel
+            (fully cloud-masked or no-data). Subclasses ``RuntimeError``;
+            ``n_failed`` counts any scenes that also failed to fetch.
+        RuntimeError: If every scene failed to fetch after retries.
 
     Note:
         - The function uses the STAC API to search for Sentinel-2 scenes.
