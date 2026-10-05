@@ -17,6 +17,14 @@ and read assets:
   provider doesn't expose one (callers then rely on ``intersects`` alone)
 - ``open_catalog(stac_io)``: open the STAC client; provider-specific options
   (e.g. MPC's ``sign_inplace`` modifier) live here
+- ``search_extension`` / ``base_filters``: whether searches use the Query
+  extension (MPC, AWS) or CQL2 (DEA), and CQL2 clauses every search carries
+  (DEA: ``final`` datasets only)
+- ``scl_lut`` / ``unsupported_bands``: translate a provider's own
+  classification into SCL codes for ``cloud_mask="SCL"`` (DEA's fmask), and
+  bands the provider doesn't publish, rejected at validation
+- ``asset_overviews``: per-band native resolution and COG overview factors,
+  used to warn when a requested resolution has no matching overview
 """
 
 from __future__ import annotations
@@ -52,6 +60,13 @@ def _mpc_sign(href: str) -> str:
     import planetary_computer
 
     return planetary_computer.sign(href)  # type: ignore[no-any-return, unused-ignore]
+
+
+def _overview_table(
+    groups: Dict[Tuple[int, Tuple[int, ...]], Tuple[str, ...]],
+) -> Dict[str, Tuple[int, Tuple[int, ...]]]:
+    """Flatten ``{(native_m, factors): bands}`` into a per-band table."""
+    return {band: key for key, bands in groups.items() for band in bands}
 
 
 # From processing baseline 04.00 (25 Jan 2022) ESA encodes L2A reflectance as
@@ -171,6 +186,13 @@ class Source:
     scl_lut: Optional[Tuple[int, ...]] = None
     # Canonical bands this source cannot serve; rejected at validation.
     unsupported_bands: FrozenSet[str] = frozenset()
+    # Canonical band -> (native resolution in metres, COG overview factors),
+    # used only to warn when a requested resolution has no matching overview
+    # (see ``read_resolution``). Measured on 2024 items of each provider;
+    # unlisted bands are never warned about.
+    asset_overviews: Dict[str, Tuple[int, Tuple[int, ...]]] = field(
+        default_factory=dict
+    )
 
     @property
     def collections(self) -> Tuple[str, ...]:
@@ -186,6 +208,21 @@ class Source:
         lut = np.asarray(self.scl_lut, dtype=np.uint8)
         scl: npt.NDArray[np.uint8] = lut[np.clip(arr, 0, len(lut) - 1)]
         return scl
+
+    def read_resolution(self, canonical: str, resolution: float) -> Optional[float]:
+        """Resolution a read of ``canonical`` at ``resolution`` fetches from.
+
+        GDAL reads from the coarsest overview whose factor does not exceed
+        the requested downsampling, else full resolution; bounds reads follow
+        the same rule (``geometry.overview_level_for_target``). Returns
+        ``None`` for bands with no recorded overviews.
+        """
+        entry = self.asset_overviews.get(canonical)
+        if entry is None:
+            return None
+        native, factors = entry
+        usable = [f for f in (1, *factors) if native * f <= resolution * (1 + 1e-9)]
+        return float(native * max(usable)) if usable else float(native)
 
     def block_size(self, canonical: str) -> int:
         """Internal COG block size for ``canonical`` band on this source."""
@@ -271,6 +308,22 @@ MPC = Source(
     sign=_mpc_sign,
     band_assets={},  # MPC uses canonical band IDs as asset keys
     _mgrs_query=_mpc_mgrs_query,
+    # Probed from 2024 items; MPC keeps overviews to 32x except on 60 m bands.
+    asset_overviews=_overview_table(
+        {
+            (10, (2, 4, 8, 16, 32)): (
+                "B02",
+                "B03",
+                "B04",
+                "B08",
+                "AOT",
+                "WVP",
+                "visual",
+            ),
+            (20, (2, 4, 8, 16, 32)): ("B05", "B06", "B07", "B8A", "B11", "B12", "SCL"),
+            (60, (2, 4, 8)): ("B01", "B09"),
+        }
+    ),
 )
 
 # Element 84 Earth Search v1. The ``sentinel-2-l2a`` collection here uses
@@ -318,6 +371,16 @@ AWS = Source(
     },
     default_block_size=512,
     _mgrs_query=_aws_mgrs_query,
+    # Probed from 2024 items. AOT is 60 m here (10 m on MPC), and B11 stops
+    # at 8x where the other 20 m bands go to 16x.
+    asset_overviews=_overview_table(
+        {
+            (10, (2, 4, 8, 16)): ("B02", "B03", "B04", "B08", "WVP", "visual"),
+            (20, (2, 4, 8, 16)): ("B05", "B06", "B07", "B8A", "B12", "SCL"),
+            (20, (2, 4, 8)): ("B11",),
+            (60, (2, 4, 8)): ("B01", "B09", "AOT"),
+        }
+    ),
     # Element 84 occasionally publishes an item before its COG conversion.
     # Its assets then point at the requester-pays JP2 archive
     # (``s3://sentinel-s2-l2a/...``), and every read fails without AWS
@@ -382,6 +445,15 @@ DEA = Source(
     # Every DEA asset uses 512-pixel blocks, the default.
     default_block_size=512,
     _mgrs_query=_dea_mgrs_filter,
+    # Probed from a 2023 item: DEA's overviews start at 8x, so between native
+    # resolution and 8x a read has no overview and fetches full resolution.
+    asset_overviews=_overview_table(
+        {
+            (10, (8, 16, 32)): ("B02", "B03", "B04", "B08"),
+            (20, (8, 16, 32)): ("B05", "B06", "B07", "B8A", "B11", "B12"),
+            (60, (8, 16, 32)): ("B01",),
+        }
+    ),
     readable_href_prefixes=(DEA_BUCKET_S3,),
     search_extension=SEARCH_CQL2,
     base_filters=(

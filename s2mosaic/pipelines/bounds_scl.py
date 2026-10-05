@@ -14,6 +14,7 @@ from rasterio.windows import Window, bounds as window_bounds, from_bounds
 
 from ..geometry import (
     Bbox,
+    overview_level_for_target,
     _SCL_ADAPTIVE_BLOCK_SAVING_FRACTION,
     _target_grid,
     _window_bounds_in_target,
@@ -31,8 +32,15 @@ def _read_band_at_target_window(
     target_width: int,
     target_height: int,
     rio_resampling: Any,
+    use_overviews: bool = False,
 ) -> npt.NDArray[Any]:
     """Read one band over ``read_bounds`` at target grid (width × height).
+
+    ``use_overviews`` warps from the COG overview matching the target
+    resolution instead of full resolution; see
+    ``geometry.overview_level_for_target``. Leave it off for categorical
+    assets such as SCL, whose overviews are not guaranteed to hold only real
+    classes.
 
     Uses ``WarpedVRT`` for both same-CRS and cross-CRS reads so the source
     extent is honoured uniformly: pixels whose centres fall outside the
@@ -51,7 +59,14 @@ def _read_band_at_target_window(
         -(read_bounds[3] - read_bounds[1]) / target_height,
         read_bounds[3],
     )
-    with rio.open(href) as src:
+    level = None
+    if use_overviews:
+        with rio.open(href) as src:
+            level = overview_level_for_target(
+                src, target_crs_obj, transform, target_width, target_height
+            )
+    open_kwargs = {} if level is None else {"overview_level": level}
+    with rio.open(href, **open_kwargs) as src:
         with WarpedVRT(
             src,
             crs=target_crs_obj,
