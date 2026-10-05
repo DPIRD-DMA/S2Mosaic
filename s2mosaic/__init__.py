@@ -10,7 +10,7 @@ except ImportError:
 
 from .coordinator import mosaic
 from .geometry import Aoi, Bbox
-from .helpers import SceneFetchError
+from .helpers import NoClearPixelsError, SceneFetchError
 from .sources import SOURCE_AWS, SOURCE_DEA, SOURCE_MPC
 
 
@@ -44,6 +44,7 @@ __all__ = [
     "Bbox",
     "set_log_level",
     "SceneFetchError",
+    "NoClearPixelsError",
     "SOURCE_AWS",
     "SOURCE_DEA",
     "SOURCE_MPC",

@@ -49,6 +49,35 @@ class SceneNoOverlap(SceneFetchError):
     """
 
 
+class NoClearPixelsError(RuntimeError):
+    """Raised when scenes were found but none left a clear pixel to mosaic.
+
+    Every scene that fetched was fully masked (cloud, shadow or no-data), so
+    re-running will not help, unlike a fetch failure. ``n_failed`` counts the
+    scenes that did fail to fetch; when it is non-zero those scenes might
+    still hold clear pixels and a retry could succeed. Subclasses
+    ``RuntimeError`` so existing ``except RuntimeError`` handlers still catch
+    it.
+    """
+
+    def __init__(self, n_scenes: int, n_failed: int = 0) -> None:
+        self.n_scenes = n_scenes
+        self.n_failed = n_failed
+        n_masked = n_scenes - n_failed
+        if n_failed:
+            message = (
+                f"No clear pixels to mosaic: of {n_scenes} scenes, "
+                f"{n_masked} fully masked (cloud/no-data) and "
+                f"{n_failed} failed to fetch"
+            )
+        else:
+            message = (
+                f"All {n_scenes} scenes were fully masked (cloud/no-data); "
+                "no clear pixels to mosaic"
+            )
+        super().__init__(message)
+
+
 def _exception_chain_summary(exc: BaseException) -> str:
     """Compactly format an exception plus its Python cause/context chain."""
     parts = []

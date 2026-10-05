@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 
 
+## [Unreleased]
+
+### Fixed
+- **A period with no clear pixels is no longer reported as a fetch failure ([#14](https://github.com/DPIRD-DMA/S2Mosaic/issues/14)).** In grid mode, a scene that downloaded and masked fine but had no clear pixel was skipped the same way as a scene whose fetch failed, so a fully cloudy month raised `All N scenes failed to fetch masks` right after logging the scene as `ok`. Bounds and AOI mode raised one message covering both causes. Both now raise `NoClearPixelsError`, exported from `s2mosaic`, when nothing failed or some scenes failed and the rest were fully masked. Its `n_scenes` and `n_failed` attributes let batch pipelines retry real fetch failures and accept an empty period as final. It subclasses `RuntimeError`, so existing `except RuntimeError` handlers still catch it. When every scene failed to fetch, the error is still a plain `RuntimeError` saying so. Bounds mode also gets its own message when no scene overlaps the requested area.
+
+
 ## [2.0.0b5] - 2026-10-05
 
 ### Added

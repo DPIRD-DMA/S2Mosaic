@@ -13,6 +13,7 @@ from s2mosaic.geometry import (
 )
 from s2mosaic.pipelines.bounds import _ResampledBoolMask, _mask_resolution_for_request
 from s2mosaic.pipelines.bounds_scl import _read_band_at_target_window
+from s2mosaic.helpers import NoClearPixelsError, SceneFetchError
 from s2mosaic.sources import MPC
 
 
@@ -1288,8 +1289,13 @@ class TestBoundsOcmContext:
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert warnings == []
 
-    def _stream_first_masks(self, monkeypatch, scene_masks, windows):
-        """Run the FIRST mask-streaming pass over fake scenes."""
+    def _stream_first_masks(
+        self, monkeypatch, scene_masks, windows, mosaic_method="first"
+    ):
+        """Run the mask-streaming pass over fake scenes (FIRST by default).
+
+        A ``scene_masks`` value that is an exception is raised by the fetch.
+        """
         import s2mosaic.pipelines.bounds as bounds_mod
 
         class FakeItemWithId:
@@ -1303,11 +1309,17 @@ class TestBoundsOcmContext:
             for i, item in enumerate(items):
                 if on_complete is not None:
                     on_complete(i)
-                yield i, fetch_fn(i, item)
+                # Like the real iterator, yield a fetch error rather than raise.
+                try:
+                    yield i, fetch_fn(i, item)
+                except Exception as exc:
+                    yield i, exc
 
         def fake_fetch_one_scl(
             item, source, bounds_target, target_crs, mask_resolution, scene_window
         ):
+            if isinstance(scene_masks[item.id], Exception):
+                raise scene_masks[item.id]
             mask = scene_masks[item.id].astype(np.uint8)
             return MaskFetch(
                 arr=mask,
@@ -1342,13 +1354,64 @@ class TestBoundsOcmContext:
             mask_h=2,
             coverage_mask=np.ones((2, 4), dtype=bool),
             cloud_mask="SCL",
-            mosaic_method="first",
+            mosaic_method=mosaic_method,
             tile_workers=1,
             ocm_batch_size=1,
             ocm_inference_dtype="fp32",
             scl_tile_specs=None,
             show_progress=False,
         )
+
+    @pytest.mark.parametrize("mosaic_method", ["mean", "first"])
+    def test_bounds_all_scenes_fully_masked_raises_no_clear_pixels(
+        self, monkeypatch, mosaic_method
+    ):
+        # Issue #14: a fully cloudy period must be distinguishable from a
+        # fetch failure, so batch callers can retry one and accept the other.
+        cloudy = np.zeros((2, 3), dtype=bool)
+
+        with pytest.raises(NoClearPixelsError) as exc_info:
+            self._stream_first_masks(
+                monkeypatch,
+                scene_masks={"scene-0": cloudy, "scene-1": cloudy},
+                windows=[(0, 0, 3, 2), (1, 0, 3, 2)],
+                mosaic_method=mosaic_method,
+            )
+
+        assert "failed to fetch" not in str(exc_info.value)
+        assert exc_info.value.n_scenes == 2
+        assert exc_info.value.n_failed == 0
+
+    def test_bounds_all_scenes_failed_to_fetch_is_not_no_clear_pixels(
+        self, monkeypatch
+    ):
+        failure = SceneFetchError("simulated transient network failure")
+
+        with pytest.raises(RuntimeError, match="failed to fetch") as exc_info:
+            self._stream_first_masks(
+                monkeypatch,
+                scene_masks={"scene-0": failure, "scene-1": failure},
+                windows=[(0, 0, 3, 2), (1, 0, 3, 2)],
+            )
+
+        assert not isinstance(exc_info.value, NoClearPixelsError)
+
+    def test_bounds_mixed_failed_and_fully_masked_reports_both_counts(
+        self, monkeypatch
+    ):
+        with pytest.raises(NoClearPixelsError) as exc_info:
+            self._stream_first_masks(
+                monkeypatch,
+                scene_masks={
+                    "scene-0": np.zeros((2, 3), dtype=bool),
+                    "scene-1": SceneFetchError("simulated failure"),
+                },
+                windows=[(0, 0, 3, 2), (1, 0, 3, 2)],
+            )
+
+        assert "1 fully masked" in str(exc_info.value)
+        assert "1 failed to fetch" in str(exc_info.value)
+        assert exc_info.value.n_failed == 1
 
     def test_bounds_first_stores_masks_unnarrowed(self, monkeypatch):
         """A later scene keeps the pixels an earlier one already claimed.
