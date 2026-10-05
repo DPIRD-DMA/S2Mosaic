@@ -591,6 +591,13 @@ def _stream_bounds_combo_masks(
             raise RuntimeError(
                 f"None of the {n_time} scenes overlap the requested area"
             )
+        # The FIRST early-stop fires before any fetch when the coverage mask
+        # is empty, so no scene was checked for cloud.
+        if not coverage_mask.any():
+            raise RuntimeError(
+                f"Coverage mask is empty for all {n_overlapping} overlapping "
+                "scenes, no data to mosaic"
+            )
         if len(dropped_scenes) == n_overlapping:
             raise RuntimeError(
                 f"All {n_overlapping} scenes failed to fetch masks, no data to mosaic"

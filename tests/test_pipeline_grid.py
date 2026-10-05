@@ -206,3 +206,41 @@ class TestGridNoClearPixels:
         assert "1 failed to fetch" in message
         assert exc_info.value.n_scenes == 3
         assert exc_info.value.n_failed == 1
+
+    def test_no_clear_pixels_error_survives_pickling(self):
+        # Batch callers run mosaic() in worker processes, where the error
+        # crosses a pickle boundary.
+        import pickle
+
+        restored = pickle.loads(pickle.dumps(NoClearPixelsError(5, n_failed=2)))
+
+        assert isinstance(restored, NoClearPixelsError)
+        assert (restored.n_scenes, restored.n_failed) == (5, 2)
+        assert str(restored) == str(NoClearPixelsError(5, n_failed=2))
+
+    def test_first_with_empty_coverage_is_not_no_clear_pixels(self, monkeypatch):
+        # The FIRST early-stop fires before any fetch when nothing is in
+        # coverage, so no scene was checked for cloud.
+        import s2mosaic.pipelines.grid as core_mod
+
+        self._io._patch_grid_pipeline_io(monkeypatch)
+        monkeypatch.setattr(
+            core_mod,
+            "_compute_one_scene_mask",
+            lambda **_: np.ones((4, 4), dtype=bool),
+        )
+
+        with pytest.raises(RuntimeError, match="Coverage mask is empty") as exc_info:
+            stream_mosaic_pipeline(
+                sorted_scenes=self._io._sorted_scenes(2),
+                bands=["B04"],
+                coverage_mask=np.zeros((4, 4), dtype=bool),
+                mosaic_method="first",
+                cloud_mask="SCL",
+                source=MPC,
+                s2_scene_size=4,
+                tile_size=4,
+                tile_workers=1,
+            )
+
+        assert not isinstance(exc_info.value, NoClearPixelsError)

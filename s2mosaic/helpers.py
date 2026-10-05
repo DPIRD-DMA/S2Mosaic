@@ -77,6 +77,12 @@ class NoClearPixelsError(RuntimeError):
             )
         super().__init__(message)
 
+    def __reduce__(self) -> Tuple[Any, ...]:
+        # The default rebuilds from ``args`` (the message), which __init__
+        # can't take. Batch callers run mosaic() in worker processes, so the
+        # error has to cross a pickle boundary intact.
+        return (type(self), (self.n_scenes, self.n_failed))
+
 
 def _exception_chain_summary(exc: BaseException) -> str:
     """Compactly format an exception plus its Python cause/context chain."""
