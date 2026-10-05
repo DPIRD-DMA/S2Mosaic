@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 
-## [Unreleased]
+## [2.0.0b5] - 2026-10-05
 
 ### Added
 - **`examples/Example use - DEA.ipynb`**: a DEA walkthrough covering a first mosaic, a side-by-side with AWS (showing the seasonal NBART-vs-L2A gap), fmask against OmniCloudMask, a full tile at 90 m, the bands DEA rejects, and saving to disk.
