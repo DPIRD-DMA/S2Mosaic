@@ -416,7 +416,7 @@ class TestDeaItemProperties:
     # Issue #16: DEA serialises an fmask statistic it couldn't compute as the
     # string "NaN". One such item used to crash the whole period.
     @pytest.mark.parametrize("bad", ["NaN", float("nan"), None, "inf"])
-    def test_unknown_fmask_stats_rank_as_fully_cloudy(self, bad, caplog):
+    def test_unknown_fmask_stats_score_as_fully_cloudy(self, bad, caplog):
         item = _dea_item("bad-stats", **{"fmask:cloud": bad, "fmask:cloud_shadow": bad})
 
         with caplog.at_level(logging.WARNING, logger="s2mosaic.stac"):
@@ -448,6 +448,40 @@ class TestDeaItemProperties:
 
         assert [it.id for it in ordered[ITEM_COL]] == ["clear", "cloudy", "unknown"]
 
+    def test_unknown_stats_scene_still_takes_its_orbits_turn(self):
+        # Scoring an unknown scene as fully cloudy only orders it within its
+        # orbit: valid_data order round-robins orbits, so a lone unknown
+        # scene on its own orbit is still tried second. Intended, and the
+        # read-time cloud mask decides what it contributes.
+        def scene(scene_id, orbit, cloud):
+            return _dea_item(
+                scene_id,
+                **{
+                    "sat:relative_orbit": orbit,
+                    "fmask:cloud": cloud,
+                    "fmask:cloud_shadow": 0.0 if cloud != "NaN" else "NaN",
+                },
+            )
+
+        df = add_item_info(
+            ItemCollection(
+                [
+                    scene("clear-2", 60, 20.0),
+                    scene("unknown", 61, "NaN"),
+                    scene("clear-1", 60, 0.0),
+                    scene("clear-3", 60, 40.0),
+                ]
+            )
+        )
+        ordered = sort_items(df, scene_order="valid_data")
+
+        assert [it.id for it in ordered[ITEM_COL]] == [
+            "clear-1",
+            "unknown",
+            "clear-2",
+            "clear-3",
+        ]
+
     def test_missing_fmask_stats_still_count_as_no_cloud(self):
         item = _dea_item(**{"s2:nodata_pixel_percentage": 0.0})
         del item.properties["fmask:cloud"]
@@ -467,6 +501,49 @@ class TestDeaItemProperties:
         )
         good = add_item_info(ItemCollection([item]))[GOOD_DATA_PCT_COL].iloc[0]
         assert good == pytest.approx(50 * 0.85, abs=0.1)
+
+
+class TestDeaNanStatsThroughGridPipeline:
+    """Issue #16 end to end: a "NaN"-stats item must not stop mosaic()."""
+
+    def test_nan_stats_item_reaches_the_mask_phase_sorted_last(self, monkeypatch):
+        import s2mosaic.pipelines.grid as grid_mod
+        from s2mosaic import mosaic
+
+        good = _dea_item("good")
+        bad = _dea_item(
+            "bad",
+            **{
+                "fmask:cloud": "NaN",
+                "fmask:cloud_shadow": "NaN",
+                "fmask:clear": "NaN",
+                "eo:cloud_cover": 0.0,
+            },
+        )
+        monkeypatch.setattr(
+            grid_mod,
+            "search_for_items",
+            lambda **_: ItemCollection([bad, good]),
+        )
+        captured = {}
+
+        def fake_stream(**kwargs):
+            captured["ids"] = [it.id for it in kwargs["sorted_scenes"][ITEM_COL]]
+            raise RuntimeError("stop-here")
+
+        monkeypatch.setattr(grid_mod, "stream_mosaic_pipeline", fake_stream)
+
+        # Before the fix this raised TypeError in add_item_info.
+        with pytest.raises(RuntimeError, match="stop-here"):
+            mosaic(
+                grid_id="50HMK",
+                start_year=2023,
+                duration_days=1,
+                bands=["B04"],
+                source=SOURCE_DEA,
+            )
+
+        assert captured["ids"] == ["good", "bad"]
 
 
 class TestDeaBandValidation:
