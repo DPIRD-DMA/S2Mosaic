@@ -1,4 +1,5 @@
 import logging
+import math
 import re
 from datetime import date
 from typing import Any, Dict, Iterable, List, Optional
@@ -72,6 +73,20 @@ def _datastrip_id(props: Dict[str, Any]) -> Any:
     return props.get("s2:datastrip_id", props.get("sentinel:datastrip_id"))
 
 
+def _finite_float(value: Any) -> Optional[float]:
+    """``value`` as a float, or None if it isn't a finite number.
+
+    DEA serialises an fmask statistic it couldn't compute as the string
+    ``"NaN"`` (JSON has no NaN literal), so catalogue numbers can't be fed
+    straight into arithmetic.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _nodata_percentage(item: Any) -> float:
     """Percent of the item's tile grid that holds no data.
 
@@ -79,11 +94,13 @@ def _nodata_percentage(item: Any) -> float:
     so it is estimated from the item's footprint against its raster grid
     (``proj:shape`` x ``proj:transform``); on 50HMH that lands within 0.6
     points of MPC's published figure for the same acquisitions. Falls back
-    to 0, the previous behaviour, when neither is available.
+    to 0, the previous behaviour, when neither is available. A published
+    value that isn't a finite number is ignored.
     """
     props = item.properties
-    if "s2:nodata_pixel_percentage" in props:
-        return float(props["s2:nodata_pixel_percentage"])
+    published = _finite_float(props.get("s2:nodata_pixel_percentage"))
+    if published is not None:
+        return published
     try:
         code = props.get("proj:epsg") or props["proj:code"]
         epsg = int(str(code).split(":")[-1])
@@ -112,14 +129,31 @@ def add_item_info(items: ItemCollection) -> DataFrame:
         props = item.properties
         data_pct = 100 - _nodata_percentage(item)
 
-        # DEA publishes fmask percentages instead of Sen2Cor's.
-        cloud = props.get(
+        # DEA publishes fmask percentages instead of Sen2Cor's. A missing
+        # key counts as no cloud, as before.
+        raw_cloud = props.get(
             "s2:high_proba_clouds_percentage", props.get("fmask:cloud", 0)
         )
-        shadow = props.get(
+        raw_shadow = props.get(
             "s2:cloud_shadow_percentage", props.get("fmask:cloud_shadow", 0)
         )
-        good_data_pct = data_pct * (1 - (cloud + shadow) / 100)
+        cloud = _finite_float(raw_cloud)
+        shadow = _finite_float(raw_shadow)
+        if cloud is None or shadow is None:
+            # Present but not a number. The scene is kept, but ranked as
+            # fully cloudy so scenes with known stats go first.
+            # ``eo:cloud_cover`` is no fallback: it was 0.0 on the item that
+            # turned this up.
+            logger.warning(
+                "Item %s has non-numeric cloud stats (cloud=%r, shadow=%r); "
+                "ranking it last",
+                item.id,
+                raw_cloud,
+                raw_shadow,
+            )
+            good_data_pct = 0.0
+        else:
+            good_data_pct = data_pct * (1 - (cloud + shadow) / 100)
         capture_date = item.datetime
 
         items_list.append(

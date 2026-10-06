@@ -6,6 +6,7 @@ hrefs, int16 pixels with nodata -999, fmask in place of SCL, and ``odc:`` /
 ``sentinel:`` / ``fmask:`` properties in place of ``s2:`` ones.
 """
 
+import logging
 from dataclasses import replace
 from datetime import date, datetime, timezone
 
@@ -35,6 +36,7 @@ from s2mosaic.sources import (
 )
 from s2mosaic.stac import (
     GOOD_DATA_PCT_COL,
+    ITEM_COL,
     _extract_mgrs_tile,
     add_item_info,
     drop_unreadable_items,
@@ -42,6 +44,7 @@ from s2mosaic.stac import (
     query_to_cql2,
     search_for_items,
     search_params,
+    sort_items,
 )
 
 SIZE = 8
@@ -409,6 +412,61 @@ class TestDeaItemProperties:
         item = _dea_item(**{"s2:nodata_pixel_percentage": 20.0})
         good = add_item_info(ItemCollection([item]))[GOOD_DATA_PCT_COL].iloc[0]
         assert good == pytest.approx(80 * 0.85)
+
+    # Issue #16: DEA serialises an fmask statistic it couldn't compute as the
+    # string "NaN". One such item used to crash the whole period.
+    @pytest.mark.parametrize("bad", ["NaN", float("nan"), None, "inf"])
+    def test_unknown_fmask_stats_rank_as_fully_cloudy(self, bad, caplog):
+        item = _dea_item("bad-stats", **{"fmask:cloud": bad, "fmask:cloud_shadow": bad})
+
+        with caplog.at_level(logging.WARNING, logger="s2mosaic.stac"):
+            good = add_item_info(ItemCollection([item]))[GOOD_DATA_PCT_COL].iloc[0]
+
+        assert good == 0.0
+        assert "bad-stats" in caplog.text
+
+    def test_one_unknown_fmask_stat_is_enough_to_rank_last(self):
+        item = _dea_item(**{"fmask:cloud": 10.0, "fmask:cloud_shadow": "NaN"})
+        good = add_item_info(ItemCollection([item]))[GOOD_DATA_PCT_COL].iloc[0]
+        assert good == 0.0
+
+    def test_scene_with_unknown_stats_sorts_after_known_ones(self):
+        # eo:cloud_cover is 0.0 on the real item, so it is no safe fallback.
+        unknown = _dea_item(
+            "unknown",
+            **{
+                "fmask:cloud": "NaN",
+                "fmask:cloud_shadow": "NaN",
+                "eo:cloud_cover": 0.0,
+            },
+        )
+        cloudy = _dea_item("cloudy", **{"fmask:cloud": 90.0, "fmask:cloud_shadow": 5.0})
+        clear = _dea_item("clear", **{"fmask:cloud": 0.0, "fmask:cloud_shadow": 0.0})
+
+        df = add_item_info(ItemCollection([unknown, cloudy, clear]))
+        ordered = sort_items(df, scene_order="valid_data")
+
+        assert [it.id for it in ordered[ITEM_COL]] == ["clear", "cloudy", "unknown"]
+
+    def test_missing_fmask_stats_still_count_as_no_cloud(self):
+        item = _dea_item(**{"s2:nodata_pixel_percentage": 0.0})
+        del item.properties["fmask:cloud"]
+        del item.properties["fmask:cloud_shadow"]
+        good = add_item_info(ItemCollection([item]))[GOOD_DATA_PCT_COL].iloc[0]
+        assert good == pytest.approx(100.0)
+
+    def test_non_numeric_published_nodata_falls_back_to_footprint(self):
+        west_half = box(399960, 6500020 - 109800, 399960 + 54900, 6500020)
+        import pyproj
+        from shapely.ops import transform
+
+        to_4326 = pyproj.Transformer.from_crs(32750, 4326, always_xy=True).transform
+        item = _dea_item(
+            geometry=mapping(transform(to_4326, west_half)),
+            **{"s2:nodata_pixel_percentage": "NaN"},
+        )
+        good = add_item_info(ItemCollection([item]))[GOOD_DATA_PCT_COL].iloc[0]
+        assert good == pytest.approx(50 * 0.85, abs=0.1)
 
 
 class TestDeaBandValidation:
