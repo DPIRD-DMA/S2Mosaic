@@ -425,12 +425,12 @@ class TestDeaItemProperties:
         assert good == 0.0
         assert "bad-stats" in caplog.text
 
-    def test_one_unknown_fmask_stat_is_enough_to_rank_last(self):
+    def test_one_unknown_fmask_stat_is_enough_to_score_as_cloudy(self):
         item = _dea_item(**{"fmask:cloud": 10.0, "fmask:cloud_shadow": "NaN"})
         good = add_item_info(ItemCollection([item]))[GOOD_DATA_PCT_COL].iloc[0]
         assert good == 0.0
 
-    def test_scene_with_unknown_stats_sorts_after_known_ones(self):
+    def test_unknown_stats_sort_after_known_scenes_of_the_same_orbit(self):
         # eo:cloud_cover is 0.0 on the real item, so it is no safe fallback.
         unknown = _dea_item(
             "unknown",

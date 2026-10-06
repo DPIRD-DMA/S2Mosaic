@@ -140,13 +140,15 @@ def add_item_info(items: ItemCollection) -> DataFrame:
         cloud = _finite_float(raw_cloud)
         shadow = _finite_float(raw_shadow)
         if cloud is None or shadow is None:
-            # Present but not a number. The scene is kept, but ranked as
-            # fully cloudy so scenes with known stats go first.
+            # Present but not a number. The scene is kept and scored like a
+            # fully cloudy one, so ``valid_data`` order puts it after the
+            # known scenes of its orbit (orbits still take turns, and
+            # ``oldest``/``newest`` ignore the score).
             # ``eo:cloud_cover`` is no fallback: it was 0.0 on the item that
             # turned this up.
             logger.warning(
                 "Item %s has non-numeric cloud stats (cloud=%r, shadow=%r); "
-                "ranking it last",
+                "scoring it as fully cloudy",
                 item.id,
                 raw_cloud,
                 raw_shadow,
