@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 
-## [Unreleased]
+## [2.0.0b7] - 2026-10-06
 
 ### Fixed
 - **A DEA item with `"NaN"` cloud statistics no longer crashes the whole period ([#16](https://github.com/DPIRD-DMA/S2Mosaic/issues/16)).** DEA serialises an fmask percentage it couldn't compute as the string `"NaN"`. `add_item_info` used `fmask:cloud` and `fmask:cloud_shadow` in arithmetic as published, so one such item raised `TypeError` before any scene was read. The real case is `3e452a8d-b5f1-4aeb-a7a9-261655a724cb` on 50JLL (2025-01-28), which threw away the 10 good scenes in January 2025. Cloud, shadow and `s2:nodata_pixel_percentage` are now read as numbers, and anything non-numeric or non-finite (`"NaN"`, `None`, NaN, infinity) counts as unknown. A scene with unknown cloud stats is kept, scored like a fully cloudy one, and named in a warning. Under `scene_order="valid_data"` it goes after the known scenes of its orbit, though orbits still take turns, and `oldest`/`newest` order by date as before. `eo:cloud_cover` is not used as a fallback: it was `0.0` on that item. An unknown nodata percentage falls back to the footprint estimate. These values only order scenes; the cloud mask still comes from OmniCloudMask or fmask at read time.
